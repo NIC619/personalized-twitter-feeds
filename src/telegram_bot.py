@@ -23,6 +23,7 @@ class TelegramCurator:
         bot_token: str,
         chat_id: str,
         feedback_callback: Optional[Callable] = None,
+        favorite_author_callback: Optional[Callable] = None,
     ):
         """Initialize Telegram bot.
 
@@ -30,10 +31,12 @@ class TelegramCurator:
             bot_token: Telegram bot token from BotFather
             chat_id: Target chat ID to send messages to
             feedback_callback: Async callback function(tweet_id, vote, message_id)
+            favorite_author_callback: Async callback function(username)
         """
         self.bot_token = bot_token
         self.chat_id = chat_id
         self.feedback_callback = feedback_callback
+        self.favorite_author_callback = favorite_author_callback
         self.application: Optional[Application] = None
         logger.info("Telegram bot initialized")
 
@@ -96,36 +99,71 @@ class TelegramCurator:
         query = update.callback_query
         await query.answer()
 
-        # Parse callback data: "vote:{tweet_id}:{up|down}"
         data = query.data
-        if not data.startswith("vote:"):
-            return
 
-        parts = data.split(":")
-        if len(parts) != 3:
-            return
+        # Handle vote: "vote:{tweet_id}:{up|down}"
+        if data.startswith("vote:"):
+            parts = data.split(":")
+            if len(parts) != 3:
+                return
 
-        _, tweet_id, vote = parts
+            _, tweet_id, vote = parts
 
-        # Update message to show vote recorded
-        vote_emoji = "👍" if vote == "up" else "👎"
-        await query.edit_message_reply_markup(
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton(f"Voted: {vote_emoji}", callback_data="voted")]
-            ])
-        )
+            # Update message to show vote recorded
+            vote_emoji = "👍" if vote == "up" else "👎"
+            await query.edit_message_reply_markup(
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton(f"Voted: {vote_emoji}", callback_data="voted")]
+                ])
+            )
 
-        # Call feedback callback if provided
-        if self.feedback_callback:
-            try:
-                await self.feedback_callback(
-                    tweet_id=tweet_id,
-                    vote=vote,
-                    telegram_message_id=query.message.message_id,
-                )
-                logger.info(f"Feedback recorded: tweet={tweet_id}, vote={vote}")
-            except Exception as e:
-                logger.error(f"Error recording feedback: {e}")
+            # Call feedback callback if provided
+            if self.feedback_callback:
+                try:
+                    await self.feedback_callback(
+                        tweet_id=tweet_id,
+                        vote=vote,
+                        telegram_message_id=query.message.message_id,
+                    )
+                    logger.info(f"Feedback recorded: tweet={tweet_id}, vote={vote}")
+                except Exception as e:
+                    logger.error(f"Error recording feedback: {e}")
+
+        # Handle favorite author: "fav:{username}:{tweet_id}"
+        elif data.startswith("fav:"):
+            parts = data.split(":")
+            if len(parts) != 3:
+                return
+
+            _, username, tweet_id = parts
+
+            # Update button to show author favorited
+            await query.edit_message_reply_markup(
+                reply_markup=InlineKeyboardMarkup([
+                    [
+                        InlineKeyboardButton(
+                            "👍",
+                            callback_data=f"vote:{tweet_id}:up"
+                        ),
+                        InlineKeyboardButton(
+                            "👎",
+                            callback_data=f"vote:{tweet_id}:down"
+                        ),
+                        InlineKeyboardButton(
+                            f"⭐ @{username}",
+                            callback_data="favorited"
+                        ),
+                    ]
+                ])
+            )
+
+            # Call favorite author callback if provided
+            if self.favorite_author_callback:
+                try:
+                    await self.favorite_author_callback(username=username)
+                    logger.info(f"Favorite author recorded: @{username}")
+                except Exception as e:
+                    logger.error(f"Error recording favorite author: {e}")
 
     async def send_tweet(
         self,
@@ -157,12 +195,16 @@ class TelegramCurator:
         keyboard = InlineKeyboardMarkup([
             [
                 InlineKeyboardButton(
-                    "👍 Relevant",
+                    "👍",
                     callback_data=f"vote:{tweet['tweet_id']}:up"
                 ),
                 InlineKeyboardButton(
-                    "👎 Not Relevant",
+                    "👎",
                     callback_data=f"vote:{tweet['tweet_id']}:down"
+                ),
+                InlineKeyboardButton(
+                    "⭐ Author",
+                    callback_data=f"fav:{tweet['author_username']}:{tweet['tweet_id']}"
                 ),
             ]
         ])

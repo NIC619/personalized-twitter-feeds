@@ -227,3 +227,69 @@ class DatabaseClient:
         except Exception as e:
             logger.error(f"Error getting tweet: {e}")
             raise
+
+    def save_favorite_author(self, username: str) -> dict:
+        """Save an author as a favorite.
+
+        Args:
+            username: Twitter username (without @)
+
+        Returns:
+            Saved favorite author record
+        """
+        username = username.lower().lstrip("@")
+
+        record = {
+            "username": username,
+        }
+
+        try:
+            result = (
+                self.client.table("favorite_authors")
+                .upsert(record, on_conflict="username")
+                .execute()
+            )
+            logger.info(f"Saved favorite author: @{username}")
+            return result.data[0] if result.data else {}
+        except Exception as e:
+            logger.error(f"Error saving favorite author: {e}")
+            raise
+
+    def get_favorite_authors(self) -> list[str]:
+        """Get list of favorite author usernames.
+
+        Returns:
+            List of usernames
+        """
+        try:
+            result = (
+                self.client.table("favorite_authors")
+                .select("username")
+                .execute()
+            )
+            return [r["username"] for r in result.data]
+        except Exception as e:
+            logger.error(f"Error getting favorite authors: {e}")
+            raise
+
+    def is_favorite_author(self, username: str) -> bool:
+        """Check if an author is a favorite.
+
+        Args:
+            username: Twitter username
+
+        Returns:
+            True if author is a favorite
+        """
+        username = username.lower().lstrip("@")
+        try:
+            result = (
+                self.client.table("favorite_authors")
+                .select("username")
+                .eq("username", username)
+                .execute()
+            )
+            return len(result.data) > 0
+        except Exception as e:
+            logger.error(f"Error checking favorite author: {e}")
+            return False

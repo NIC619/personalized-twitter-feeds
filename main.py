@@ -105,11 +105,16 @@ def init_components(settings, num_tweets=None, hours=None):
     async def on_feedback(tweet_id: str, vote: str, telegram_message_id: int):
         await feedback_handler(db, tweet_id, vote, telegram_message_id)
 
+    # Create favorite author callback
+    async def on_favorite_author(username: str):
+        db.save_favorite_author(username)
+
     # Initialize Telegram bot
     telegram = TelegramCurator(
         bot_token=settings.telegram_bot_token,
         chat_id=settings.telegram_chat_id,
         feedback_callback=on_feedback,
+        favorite_author_callback=on_favorite_author,
     )
 
     # Initialize curator

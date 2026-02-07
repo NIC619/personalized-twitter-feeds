@@ -53,6 +53,18 @@ CREATE INDEX IF NOT EXISTS idx_feedback_tweet_id ON feedback(tweet_id);
 CREATE INDEX IF NOT EXISTS idx_feedback_vote ON feedback(user_vote);
 CREATE INDEX IF NOT EXISTS idx_feedback_voted_at ON feedback(voted_at DESC);
 
+-- Table: favorite_authors
+-- Stores Twitter accounts the user likes
+CREATE TABLE IF NOT EXISTS favorite_authors (
+    id BIGSERIAL PRIMARY KEY,
+    username TEXT UNIQUE NOT NULL,  -- Twitter username (lowercase, without @)
+    added_at TIMESTAMP DEFAULT NOW(),
+    notes TEXT  -- Optional notes about why they're favorited
+);
+
+-- Index for favorite_authors
+CREATE INDEX IF NOT EXISTS idx_favorite_authors_username ON favorite_authors(username);
+
 -- Table: tweet_embeddings (Phase 2)
 -- Stores vector embeddings for similarity search
 CREATE TABLE IF NOT EXISTS tweet_embeddings (
@@ -117,7 +129,7 @@ def print_schema():
     print()
     print("After running the SQL:")
     print("1. Go to Supabase Dashboard > Table Editor")
-    print("2. Verify tables exist: tweets, feedback, tweet_embeddings")
+    print("2. Verify tables exist: tweets, feedback, favorite_authors, tweet_embeddings")
     print("3. Check that pgvector extension is enabled")
     print()
 
