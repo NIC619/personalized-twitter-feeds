@@ -102,6 +102,20 @@ class ClaudeFilter:
                     tweet["filter_reason"] = "Not scored by Claude"
                     tweet["filtered"] = False
 
+            # Log all tweet scores for debugging
+            logger.info("--- Tweet Scores ---")
+            for tweet in tweets:
+                status = "PASS" if tweet.get("filtered") else "SKIP"
+                score = tweet.get("filter_score", 0)
+                reason = tweet.get("filter_reason", "")
+                author = tweet.get("author_username", "unknown")
+                text_preview = tweet.get("text", "")[:60].replace("\n", " ")
+                logger.info(
+                    f"[{status}] Score {score:3d} | @{author}: {text_preview}..."
+                )
+                logger.info(f"         Reason: {reason}")
+            logger.info("--- End Scores ---")
+
             logger.info(
                 f"Filtered {len(filtered_tweets)}/{len(tweets)} tweets "
                 f"(threshold: {threshold})"
