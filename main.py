@@ -51,19 +51,37 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Run only the Telegram bot (for receiving feedback)",
     )
+    parser.add_argument(
+        "-n", "--num-tweets",
+        type=int,
+        default=None,
+        help="Number of tweets to fetch (overrides MAX_TWEETS from .env)",
+    )
+    parser.add_argument(
+        "--hours",
+        type=int,
+        default=None,
+        help="Hours to look back (overrides FETCH_HOURS from .env)",
+    )
     return parser.parse_args()
 
 
-def init_components(settings):
+def init_components(settings, num_tweets=None, hours=None):
     """Initialize all components.
 
     Args:
         settings: Application settings
+        num_tweets: Override for max tweets to fetch
+        hours: Override for hours to look back
 
     Returns:
         Tuple of (twitter, claude, telegram, db, curator)
     """
     logger.info("Initializing components...")
+
+    # Apply overrides
+    max_tweets = num_tweets if num_tweets is not None else settings.max_tweets
+    fetch_hours = hours if hours is not None else settings.fetch_hours
 
     # Initialize Twitter client
     twitter = TwitterClient(
@@ -100,12 +118,12 @@ def init_components(settings):
         claude=claude,
         telegram=telegram,
         db=db,
-        fetch_hours=settings.fetch_hours,
-        max_tweets=settings.max_tweets,
+        fetch_hours=fetch_hours,
+        max_tweets=max_tweets,
         filter_threshold=settings.filter_threshold,
     )
 
-    logger.info("All components initialized")
+    logger.info(f"All components initialized (max_tweets={max_tweets}, fetch_hours={fetch_hours})")
     return twitter, claude, telegram, db, curator
 
 
@@ -247,7 +265,9 @@ def main() -> int:
         if args.test:
             asyncio.run(run_test(settings))
         elif args.once:
-            _, _, telegram, _, curator = init_components(settings)
+            _, _, telegram, _, curator = init_components(
+                settings, num_tweets=args.num_tweets, hours=args.hours
+            )
             asyncio.run(run_once(curator, telegram))
         elif args.schedule:
             _, _, telegram, _, curator = init_components(settings)
@@ -257,7 +277,9 @@ def main() -> int:
             asyncio.run(run_bot_only(telegram))
         else:
             # Default: run once
-            _, _, telegram, _, curator = init_components(settings)
+            _, _, telegram, _, curator = init_components(
+                settings, num_tweets=args.num_tweets, hours=args.hours
+            )
             asyncio.run(run_once(curator, telegram))
 
         return 0
