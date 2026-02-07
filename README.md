@@ -139,6 +139,31 @@ Run just the Telegram bot (for receiving feedback on already-sent tweets):
 python main.py --bot-only
 ```
 
+### Count Timeline Tweets
+
+Check how many tweets are in your Twitter timeline (fetches directly from Twitter):
+
+```bash
+# Last 24 hours
+python scripts/count_twitter_timeline.py
+
+# Last 48 hours, fetch up to 300 tweets
+python scripts/count_twitter_timeline.py --hours 48 --max 300
+```
+
+Use this to check if `MAX_TWEETS` is high enough to capture all your timeline activity.
+
+### CLI Options
+
+```bash
+python main.py --once              # Run once with default settings
+python main.py --once -n 20        # Fetch only 20 tweets
+python main.py --once --hours 48   # Look back 48 hours instead of 24
+python main.py --schedule          # Run daily at configured hour
+python main.py --bot-only          # Run Telegram bot only
+python main.py --test              # Test all components
+```
+
 ## Project Structure
 
 ```
@@ -153,8 +178,9 @@ twitter-curator/
 │   ├── embeddings.py       # Phase 2: RAG embeddings (stub)
 │   └── scheduler.py        # Daily curation orchestration
 ├── scripts/
-│   ├── setup_database.py   # Database schema SQL
-│   └── test_components.py  # Component testing
+│   ├── setup_database.py          # Database schema SQL
+│   ├── test_components.py         # Component testing
+│   └── count_twitter_timeline.py  # Count tweets from Twitter
 ├── main.py                 # CLI entry point
 ├── requirements.txt
 └── .env.example
