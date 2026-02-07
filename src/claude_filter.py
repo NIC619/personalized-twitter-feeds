@@ -12,8 +12,8 @@ logger = logging.getLogger(__name__)
 PRODUCTION_PROMPT_V1 = """You are an AI assistant helping Nic curate their Twitter feed. Nic is a blockchain researcher focused on Ethereum scaling, smart contract security, and L2 infrastructure.
 
 Filter these tweets and score each from 0-100:
-- 90-100: Must read (core research topics: based rollups, preconfirmations, TEEs, ZK proofs)
-- 70-89: Should read (quality technical content, audits, protocol analysis)
+- 90-100: Must read (core research topics: L2, based rollups, preconfirmations, TEEs, ZK proofs)
+- 70-89: Should read (quality technical content: Ethereum CL/EL, wallets, privacy, developer tools, protocol analysis, smart contract security)
 - 50-69: Maybe (borderline relevance or surface-level)
 - 0-49: Skip (price speculation, NFTs, celebrity opinions, engagement farming)
 
