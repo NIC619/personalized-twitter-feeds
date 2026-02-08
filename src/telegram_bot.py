@@ -110,23 +110,31 @@ class TelegramCurator:
             _, tweet_id, vote = parts
 
             if vote == "up":
-                # Thumbs up - record immediately
+                # Thumbs up - show category buttons
                 await query.edit_message_reply_markup(
                     reply_markup=InlineKeyboardMarkup([
-                        [InlineKeyboardButton("Voted: 👍", callback_data="voted")]
+                        [
+                            InlineKeyboardButton(
+                                "Tech content",
+                                callback_data=f"reason:{tweet_id}:up:tech"
+                            ),
+                            InlineKeyboardButton(
+                                "Non-tech insight",
+                                callback_data=f"reason:{tweet_id}:up:non_tech"
+                            ),
+                        ],
+                        [
+                            InlineKeyboardButton(
+                                "Soft skills",
+                                callback_data=f"reason:{tweet_id}:up:soft_skills"
+                            ),
+                            InlineKeyboardButton(
+                                "Life wisdom",
+                                callback_data=f"reason:{tweet_id}:up:life_wisdom"
+                            ),
+                        ],
                     ])
                 )
-
-                if self.feedback_callback:
-                    try:
-                        await self.feedback_callback(
-                            tweet_id=tweet_id,
-                            vote="up",
-                            telegram_message_id=query.message.message_id,
-                        )
-                        logger.info(f"Feedback recorded: tweet={tweet_id}, vote=up")
-                    except Exception as e:
-                        logger.error(f"Error recording feedback: {e}")
 
             elif vote == "down":
                 # Thumbs down - show reason buttons
@@ -135,45 +143,52 @@ class TelegramCurator:
                         [
                             InlineKeyboardButton(
                                 "No tech content",
-                                callback_data=f"reason:{tweet_id}:no_tech"
+                                callback_data=f"reason:{tweet_id}:down:no_tech"
                             ),
                             InlineKeyboardButton(
                                 "Event/promo",
-                                callback_data=f"reason:{tweet_id}:event_promo"
+                                callback_data=f"reason:{tweet_id}:down:event_promo"
                             ),
                         ],
                         [
                             InlineKeyboardButton(
                                 "Low quality",
-                                callback_data=f"reason:{tweet_id}:low_quality"
+                                callback_data=f"reason:{tweet_id}:down:low_quality"
                             ),
                             InlineKeyboardButton(
                                 "Not relevant",
-                                callback_data=f"reason:{tweet_id}:not_relevant"
+                                callback_data=f"reason:{tweet_id}:down:not_relevant"
                             ),
                         ],
                     ])
                 )
 
-        # Handle downvote reason: "reason:{tweet_id}:{reason_code}"
+        # Handle vote reason: "reason:{tweet_id}:{up|down}:{reason_code}"
         elif data.startswith("reason:"):
             parts = data.split(":")
-            if len(parts) != 3:
+            if len(parts) != 4:
                 return
 
-            _, tweet_id, reason_code = parts
+            _, tweet_id, vote, reason_code = parts
 
             reason_labels = {
+                # Upvote reasons
+                "tech": "Tech content",
+                "non_tech": "Non-tech insight",
+                "soft_skills": "Soft skills",
+                "life_wisdom": "Life wisdom",
+                # Downvote reasons
                 "no_tech": "No tech content",
                 "event_promo": "Event/promo",
                 "low_quality": "Low quality",
                 "not_relevant": "Not relevant",
             }
             reason = reason_labels.get(reason_code, reason_code)
+            vote_emoji = "👍" if vote == "up" else "👎"
 
             await query.edit_message_reply_markup(
                 reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton(f"👎 {reason}", callback_data="voted")]
+                    [InlineKeyboardButton(f"{vote_emoji} {reason}", callback_data="voted")]
                 ])
             )
 
@@ -181,12 +196,12 @@ class TelegramCurator:
                 try:
                     await self.feedback_callback(
                         tweet_id=tweet_id,
-                        vote="down",
+                        vote=vote,
                         telegram_message_id=query.message.message_id,
                         notes=reason,
                     )
                     logger.info(
-                        f"Feedback recorded: tweet={tweet_id}, vote=down, reason={reason}"
+                        f"Feedback recorded: tweet={tweet_id}, vote={vote}, reason={reason}"
                     )
                 except Exception as e:
                     logger.error(f"Error recording feedback: {e}")
