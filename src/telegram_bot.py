@@ -348,15 +348,29 @@ class TelegramCurator:
             logger.error(f"Failed to send error notification: {e}")
 
     async def run_polling(self) -> None:
-        """Start the bot in polling mode."""
+        """Start the bot in polling mode (works within existing event loop)."""
         if not self.application:
             await self.initialize()
 
         logger.info("Starting Telegram bot polling...")
-        await self.application.run_polling()
+        await self.application.start()
+        await self.application.updater.start_polling()
+
+        # Keep running until interrupted
+        try:
+            while True:
+                await asyncio.sleep(1)
+        except asyncio.CancelledError:
+            pass
+        finally:
+            await self.shutdown()
 
     async def shutdown(self) -> None:
         """Shutdown the bot gracefully."""
         if self.application:
+            if self.application.updater.running:
+                await self.application.updater.stop()
+            if self.application.running:
+                await self.application.stop()
             await self.application.shutdown()
             logger.info("Telegram bot shut down")

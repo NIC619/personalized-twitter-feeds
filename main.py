@@ -25,6 +25,10 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Silence noisy polling logs
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
+
 
 def parse_args() -> argparse.Namespace:
     """Parse command line arguments."""
@@ -174,18 +178,12 @@ async def run_scheduled(
         minute=0,
     )
 
-    # Run both the scheduler and the Telegram bot
-    try:
-        # Run initial curation
-        logger.info("Running initial curation...")
-        await curator.run_daily_curation()
+    # Run initial curation, then start polling
+    logger.info("Running initial curation...")
+    await curator.run_daily_curation()
 
-        # Start polling for Telegram updates
-        await telegram.run_polling()
-    except KeyboardInterrupt:
-        logger.info("Received interrupt, shutting down...")
-    finally:
-        await telegram.shutdown()
+    # Start polling for Telegram updates (blocks until interrupted)
+    await telegram.run_polling()
 
 
 async def run_bot_only(telegram: TelegramCurator) -> None:
@@ -197,13 +195,7 @@ async def run_bot_only(telegram: TelegramCurator) -> None:
     logger.info("Running Telegram bot only...")
 
     await telegram.initialize()
-
-    try:
-        await telegram.run_polling()
-    except KeyboardInterrupt:
-        logger.info("Received interrupt, shutting down...")
-    finally:
-        await telegram.shutdown()
+    await telegram.run_polling()
 
 
 async def run_test(settings) -> None:
