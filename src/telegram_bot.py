@@ -109,23 +109,85 @@ class TelegramCurator:
 
             _, tweet_id, vote = parts
 
-            # Update message to show vote recorded
-            vote_emoji = "👍" if vote == "up" else "👎"
+            if vote == "up":
+                # Thumbs up - record immediately
+                await query.edit_message_reply_markup(
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("Voted: 👍", callback_data="voted")]
+                    ])
+                )
+
+                if self.feedback_callback:
+                    try:
+                        await self.feedback_callback(
+                            tweet_id=tweet_id,
+                            vote="up",
+                            telegram_message_id=query.message.message_id,
+                        )
+                        logger.info(f"Feedback recorded: tweet={tweet_id}, vote=up")
+                    except Exception as e:
+                        logger.error(f"Error recording feedback: {e}")
+
+            elif vote == "down":
+                # Thumbs down - show reason buttons
+                await query.edit_message_reply_markup(
+                    reply_markup=InlineKeyboardMarkup([
+                        [
+                            InlineKeyboardButton(
+                                "No tech content",
+                                callback_data=f"reason:{tweet_id}:no_tech"
+                            ),
+                            InlineKeyboardButton(
+                                "Event/promo",
+                                callback_data=f"reason:{tweet_id}:event_promo"
+                            ),
+                        ],
+                        [
+                            InlineKeyboardButton(
+                                "Low quality",
+                                callback_data=f"reason:{tweet_id}:low_quality"
+                            ),
+                            InlineKeyboardButton(
+                                "Not relevant",
+                                callback_data=f"reason:{tweet_id}:not_relevant"
+                            ),
+                        ],
+                    ])
+                )
+
+        # Handle downvote reason: "reason:{tweet_id}:{reason_code}"
+        elif data.startswith("reason:"):
+            parts = data.split(":")
+            if len(parts) != 3:
+                return
+
+            _, tweet_id, reason_code = parts
+
+            reason_labels = {
+                "no_tech": "No tech content",
+                "event_promo": "Event/promo",
+                "low_quality": "Low quality",
+                "not_relevant": "Not relevant",
+            }
+            reason = reason_labels.get(reason_code, reason_code)
+
             await query.edit_message_reply_markup(
                 reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton(f"Voted: {vote_emoji}", callback_data="voted")]
+                    [InlineKeyboardButton(f"👎 {reason}", callback_data="voted")]
                 ])
             )
 
-            # Call feedback callback if provided
             if self.feedback_callback:
                 try:
                     await self.feedback_callback(
                         tweet_id=tweet_id,
-                        vote=vote,
+                        vote="down",
                         telegram_message_id=query.message.message_id,
+                        notes=reason,
                     )
-                    logger.info(f"Feedback recorded: tweet={tweet_id}, vote={vote}")
+                    logger.info(
+                        f"Feedback recorded: tweet={tweet_id}, vote=down, reason={reason}"
+                    )
                 except Exception as e:
                     logger.error(f"Error recording feedback: {e}")
 

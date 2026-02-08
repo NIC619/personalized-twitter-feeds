@@ -83,10 +83,24 @@ class DailyCurator:
                 logger.info("No tweets to process")
                 return stats
 
-            # Step 2: Filter tweets with Claude
+            # Step 1b: Deduplicate - remove tweets already processed
+            new_tweets = self._deduplicate_tweets(tweets)
+            stats["new"] = len(new_tweets)
+            stats["skipped_duplicates"] = len(tweets) - len(new_tweets)
+
+            if stats["skipped_duplicates"] > 0:
+                logger.info(
+                    f"Skipped {stats['skipped_duplicates']} already-processed tweets"
+                )
+
+            if not new_tweets:
+                logger.info("No new tweets to process")
+                return stats
+
+            # Step 2: Filter new tweets with Claude
             logger.info("Step 2: Filtering tweets with Claude...")
             filtered_tweets = self.claude.filter_tweets(
-                tweets,
+                new_tweets,
                 threshold=self.filter_threshold,
             )
             stats["filtered"] = len(filtered_tweets)
@@ -95,7 +109,7 @@ class DailyCurator:
             # Step 3: Save all tweets to database (including non-filtered)
             logger.info("Step 3: Saving tweets to database...")
             # Update original tweets with filter results
-            tweet_map = {t["tweet_id"]: t for t in tweets}
+            tweet_map = {t["tweet_id"]: t for t in new_tweets}
             for ft in filtered_tweets:
                 tweet_map[ft["tweet_id"]] = ft
 
@@ -132,6 +146,27 @@ class DailyCurator:
 
             return stats
 
+    def _deduplicate_tweets(self, tweets: list[dict]) -> list[dict]:
+        """Remove tweets that are already in the database.
+
+        Skips tweets that have already been:
+        - Sent to Telegram, OR
+        - Already scored by Claude (filtered or not)
+
+        Args:
+            tweets: List of tweet dictionaries
+
+        Returns:
+            List of new tweets not yet processed
+        """
+        new_tweets = []
+        for tweet in tweets:
+            existing = self.db.get_tweet_by_id(tweet["tweet_id"])
+            if existing and existing.get("filter_score") is not None:
+                continue
+            new_tweets.append(tweet)
+        return new_tweets
+
     def schedule_daily(self, hour: int = 9, minute: int = 0) -> None:
         """Schedule daily curation run.
 
@@ -159,6 +194,7 @@ async def feedback_handler(
     tweet_id: str,
     vote: str,
     telegram_message_id: int,
+    notes: str = None,
 ) -> None:
     """Handle feedback from Telegram buttons.
 
@@ -167,13 +203,15 @@ async def feedback_handler(
         tweet_id: Twitter ID of the tweet
         vote: 'up' or 'down'
         telegram_message_id: Telegram message ID
+        notes: Optional reason for the vote
     """
     try:
         db.save_feedback(
             tweet_id=tweet_id,
             vote=vote,
             telegram_message_id=telegram_message_id,
+            notes=notes,
         )
-        logger.info(f"Saved feedback: tweet={tweet_id}, vote={vote}")
+        logger.info(f"Saved feedback: tweet={tweet_id}, vote={vote}, notes={notes}")
     except Exception as e:
         logger.error(f"Error saving feedback: {e}")

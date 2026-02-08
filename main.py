@@ -106,8 +106,8 @@ def init_components(settings, num_tweets=None, hours=None):
     )
 
     # Create feedback callback
-    async def on_feedback(tweet_id: str, vote: str, telegram_message_id: int):
-        await feedback_handler(db, tweet_id, vote, telegram_message_id)
+    async def on_feedback(tweet_id: str, vote: str, telegram_message_id: int, notes: str = None):
+        await feedback_handler(db, tweet_id, vote, telegram_message_id, notes=notes)
 
     # Create favorite author callback
     async def on_favorite_author(username: str):
