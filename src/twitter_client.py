@@ -65,6 +65,7 @@ class TwitterClient:
             "entities",
             "author_id",
             "conversation_id",
+            "referenced_tweets",
         ]
         user_fields = ["username", "name", "profile_image_url"]
         expansions = ["author_id"]
@@ -173,12 +174,17 @@ class TwitterClient:
         """
         metrics = tweet.public_metrics or {}
 
+        # Detect retweets via referenced_tweets
+        referenced = getattr(tweet, "referenced_tweets", None) or []
+        is_retweet = any(ref["type"] == "retweeted" for ref in referenced)
+
         return {
             "tweet_id": str(tweet.id),
             "author_username": author.username,
             "author_name": author.name,
             "text": tweet.text,
             "created_at": tweet.created_at.isoformat() if tweet.created_at else None,
+            "is_retweet": is_retweet,
             "metrics": {
                 "likes": metrics.get("like_count", 0),
                 "retweets": metrics.get("retweet_count", 0),

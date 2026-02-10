@@ -97,10 +97,30 @@ class DailyCurator:
                 logger.info("No new tweets to process")
                 return stats
 
+            # Step 1c: Skip retweets from non-favorite authors
+            favorite_authors = set(self.db.get_favorite_authors())
+            tweets_for_filtering = []
+            skipped_retweets = 0
+            for tweet in new_tweets:
+                if tweet.get("is_retweet") and tweet["author_username"].lower() not in favorite_authors:
+                    skipped_retweets += 1
+                else:
+                    tweets_for_filtering.append(tweet)
+
+            stats["skipped_retweets"] = skipped_retweets
+            if skipped_retweets > 0:
+                logger.info(
+                    f"Skipped {skipped_retweets} retweets from non-favorite authors"
+                )
+
+            if not tweets_for_filtering:
+                logger.info("No tweets remaining after retweet filter")
+                return stats
+
             # Step 2: Filter new tweets with Claude
             logger.info("Step 2: Filtering tweets with Claude...")
             filtered_tweets = self.claude.filter_tweets(
-                new_tweets,
+                tweets_for_filtering,
                 threshold=self.filter_threshold,
             )
             stats["filtered"] = len(filtered_tweets)

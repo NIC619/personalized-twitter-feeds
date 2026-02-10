@@ -57,6 +57,7 @@ class DatabaseClient:
                 "metrics": tweet.get("metrics"),
                 "url": tweet["url"],
                 "raw_data": tweet.get("raw_data"),
+                "is_retweet": tweet.get("is_retweet", False),
                 "filtered": tweet.get("filtered", False),
                 "filter_score": tweet.get("filter_score"),
                 "filter_reason": tweet.get("filter_reason"),
