@@ -4,6 +4,7 @@ import asyncio
 import logging
 from typing import Callable, Optional
 
+import telegram.error
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import (
     Application,
@@ -97,7 +98,10 @@ class TelegramCurator:
     ) -> None:
         """Handle feedback button press."""
         query = update.callback_query
-        await query.answer()
+        try:
+            await query.answer()
+        except telegram.error.BadRequest:
+            logger.warning(f"Callback query expired, processing anyway: {query.data}")
 
         data = query.data
 
