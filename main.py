@@ -109,9 +109,13 @@ def init_components(settings, num_tweets=None, hours=None):
     async def on_feedback(tweet_id: str, vote: str, telegram_message_id: int, notes: str = None):
         await feedback_handler(db, tweet_id, vote, telegram_message_id, notes=notes)
 
-    # Create favorite author callback
-    async def on_favorite_author(username: str):
-        db.save_favorite_author(username)
+    # Create favorite author callback (toggle: muted→default, default→favorite)
+    async def on_favorite_author(username: str) -> str:
+        return db.toggle_favorite(username)
+
+    # Create mute author callback (toggle: favorite→default, default→muted)
+    async def on_mute_author(username: str) -> str:
+        return db.toggle_mute(username)
 
     # Initialize Telegram bot
     telegram = TelegramCurator(
@@ -119,6 +123,7 @@ def init_components(settings, num_tweets=None, hours=None):
         chat_id=settings.telegram_chat_id,
         feedback_callback=on_feedback,
         favorite_author_callback=on_favorite_author,
+        mute_author_callback=on_mute_author,
     )
 
     # Initialize curator
@@ -130,6 +135,8 @@ def init_components(settings, num_tweets=None, hours=None):
         fetch_hours=fetch_hours,
         max_tweets=max_tweets,
         filter_threshold=settings.filter_threshold,
+        favorite_threshold_offset=settings.favorite_threshold_offset,
+        muted_threshold_offset=settings.muted_threshold_offset,
     )
 
     logger.info(f"All components initialized (max_tweets={max_tweets}, fetch_hours={fetch_hours})")

@@ -25,6 +25,7 @@ class TelegramCurator:
         chat_id: str,
         feedback_callback: Optional[Callable] = None,
         favorite_author_callback: Optional[Callable] = None,
+        mute_author_callback: Optional[Callable] = None,
     ):
         """Initialize Telegram bot.
 
@@ -32,12 +33,14 @@ class TelegramCurator:
             bot_token: Telegram bot token from BotFather
             chat_id: Target chat ID to send messages to
             feedback_callback: Async callback function(tweet_id, vote, message_id)
-            favorite_author_callback: Async callback function(username)
+            favorite_author_callback: Async callback function(username) → state string
+            mute_author_callback: Async callback function(username) → state string
         """
         self.bot_token = bot_token
         self.chat_id = chat_id
         self.feedback_callback = feedback_callback
         self.favorite_author_callback = favorite_author_callback
+        self.mute_author_callback = mute_author_callback
         self.application: Optional[Application] = None
         logger.info("Telegram bot initialized")
 
@@ -218,33 +221,39 @@ class TelegramCurator:
 
             _, username, tweet_id = parts
 
-            # Update button to show author favorited
-            await query.edit_message_reply_markup(
-                reply_markup=InlineKeyboardMarkup([
-                    [
-                        InlineKeyboardButton(
-                            "👍",
-                            callback_data=f"vote:{tweet_id}:up"
-                        ),
-                        InlineKeyboardButton(
-                            "👎",
-                            callback_data=f"vote:{tweet_id}:down"
-                        ),
-                        InlineKeyboardButton(
-                            f"⭐ @{username}",
-                            callback_data="favorited"
-                        ),
-                    ]
-                ])
-            )
-
-            # Call favorite author callback if provided
+            state = None
             if self.favorite_author_callback:
                 try:
-                    await self.favorite_author_callback(username=username)
-                    logger.info(f"Favorite author recorded: @{username}")
+                    state = await self.favorite_author_callback(username=username)
+                    logger.info(f"Toggle favorite @{username} → {state}")
                 except Exception as e:
-                    logger.error(f"Error recording favorite author: {e}")
+                    logger.error(f"Error toggling favorite author: {e}")
+
+            label = f"⭐ @{username}" if state == "favorited" else f"⭐ Author"
+            await query.edit_message_reply_markup(
+                reply_markup=self._make_tweet_buttons(tweet_id, username, fav_label=label)
+            )
+
+        # Handle mute author: "mute:{username}:{tweet_id}"
+        elif data.startswith("mute:"):
+            parts = data.split(":")
+            if len(parts) != 3:
+                return
+
+            _, username, tweet_id = parts
+
+            state = None
+            if self.mute_author_callback:
+                try:
+                    state = await self.mute_author_callback(username=username)
+                    logger.info(f"Toggle mute @{username} → {state}")
+                except Exception as e:
+                    logger.error(f"Error toggling mute author: {e}")
+
+            label = f"🔇 @{username}" if state == "muted" else f"🔇 Mute"
+            await query.edit_message_reply_markup(
+                reply_markup=self._make_tweet_buttons(tweet_id, username, mute_label=label)
+            )
 
     async def send_tweet(
         self,
@@ -273,22 +282,7 @@ class TelegramCurator:
         message = self._format_tweet_message(tweet)
 
         # Create inline keyboard with feedback buttons
-        keyboard = InlineKeyboardMarkup([
-            [
-                InlineKeyboardButton(
-                    "👍",
-                    callback_data=f"vote:{tweet['tweet_id']}:up"
-                ),
-                InlineKeyboardButton(
-                    "👎",
-                    callback_data=f"vote:{tweet['tweet_id']}:down"
-                ),
-                InlineKeyboardButton(
-                    "⭐ Author",
-                    callback_data=f"fav:{tweet['author_username']}:{tweet['tweet_id']}"
-                ),
-            ]
-        ])
+        keyboard = self._make_tweet_buttons(tweet["tweet_id"], tweet["author_username"])
 
         try:
             sent_message = await self.application.bot.send_message(
@@ -303,6 +297,35 @@ class TelegramCurator:
         except Exception as e:
             logger.error(f"Error sending tweet to Telegram: {e}")
             return None
+
+    @staticmethod
+    def _make_tweet_buttons(
+        tweet_id: str,
+        username: str,
+        fav_label: str = "⭐ Author",
+        mute_label: str = "🔇 Mute",
+    ) -> InlineKeyboardMarkup:
+        """Build the two-row inline keyboard for a tweet.
+
+        Args:
+            tweet_id: Twitter ID
+            username: Author username
+            fav_label: Label for favorite button
+            mute_label: Label for mute button
+
+        Returns:
+            InlineKeyboardMarkup with two rows
+        """
+        return InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("👍", callback_data=f"vote:{tweet_id}:up"),
+                InlineKeyboardButton("👎", callback_data=f"vote:{tweet_id}:down"),
+            ],
+            [
+                InlineKeyboardButton(fav_label, callback_data=f"fav:{username}:{tweet_id}"),
+                InlineKeyboardButton(mute_label, callback_data=f"mute:{username}:{tweet_id}"),
+            ],
+        ])
 
     def _format_tweet_message(self, tweet: dict) -> str:
         """Format tweet for Telegram message.

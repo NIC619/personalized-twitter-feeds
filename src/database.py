@@ -294,3 +294,143 @@ class DatabaseClient:
         except Exception as e:
             logger.error(f"Error checking favorite author: {e}")
             return False
+
+    def remove_favorite_author(self, username: str) -> None:
+        """Remove an author from favorites.
+
+        Args:
+            username: Twitter username (without @)
+        """
+        username = username.lower().lstrip("@")
+        try:
+            self.client.table("favorite_authors").delete().eq(
+                "username", username
+            ).execute()
+            logger.info(f"Removed favorite author: @{username}")
+        except Exception as e:
+            logger.error(f"Error removing favorite author: {e}")
+            raise
+
+    def save_muted_author(self, username: str) -> dict:
+        """Save an author as muted.
+
+        Args:
+            username: Twitter username (without @)
+
+        Returns:
+            Saved muted author record
+        """
+        username = username.lower().lstrip("@")
+        record = {"username": username}
+        try:
+            result = (
+                self.client.table("muted_authors")
+                .upsert(record, on_conflict="username")
+                .execute()
+            )
+            logger.info(f"Saved muted author: @{username}")
+            return result.data[0] if result.data else {}
+        except Exception as e:
+            logger.error(f"Error saving muted author: {e}")
+            raise
+
+    def get_muted_authors(self) -> list[str]:
+        """Get list of muted author usernames.
+
+        Returns:
+            List of usernames
+        """
+        try:
+            result = (
+                self.client.table("muted_authors")
+                .select("username")
+                .execute()
+            )
+            return [r["username"] for r in result.data]
+        except Exception as e:
+            logger.error(f"Error getting muted authors: {e}")
+            raise
+
+    def is_muted_author(self, username: str) -> bool:
+        """Check if an author is muted.
+
+        Args:
+            username: Twitter username
+
+        Returns:
+            True if author is muted
+        """
+        username = username.lower().lstrip("@")
+        try:
+            result = (
+                self.client.table("muted_authors")
+                .select("username")
+                .eq("username", username)
+                .execute()
+            )
+            return len(result.data) > 0
+        except Exception as e:
+            logger.error(f"Error checking muted author: {e}")
+            return False
+
+    def remove_muted_author(self, username: str) -> None:
+        """Remove an author from muted list.
+
+        Args:
+            username: Twitter username (without @)
+        """
+        username = username.lower().lstrip("@")
+        try:
+            self.client.table("muted_authors").delete().eq(
+                "username", username
+            ).execute()
+            logger.info(f"Removed muted author: @{username}")
+        except Exception as e:
+            logger.error(f"Error removing muted author: {e}")
+            raise
+
+    def toggle_favorite(self, username: str) -> str:
+        """Toggle favorite status for an author.
+
+        If muted: remove mute, reset to default.
+        If default: promote to favorite.
+        If already favorite: no-op (stays favorite).
+
+        Args:
+            username: Twitter username
+
+        Returns:
+            New state: "favorited" or "unfavorited" (removed mute)
+        """
+        username = username.lower().lstrip("@")
+        if self.is_muted_author(username):
+            self.remove_muted_author(username)
+            logger.info(f"Unmuted @{username} → default")
+            return "unmuted"
+        else:
+            self.save_favorite_author(username)
+            logger.info(f"Favorited @{username}")
+            return "favorited"
+
+    def toggle_mute(self, username: str) -> str:
+        """Toggle mute status for an author.
+
+        If favorited: remove star, reset to default.
+        If default: demote to muted.
+        If already muted: no-op (stays muted).
+
+        Args:
+            username: Twitter username
+
+        Returns:
+            New state: "muted" or "unmuted" (removed star)
+        """
+        username = username.lower().lstrip("@")
+        if self.is_favorite_author(username):
+            self.remove_favorite_author(username)
+            logger.info(f"Unfavorited @{username} → default")
+            return "unfavorited"
+        else:
+            self.save_muted_author(username)
+            logger.info(f"Muted @{username}")
+            return "muted"

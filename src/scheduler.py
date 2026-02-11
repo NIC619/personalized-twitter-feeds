@@ -27,6 +27,8 @@ class DailyCurator:
         fetch_hours: int = 24,
         max_tweets: int = 100,
         filter_threshold: int = 70,
+        favorite_threshold_offset: int = 20,
+        muted_threshold_offset: int = 15,
     ):
         """Initialize daily curator with all components.
 
@@ -37,7 +39,9 @@ class DailyCurator:
             db: Database client
             fetch_hours: Hours to look back for tweets
             max_tweets: Maximum tweets to fetch
-            filter_threshold: Minimum score to send
+            filter_threshold: Default threshold for authors
+            favorite_threshold_offset: How much lower for starred authors
+            muted_threshold_offset: How much higher for muted authors
         """
         self.twitter = twitter
         self.claude = claude
@@ -45,8 +49,15 @@ class DailyCurator:
         self.db = db
         self.fetch_hours = fetch_hours
         self.max_tweets = max_tweets
-        self.filter_threshold = filter_threshold
-        logger.info("DailyCurator initialized")
+        self.default_threshold = filter_threshold
+        self.favorite_author_threshold = filter_threshold - favorite_threshold_offset
+        self.muted_author_threshold = filter_threshold + muted_threshold_offset
+        # Claude floor = lowest tier so all potentially relevant tweets get scored
+        self.filter_threshold = self.favorite_author_threshold
+        logger.info(
+            f"DailyCurator initialized (thresholds: favorite={self.favorite_author_threshold}, "
+            f"default={self.default_threshold}, muted={self.muted_author_threshold})"
+        )
 
     async def run_daily_curation(self) -> dict:
         """Run the full curation workflow.
@@ -97,8 +108,11 @@ class DailyCurator:
                 logger.info("No new tweets to process")
                 return stats
 
-            # Step 1c: Skip retweets from non-favorite authors
+            # Step 1c: Load author tiers
             favorite_authors = set(self.db.get_favorite_authors())
+            muted_authors = set(self.db.get_muted_authors())
+
+            # Skip retweets from non-favorite authors
             tweets_for_filtering = []
             skipped_retweets = 0
             for tweet in new_tweets:
@@ -117,14 +131,50 @@ class DailyCurator:
                 logger.info("No tweets remaining after retweet filter")
                 return stats
 
-            # Step 2: Filter new tweets with Claude
-            logger.info("Step 2: Filtering tweets with Claude...")
-            filtered_tweets = self.claude.filter_tweets(
+            # Step 2: Score tweets with Claude (floor threshold gets all 50+ tweets)
+            logger.info("Step 2: Scoring tweets with Claude...")
+            scored_tweets = self.claude.filter_tweets(
                 tweets_for_filtering,
                 threshold=self.filter_threshold,
             )
+
+            # Step 2b: Apply per-author thresholds
+            filtered_tweets = []
+            tier_counts = {"favorite": 0, "muted": 0, "default": 0}
+            for tweet in scored_tweets:
+                author = tweet["author_username"].lower()
+                score = tweet.get("filter_score", 0)
+
+                if author in muted_authors:
+                    tier = "muted"
+                    threshold = self.muted_author_threshold
+                elif author in favorite_authors:
+                    tier = "favorite"
+                    threshold = self.favorite_author_threshold
+                else:
+                    tier = "default"
+                    threshold = self.default_threshold
+
+                passed = score >= threshold
+                tweet["filtered"] = passed
+                tier_counts[tier] += 1
+
+                if passed:
+                    filtered_tweets.append(tweet)
+                    logger.info(
+                        f"[{tier}] @{author} score={score} threshold={threshold} → PASS"
+                    )
+                else:
+                    logger.info(
+                        f"[{tier}] @{author} score={score} threshold={threshold} → SKIP"
+                    )
+
             stats["filtered"] = len(filtered_tweets)
-            logger.info(f"Filtered to {len(filtered_tweets)} relevant tweets")
+            stats["tier_breakdown"] = tier_counts
+            logger.info(
+                f"Filtered to {len(filtered_tweets)} tweets "
+                f"(favorite={tier_counts['favorite']}, default={tier_counts['default']}, muted={tier_counts['muted']})"
+            )
 
             # Step 3: Save all tweets to database (including non-filtered)
             logger.info("Step 3: Saving tweets to database...")

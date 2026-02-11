@@ -65,6 +65,18 @@ CREATE TABLE IF NOT EXISTS favorite_authors (
 -- Index for favorite_authors
 CREATE INDEX IF NOT EXISTS idx_favorite_authors_username ON favorite_authors(username);
 
+-- Table: muted_authors
+-- Stores Twitter accounts the user wants stricter filtering for
+CREATE TABLE IF NOT EXISTS muted_authors (
+    id BIGSERIAL PRIMARY KEY,
+    username TEXT UNIQUE NOT NULL,  -- Twitter username (lowercase, without @)
+    added_at TIMESTAMP DEFAULT NOW(),
+    notes TEXT  -- Optional notes about why they're muted
+);
+
+-- Index for muted_authors
+CREATE INDEX IF NOT EXISTS idx_muted_authors_username ON muted_authors(username);
+
 -- Table: tweet_embeddings (Phase 2)
 -- Stores vector embeddings for similarity search
 CREATE TABLE IF NOT EXISTS tweet_embeddings (
