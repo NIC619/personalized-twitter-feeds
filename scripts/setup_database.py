@@ -93,8 +93,22 @@ CREATE INDEX IF NOT EXISTS idx_tweet_embeddings ON tweet_embeddings
 USING ivfflat (embedding vector_cosine_ops)
 WITH (lists = 100);
 
+-- Row Level Security: enable on all tables, allow anon role full access
+ALTER TABLE public.tweets ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.feedback ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.favorite_authors ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.muted_authors ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.tweet_embeddings ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY "anon_all" ON public.tweets FOR ALL TO anon USING (true) WITH CHECK (true);
+CREATE POLICY "anon_all" ON public.feedback FOR ALL TO anon USING (true) WITH CHECK (true);
+CREATE POLICY "anon_all" ON public.favorite_authors FOR ALL TO anon USING (true) WITH CHECK (true);
+CREATE POLICY "anon_all" ON public.muted_authors FOR ALL TO anon USING (true) WITH CHECK (true);
+CREATE POLICY "anon_all" ON public.tweet_embeddings FOR ALL TO anon USING (true) WITH CHECK (true);
+
 -- Optional: Create a view for tweets with feedback
-CREATE OR REPLACE VIEW tweets_with_feedback AS
+CREATE OR REPLACE VIEW tweets_with_feedback
+WITH (security_invoker = true) AS
 SELECT
     t.*,
     f.user_vote,
