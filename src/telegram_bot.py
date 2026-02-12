@@ -42,6 +42,8 @@ class TelegramCurator:
         self.favorite_author_callback = favorite_author_callback
         self.mute_author_callback = mute_author_callback
         self.application: Optional[Application] = None
+        self._pending_feedback: dict[str, dict] = {}  # tweet_id → pending save info
+        self._tweet_authors: dict[str, str] = {}  # tweet_id → username
         logger.info("Telegram bot initialized")
 
     async def initialize(self) -> None:
@@ -192,26 +194,91 @@ class TelegramCurator:
             }
             reason = reason_labels.get(reason_code, reason_code)
             vote_emoji = "👍" if vote == "up" else "👎"
+            message_id = query.message.message_id
 
+            # Cancel any existing pending feedback for this tweet
+            if tweet_id in self._pending_feedback:
+                self._pending_feedback[tweet_id]["task"].cancel()
+
+            # Show confirmation with undo button
             await query.edit_message_reply_markup(
                 reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton(f"{vote_emoji} {reason}", callback_data="voted")]
+                    [
+                        InlineKeyboardButton(
+                            f"{vote_emoji} {reason}", callback_data="voted"
+                        ),
+                        InlineKeyboardButton(
+                            "↩ Undo", callback_data=f"undo:{tweet_id}"
+                        ),
+                    ]
                 ])
             )
 
-            if self.feedback_callback:
+            # Schedule feedback save after 10 seconds
+            async def _save_after_delay(
+                t_id=tweet_id, v=vote, r=reason, m_id=message_id, emoji=vote_emoji
+            ):
+                await asyncio.sleep(10)
+                if t_id not in self._pending_feedback:
+                    return
+
+                if self.feedback_callback:
+                    try:
+                        await self.feedback_callback(
+                            tweet_id=t_id,
+                            vote=v,
+                            telegram_message_id=m_id,
+                            notes=r,
+                        )
+                        logger.info(
+                            f"Feedback recorded: tweet={t_id}, vote={v}, reason={r}"
+                        )
+                    except Exception as e:
+                        logger.error(f"Error recording feedback: {e}")
+
+                # Remove undo button
                 try:
-                    await self.feedback_callback(
-                        tweet_id=tweet_id,
-                        vote=vote,
-                        telegram_message_id=query.message.message_id,
-                        notes=reason,
+                    await self.application.bot.edit_message_reply_markup(
+                        chat_id=self.chat_id,
+                        message_id=m_id,
+                        reply_markup=InlineKeyboardMarkup([
+                            [InlineKeyboardButton(
+                                f"{emoji} {r}", callback_data="voted"
+                            )]
+                        ]),
                     )
-                    logger.info(
-                        f"Feedback recorded: tweet={tweet_id}, vote={vote}, reason={reason}"
-                    )
-                except Exception as e:
-                    logger.error(f"Error recording feedback: {e}")
+                except Exception:
+                    pass
+
+                self._pending_feedback.pop(t_id, None)
+
+            task = asyncio.create_task(_save_after_delay())
+            self._pending_feedback[tweet_id] = {
+                "task": task,
+                "message_id": message_id,
+            }
+
+        # Handle undo: "undo:{tweet_id}"
+        elif data.startswith("undo:"):
+            parts = data.split(":")
+            if len(parts) != 2:
+                return
+
+            _, tweet_id = parts
+
+            if tweet_id not in self._pending_feedback:
+                # Too late — feedback already saved
+                logger.info(f"Undo too late: tweet={tweet_id}, already saved")
+                return
+
+            self._pending_feedback[tweet_id]["task"].cancel()
+            del self._pending_feedback[tweet_id]
+
+            username = self._tweet_authors.get(tweet_id, "unknown")
+            await query.edit_message_reply_markup(
+                reply_markup=self._make_tweet_buttons(tweet_id, username)
+            )
+            logger.info(f"Feedback undone: tweet={tweet_id}")
 
         # Handle favorite author: "fav:{username}:{tweet_id}"
         elif data.startswith("fav:"):
@@ -280,6 +347,9 @@ class TelegramCurator:
 
         # Format message
         message = self._format_tweet_message(tweet)
+
+        # Store author mapping for undo functionality
+        self._tweet_authors[tweet["tweet_id"]] = tweet["author_username"]
 
         # Create inline keyboard with feedback buttons
         keyboard = self._make_tweet_buttons(tweet["tweet_id"], tweet["author_username"])
