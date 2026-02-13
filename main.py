@@ -117,6 +117,10 @@ def init_components(settings, num_tweets=None, hours=None):
     async def on_mute_author(username: str) -> str:
         return db.toggle_mute(username)
 
+    # Create stats callback
+    async def on_stats() -> list[dict]:
+        return db.get_author_stats()
+
     # Initialize Telegram bot
     telegram = TelegramCurator(
         bot_token=settings.telegram_bot_token,
@@ -124,6 +128,7 @@ def init_components(settings, num_tweets=None, hours=None):
         feedback_callback=on_feedback,
         favorite_author_callback=on_favorite_author,
         mute_author_callback=on_mute_author,
+        stats_callback=on_stats,
     )
 
     # Initialize curator

@@ -26,6 +26,7 @@ class TelegramCurator:
         feedback_callback: Optional[Callable] = None,
         favorite_author_callback: Optional[Callable] = None,
         mute_author_callback: Optional[Callable] = None,
+        stats_callback: Optional[Callable] = None,
     ):
         """Initialize Telegram bot.
 
@@ -35,12 +36,14 @@ class TelegramCurator:
             feedback_callback: Async callback function(tweet_id, vote, message_id)
             favorite_author_callback: Async callback function(username) → state string
             mute_author_callback: Async callback function(username) → state string
+            stats_callback: Async callback function() → list of author stat dicts
         """
         self.bot_token = bot_token
         self.chat_id = chat_id
         self.feedback_callback = feedback_callback
         self.favorite_author_callback = favorite_author_callback
         self.mute_author_callback = mute_author_callback
+        self.stats_callback = stats_callback
         self.application: Optional[Application] = None
         self._pending_feedback: dict[str, dict] = {}  # tweet_id → pending save info
         self._tweet_authors: dict[str, str] = {}  # tweet_id → username
@@ -68,6 +71,9 @@ class TelegramCurator:
         )
         self.application.add_handler(
             CommandHandler("help", self._handle_help)
+        )
+        self.application.add_handler(
+            CommandHandler("stats", self._handle_stats)
         )
 
         # Callback handler for inline buttons
@@ -97,6 +103,91 @@ class TelegramCurator:
             "- Use the buttons to tell me what you like\n"
             "- Your feedback helps improve future curation"
         )
+
+    async def _handle_stats(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Handle /stats command."""
+        if not self.stats_callback:
+            await update.message.reply_text("Stats not available.")
+            return
+
+        try:
+            stats = await self.stats_callback()
+        except Exception as e:
+            logger.error(f"Error fetching stats: {e}")
+            await update.message.reply_text("Error fetching stats.")
+            return
+
+        if not stats:
+            await update.message.reply_text(
+                "No feedback data yet. Vote on some tweets first!"
+            )
+            return
+
+        # Parse page number
+        page = 1
+        if context.args:
+            try:
+                page = max(1, int(context.args[0]))
+            except (ValueError, IndexError):
+                page = 1
+
+        message = self._format_stats_message(stats, page)
+        await update.message.reply_text(message, parse_mode="HTML")
+
+    @staticmethod
+    def _format_stats_message(stats: list[dict], page: int = 1, per_page: int = 15) -> str:
+        """Format author stats into a paginated table.
+
+        Args:
+            stats: List of author stat dicts from get_author_stats()
+            page: Page number (1-indexed)
+            per_page: Authors per page
+
+        Returns:
+            Formatted HTML message string
+        """
+        total_authors = len(stats)
+        total_pages = max(1, (total_authors + per_page - 1) // per_page)
+        page = min(page, total_pages)
+
+        start = (page - 1) * per_page
+        end = start + per_page
+        page_stats = stats[start:end]
+
+        total_votes = sum(s["total_votes"] for s in stats)
+
+        lines = [f"Author Performance (Page {page}/{total_pages})\n"]
+        lines.append(f" #  {'Author':<16} Score  Up Dn  Avg")
+        lines.append("-" * 42)
+
+        for i, s in enumerate(page_stats, start=start + 1):
+            username = s["author_username"]
+            prefix = ""
+            if s["is_favorite"]:
+                prefix = "\u2b50"
+            elif s["is_muted"]:
+                prefix = "\U0001f507"
+
+            display = prefix + username
+            if len(display) > 15:
+                display = display[:14] + "\u2026"
+
+            score = f"{s['weighted_score']:.2f}"
+            avg = f"{s['avg_filter_score']:.0f}" if s["avg_filter_score"] else " -"
+
+            lines.append(
+                f"{i:>2}  {display:<16} {score}  {s['up']:>2} {s['down']:>2}  {avg:>3}"
+            )
+
+        lines.append("")
+        lines.append("Score = weighted signal ratio (tweets 1.0x, RTs 0.5x)")
+        lines.append(f"Total authors: {total_authors} | Total votes: {total_votes}")
+        if total_pages > 1:
+            lines.append(f"/stats {page + 1 if page < total_pages else 1} \u2192 {'next' if page < total_pages else 'first'} page")
+
+        return "<pre>" + "\n".join(lines) + "</pre>"
 
     async def _handle_feedback(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE

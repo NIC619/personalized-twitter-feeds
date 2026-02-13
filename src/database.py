@@ -412,6 +412,88 @@ class DatabaseClient:
             logger.info(f"Favorited @{username}")
             return "favorited"
 
+    def get_author_stats(self) -> list[dict]:
+        """Get aggregated author performance stats from feedback data.
+
+        Returns:
+            List of author stat dicts sorted by weighted score desc, each with:
+                - author_username, up, down, weighted_up, weighted_down,
+                  weighted_score, avg_filter_score, total_votes, is_favorite, is_muted
+        """
+        try:
+            result = (
+                self.client.table("feedback")
+                .select("*, tweets(*)")
+                .execute()
+            )
+        except Exception as e:
+            logger.error(f"Error fetching feedback for stats: {e}")
+            raise
+
+        favorites = set(self.get_favorite_authors())
+        muted = set(self.get_muted_authors())
+
+        authors: dict[str, dict] = {}
+        for row in result.data:
+            tweet = row.get("tweets")
+            if not tweet:
+                logger.warning(f"Orphaned feedback (no tweet): feedback id={row.get('id')}")
+                continue
+
+            username = tweet["author_username"].lower()
+            if username not in authors:
+                authors[username] = {
+                    "author_username": username,
+                    "up": 0,
+                    "down": 0,
+                    "weighted_up": 0.0,
+                    "weighted_down": 0.0,
+                    "filter_score_sum": 0.0,
+                    "filter_score_count": 0,
+                }
+
+            entry = authors[username]
+            weight = 0.5 if tweet.get("is_retweet") else 1.0
+            vote = row["user_vote"]
+
+            if vote == "up":
+                entry["up"] += 1
+                entry["weighted_up"] += weight
+            elif vote == "down":
+                entry["down"] += 1
+                entry["weighted_down"] += weight
+
+            if tweet.get("filter_score") is not None:
+                entry["filter_score_sum"] += tweet["filter_score"]
+                entry["filter_score_count"] += 1
+
+        stats = []
+        for entry in authors.values():
+            total_weighted = entry["weighted_up"] + entry["weighted_down"]
+            weighted_score = (
+                entry["weighted_up"] / total_weighted if total_weighted > 0 else 0.0
+            )
+            avg_filter = (
+                entry["filter_score_sum"] / entry["filter_score_count"]
+                if entry["filter_score_count"] > 0
+                else 0.0
+            )
+            stats.append({
+                "author_username": entry["author_username"],
+                "up": entry["up"],
+                "down": entry["down"],
+                "weighted_up": entry["weighted_up"],
+                "weighted_down": entry["weighted_down"],
+                "weighted_score": weighted_score,
+                "avg_filter_score": avg_filter,
+                "total_votes": entry["up"] + entry["down"],
+                "is_favorite": entry["author_username"] in favorites,
+                "is_muted": entry["author_username"] in muted,
+            })
+
+        stats.sort(key=lambda s: (-s["weighted_score"], -s["total_votes"]))
+        return stats
+
     def toggle_mute(self, username: str) -> str:
         """Toggle mute status for an author.
 
