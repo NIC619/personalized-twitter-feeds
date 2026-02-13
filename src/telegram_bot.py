@@ -388,9 +388,12 @@ class TelegramCurator:
                     logger.error(f"Error toggling favorite author: {e}")
 
             label = f"⭐ @{username}" if state == "favorited" else f"⭐ Author"
-            await query.edit_message_reply_markup(
-                reply_markup=self._make_tweet_buttons(tweet_id, username, fav_label=label)
-            )
+            try:
+                await query.edit_message_reply_markup(
+                    reply_markup=self._make_tweet_buttons(tweet_id, username, fav_label=label)
+                )
+            except telegram.error.BadRequest:
+                pass
 
         # Handle mute author: "mute:{username}:{tweet_id}"
         elif data.startswith("mute:"):
@@ -409,9 +412,12 @@ class TelegramCurator:
                     logger.error(f"Error toggling mute author: {e}")
 
             label = f"🔇 @{username}" if state == "muted" else f"🔇 Mute"
-            await query.edit_message_reply_markup(
-                reply_markup=self._make_tweet_buttons(tweet_id, username, mute_label=label)
-            )
+            try:
+                await query.edit_message_reply_markup(
+                    reply_markup=self._make_tweet_buttons(tweet_id, username, mute_label=label)
+                )
+            except telegram.error.BadRequest:
+                pass
 
     async def send_tweet(
         self,
