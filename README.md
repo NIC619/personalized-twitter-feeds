@@ -34,13 +34,15 @@ cp .env.example .env
 3. Navigate to "Keys and Tokens"
 4. Get these credentials:
 
-| .env Variable | Where to Find |
-|---------------|---------------|
-| `TWITTER_API_KEY` | Consumer Key (OAuth 1.0 Keys) |
-| `TWITTER_API_SECRET` | Consumer Secret (click Regenerate, save immediately) |
-| `TWITTER_ACCESS_TOKEN` | Access Token (click Generate) |
-| `TWITTER_ACCESS_SECRET` | Access Token Secret (shown with Access Token) |
-| `TWITTER_BEARER_TOKEN` | Bearer Token (App-Only Authentication) |
+
+| .env Variable           | Where to Find                                        |
+| ----------------------- | ---------------------------------------------------- |
+| `TWITTER_API_KEY`       | Consumer Key (OAuth 1.0 Keys)                        |
+| `TWITTER_API_SECRET`    | Consumer Secret (click Regenerate, save immediately) |
+| `TWITTER_ACCESS_TOKEN`  | Access Token (click Generate)                        |
+| `TWITTER_ACCESS_SECRET` | Access Token Secret (shown with Access Token)        |
+| `TWITTER_BEARER_TOKEN`  | Bearer Token (App-Only Authentication)               |
+
 
 > **Note**: Secrets are only shown once during generation. Save them immediately.
 
@@ -55,24 +57,22 @@ cp .env.example .env
 1. Message [@BotFather](https://t.me/BotFather) on Telegram
 2. Send `/newbot` and follow the prompts
 3. Save the bot token as `TELEGRAM_BOT_TOKEN`
-
 4. Get your Chat ID:
-   - Start a chat with your new bot (send any message)
-   - Open in browser: `https://api.telegram.org/bot<YOUR_BOT_TOKEN>/getUpdates`
-   - Find `"chat":{"id":123456789}` - that number is your `TELEGRAM_CHAT_ID`
+  - Start a chat with your new bot (send any message)
+  - Open in browser: `https://api.telegram.org/bot<YOUR_BOT_TOKEN>/getUpdates`
+  - Find `"chat":{"id":123456789}` - that number is your `TELEGRAM_CHAT_ID`
 
 ### 5. Supabase Database
 
 1. Go to [Supabase](https://supabase.com/) and create a project
 2. Go to SQL Editor and run the schema:
-   ```bash
+  ```bash
    python scripts/setup_database.py
-   ```
+  ```
    Copy the printed SQL and paste into Supabase SQL Editor
-
 3. Get your credentials from Settings > API:
-   - `SUPABASE_URL`: Project URL
-   - `SUPABASE_KEY`: anon/public key
+  - `SUPABASE_URL`: Project URL
+  - `SUPABASE_KEY`: anon/public key
 
 ### 6. Configure .env
 
@@ -107,9 +107,18 @@ SCHEDULE_TIMEZONE=Asia/Taipei
 
 ## Usage
 
+### Run Tests
+
+Run the unit test suite (no API credentials needed):
+
+```bash
+pip install -r requirements-dev.txt
+pytest tests/ -v
+```
+
 ### Test Components
 
-Verify all API connections work:
+Verify all API connections work (requires live credentials):
 
 ```bash
 python scripts/test_components.py
@@ -177,12 +186,21 @@ twitter-curator/
 │   ├── database.py         # Supabase operations
 │   ├── embeddings.py       # Phase 2: RAG embeddings (stub)
 │   └── scheduler.py        # Daily curation orchestration
+├── tests/
+│   ├── conftest.py                # Shared test fixtures
+│   ├── test_claude_filter.py      # ClaudeFilter unit tests
+│   ├── test_database.py           # DatabaseClient unit tests
+│   ├── test_twitter_client.py     # TwitterClient unit tests
+│   ├── test_scheduler.py          # DailyCurator unit tests
+│   ├── test_telegram_bot.py       # TelegramCurator unit tests
+│   └── test_embeddings.py         # EmbeddingManager unit tests
 ├── scripts/
 │   ├── setup_database.py          # Database schema SQL
-│   ├── test_components.py         # Component testing
+│   ├── test_components.py         # Integration testing (live APIs)
 │   └── count_twitter_timeline.py  # Count tweets from Twitter
 ├── main.py                 # CLI entry point
 ├── requirements.txt
+├── requirements-dev.txt    # Test dependencies
 └── .env.example
 ```
 
@@ -199,16 +217,19 @@ twitter-curator/
 Claude filters based on these interests:
 
 **High Priority (90-100)**:
+
 - Based rollups, preconfirmations
 - TEEs, ZK proofs
 - Ethereum scaling research
 
 **Should Read (70-89)**:
+
 - Technical content, audits
 - Protocol analysis
 - Smart contract security
 
 **Skip (<70)**:
+
 - Price speculation
 - NFT drops
 - Celebrity opinions
@@ -216,31 +237,37 @@ Claude filters based on these interests:
 
 ## Configuration Options
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `FETCH_HOURS` | 24 | Hours to look back for tweets |
-| `MAX_TWEETS` | 100 | Maximum tweets to fetch per run |
-| `FILTER_THRESHOLD` | 70 | Minimum score to send to Telegram |
-| `SCHEDULE_HOUR` | 9 | Hour to run daily curation (24h format) |
-| `SCHEDULE_TIMEZONE` | Asia/Taipei | Timezone for scheduling |
+
+| Variable            | Default     | Description                             |
+| ------------------- | ----------- | --------------------------------------- |
+| `FETCH_HOURS`       | 24          | Hours to look back for tweets           |
+| `MAX_TWEETS`        | 100         | Maximum tweets to fetch per run         |
+| `FILTER_THRESHOLD`  | 70          | Minimum score to send to Telegram       |
+| `SCHEDULE_HOUR`     | 9           | Hour to run daily curation (24h format) |
+| `SCHEDULE_TIMEZONE` | Asia/Taipei | Timezone for scheduling                 |
+
 
 ## Troubleshooting
 
 ### "Failed to load settings"
+
 - Make sure `.env` file exists and has all required variables
 - Check for typos in variable names
 
 ### Twitter API errors
+
 - Verify all 5 Twitter credentials are correct
 - Check your API tier supports home timeline access (Basic tier required)
 - Consumer Secret and Access Token Secret are only shown once - regenerate if lost
 
 ### Telegram bot not responding
+
 - Make sure you started a chat with your bot first
 - Verify `TELEGRAM_CHAT_ID` is correct (should be a number)
 - Check bot token is valid
 
 ### Database errors
+
 - Run `python scripts/setup_database.py` and execute SQL in Supabase
 - Verify `SUPABASE_URL` and `SUPABASE_KEY` are correct
 - Check that tables exist in Supabase Table Editor
@@ -251,19 +278,21 @@ Logs are written to `curator.log` and stdout. Check here for errors and curation
 
 ## Cost Estimates
 
-| Service | Monthly Cost |
-|---------|-------------|
-| Twitter API (Basic) | $100 |
-| Claude API | ~$5-10 |
-| Telegram | Free |
-| Supabase | Free tier |
-| **Total** | ~$105-110 |
+
+| Service             | Monthly Cost |
+| ------------------- | ------------ |
+| Twitter API (Basic) | $100         |
+| Claude API          | ~$5-10       |
+| Telegram            | Free         |
+| Supabase            | Free tier    |
+| **Total**           | ~$105-110    |
+
 
 ## Roadmap
 
-- [x] Phase 1: Core MVP (fetch, filter, send, feedback buttons)
-- [ ] Phase 2: RAG with embeddings (use feedback to improve filtering)
-- [ ] Phase 3: Analytics dashboard, multi-account support
+- Phase 1: Core MVP (fetch, filter, send, feedback buttons)
+- Phase 2: RAG with embeddings (use feedback to improve filtering)
+- Phase 3: Analytics dashboard, multi-account support
 
 ## License
 
