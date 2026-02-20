@@ -121,6 +121,10 @@ def init_components(settings, num_tweets=None, hours=None):
     async def on_stats() -> list[dict]:
         return db.get_author_stats()
 
+    # Create list starred callback
+    async def on_list_starred() -> list[str]:
+        return db.get_favorite_authors()
+
     # Initialize Telegram bot
     telegram = TelegramCurator(
         bot_token=settings.telegram_bot_token,
@@ -129,6 +133,7 @@ def init_components(settings, num_tweets=None, hours=None):
         favorite_author_callback=on_favorite_author,
         mute_author_callback=on_mute_author,
         stats_callback=on_stats,
+        list_starred_callback=on_list_starred,
     )
 
     # Initialize curator
@@ -142,6 +147,7 @@ def init_components(settings, num_tweets=None, hours=None):
         filter_threshold=settings.filter_threshold,
         favorite_threshold_offset=settings.favorite_threshold_offset,
         muted_threshold_offset=settings.muted_threshold_offset,
+        starred_author_max_tweets=settings.starred_author_max_tweets,
     )
 
     logger.info(f"All components initialized (max_tweets={max_tweets}, fetch_hours={fetch_hours})")

@@ -5,7 +5,7 @@ import logging
 from typing import Callable, Optional
 
 import telegram.error
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -27,6 +27,7 @@ class TelegramCurator:
         favorite_author_callback: Optional[Callable] = None,
         mute_author_callback: Optional[Callable] = None,
         stats_callback: Optional[Callable] = None,
+        list_starred_callback: Optional[Callable] = None,
     ):
         """Initialize Telegram bot.
 
@@ -37,6 +38,7 @@ class TelegramCurator:
             favorite_author_callback: Async callback function(username) → state string
             mute_author_callback: Async callback function(username) → state string
             stats_callback: Async callback function() → list of author stat dicts
+            list_starred_callback: Async callback function() → list of starred usernames
         """
         self.bot_token = bot_token
         self.chat_id = chat_id
@@ -44,6 +46,7 @@ class TelegramCurator:
         self.favorite_author_callback = favorite_author_callback
         self.mute_author_callback = mute_author_callback
         self.stats_callback = stats_callback
+        self.list_starred_callback = list_starred_callback
         self.application: Optional[Application] = None
         self._pending_feedback: dict[str, dict] = {}  # tweet_id → pending save info
         self._tweet_authors: dict[str, str] = {}  # tweet_id → username
@@ -58,7 +61,19 @@ class TelegramCurator:
         )
         self.setup_handlers()
         await self.application.initialize()
+        await self._set_commands_menu()
         logger.info("Telegram application initialized")
+
+    async def _set_commands_menu(self) -> None:
+        """Register bot commands so they appear in Telegram's command menu."""
+        commands = [
+            BotCommand("star", "Toggle starred status — /star username"),
+            BotCommand("starred", "List all starred authors"),
+            BotCommand("stats", "Show author performance stats"),
+            BotCommand("help", "Show help message"),
+        ]
+        await self.application.bot.set_my_commands(commands)
+        logger.info("Bot command menu registered")
 
     def setup_handlers(self) -> None:
         """Set up message and callback handlers."""
@@ -74,6 +89,12 @@ class TelegramCurator:
         )
         self.application.add_handler(
             CommandHandler("stats", self._handle_stats)
+        )
+        self.application.add_handler(
+            CommandHandler("star", self._handle_star)
+        )
+        self.application.add_handler(
+            CommandHandler("starred", self._handle_starred)
         )
 
         # Callback handler for inline buttons
@@ -99,6 +120,10 @@ class TelegramCurator:
         """Handle /help command."""
         await update.message.reply_text(
             "Twitter Curator Help:\n\n"
+            "Commands:\n"
+            "/star username — toggle starred status for an author\n"
+            "/starred — list all starred authors\n"
+            "/stats — show author performance stats\n\n"
             "- I send you filtered tweets daily\n"
             "- Use the buttons to tell me what you like\n"
             "- Your feedback helps improve future curation"
@@ -135,6 +160,71 @@ class TelegramCurator:
 
         message = self._format_stats_message(stats, page)
         await update.message.reply_text(message, parse_mode="HTML")
+
+    async def _handle_star(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Handle /star command to toggle starred status for an author.
+
+        Usage: /star username [username2 ...]
+        """
+        if not context.args:
+            await update.message.reply_text(
+                "Usage: /star username [username2 ...]\n\n"
+                "Toggles starred status for the given author(s).\n"
+                "Use /starred to see all starred authors."
+            )
+            return
+
+        if not self.favorite_author_callback:
+            await update.message.reply_text("Star feature not available.")
+            return
+
+        results = []
+        for username in context.args:
+            username = username.lower().lstrip("@")
+            try:
+                state = await self.favorite_author_callback(username=username)
+                if state == "favorited":
+                    results.append(f"⭐ @{username} starred")
+                elif state == "unmuted":
+                    results.append(f"🔊 @{username} unmuted (was muted)")
+                else:
+                    results.append(f"@{username} → {state}")
+            except Exception as e:
+                logger.error(f"Error starring @{username}: {e}")
+                results.append(f"❌ @{username} — error")
+
+        await update.message.reply_text("\n".join(results))
+
+    async def _handle_starred(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Handle /starred command to list all starred authors."""
+        if not self.list_starred_callback:
+            await update.message.reply_text("Starred list not available.")
+            return
+
+        try:
+            authors = await self.list_starred_callback()
+        except Exception as e:
+            logger.error(f"Error fetching starred authors: {e}")
+            await update.message.reply_text("Error fetching starred authors.")
+            return
+
+        if not authors:
+            await update.message.reply_text(
+                "No starred authors yet.\n"
+                "Use /star username to add one."
+            )
+            return
+
+        lines = [f"⭐ <b>Starred Authors</b> ({len(authors)})\n"]
+        for author in sorted(authors):
+            lines.append(f"  @{author}")
+        lines.append(f"\nUse /star username to add or remove.")
+
+        await update.message.reply_text("\n".join(lines), parse_mode="HTML")
 
     @staticmethod
     def _format_stats_message(stats: list[dict], page: int = 1, per_page: int = 15) -> str:
