@@ -29,6 +29,7 @@ class DailyCurator:
         filter_threshold: int = 70,
         favorite_threshold_offset: int = 20,
         muted_threshold_offset: int = 15,
+        starred_author_max_tweets: int = 10,
     ):
         """Initialize daily curator with all components.
 
@@ -42,6 +43,7 @@ class DailyCurator:
             filter_threshold: Default threshold for authors
             favorite_threshold_offset: How much lower for starred authors
             muted_threshold_offset: How much higher for muted authors
+            starred_author_max_tweets: Max tweets per starred author timeline
         """
         self.twitter = twitter
         self.claude = claude
@@ -49,6 +51,7 @@ class DailyCurator:
         self.db = db
         self.fetch_hours = fetch_hours
         self.max_tweets = max_tweets
+        self.starred_author_max_tweets = starred_author_max_tweets
         self.default_threshold = filter_threshold
         self.favorite_author_threshold = filter_threshold - favorite_threshold_offset
         self.muted_author_threshold = filter_threshold + muted_threshold_offset
@@ -88,11 +91,41 @@ class DailyCurator:
                 hours=self.fetch_hours,
             )
             stats["fetched"] = len(tweets)
-            logger.info(f"Fetched {len(tweets)} tweets")
+            logger.info(f"Fetched {len(tweets)} tweets from home timeline")
+
+            # Step 1a: Fetch tweets from starred authors' timelines
+            favorite_authors = list(self.db.get_favorite_authors())
+            if favorite_authors:
+                logger.info(
+                    f"Step 1a: Fetching tweets from {len(favorite_authors)} starred authors..."
+                )
+                starred_tweets = self.twitter.fetch_user_tweets(
+                    usernames=favorite_authors,
+                    max_per_user=self.starred_author_max_tweets,
+                    hours=self.fetch_hours,
+                )
+                stats["starred_fetched"] = len(starred_tweets)
+
+                # Merge and deduplicate by tweet_id
+                seen_ids = {t["tweet_id"] for t in tweets}
+                new_from_starred = 0
+                for st in starred_tweets:
+                    if st["tweet_id"] not in seen_ids:
+                        tweets.append(st)
+                        seen_ids.add(st["tweet_id"])
+                        new_from_starred += 1
+
+                stats["starred_new"] = new_from_starred
+                logger.info(
+                    f"Starred authors: {len(starred_tweets)} total, "
+                    f"{new_from_starred} new (not in home timeline)"
+                )
 
             if not tweets:
                 logger.info("No tweets to process")
                 return stats
+
+            stats["fetched"] = len(tweets)
 
             # Step 1b: Deduplicate - remove tweets already processed
             new_tweets = self._deduplicate_tweets(tweets)
@@ -109,14 +142,16 @@ class DailyCurator:
                 return stats
 
             # Step 1c: Load author tiers
-            favorite_authors = set(self.db.get_favorite_authors())
+            if not favorite_authors:
+                favorite_authors = list(self.db.get_favorite_authors())
+            favorite_authors_set = set(favorite_authors)
             muted_authors = set(self.db.get_muted_authors())
 
             # Skip retweets from non-favorite authors
             tweets_for_filtering = []
             skipped_retweets = 0
             for tweet in new_tweets:
-                if tweet.get("is_retweet") and tweet["author_username"].lower() not in favorite_authors:
+                if tweet.get("is_retweet") and tweet["author_username"].lower() not in favorite_authors_set:
                     skipped_retweets += 1
                 else:
                     tweets_for_filtering.append(tweet)
@@ -148,7 +183,7 @@ class DailyCurator:
                 if author in muted_authors:
                     tier = "muted"
                     threshold = self.muted_author_threshold
-                elif author in favorite_authors:
+                elif author in favorite_authors_set:
                     tier = "favorite"
                     threshold = self.favorite_author_threshold
                 else:

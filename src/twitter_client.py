@@ -202,6 +202,130 @@ class TwitterClient:
             },
         }
 
+    def fetch_user_tweets(
+        self, usernames: list[str], max_per_user: int = 10, hours: int = 24
+    ) -> list[dict]:
+        """Fetch recent tweets from specific users' timelines.
+
+        Args:
+            usernames: List of Twitter usernames to fetch tweets from
+            max_per_user: Maximum tweets per user (default 10)
+            hours: Look back period (default 24)
+
+        Returns:
+            List of normalized tweet objects from all users
+        """
+        start_time = datetime.now(timezone.utc) - timedelta(hours=hours)
+        tweet_fields = [
+            "created_at",
+            "public_metrics",
+            "entities",
+            "author_id",
+            "conversation_id",
+            "referenced_tweets",
+        ]
+        user_fields = ["username", "name", "profile_image_url"]
+        expansions = ["author_id"]
+
+        all_tweets = []
+        for username in usernames:
+            try:
+                # Resolve username to user ID
+                user_response = self._get_user_with_retry(username)
+                if not user_response or not user_response.data:
+                    logger.warning(f"Could not resolve user: @{username}")
+                    continue
+
+                user = user_response.data
+                user_id = user.id
+
+                # Fetch user's recent tweets
+                response = self._get_user_tweets_with_retry(
+                    user_id=user_id,
+                    max_results=max(max_per_user, 5),  # API minimum is 5
+                    start_time=start_time,
+                    tweet_fields=tweet_fields,
+                    user_fields=user_fields,
+                    expansions=expansions,
+                )
+
+                if not response or not response.data:
+                    logger.info(f"No recent tweets from @{username}")
+                    continue
+
+                # Build user lookup from includes
+                users = {}
+                if response.includes and "users" in response.includes:
+                    for u in response.includes["users"]:
+                        users[u.id] = u
+
+                count = 0
+                for tweet in response.data:
+                    if count >= max_per_user:
+                        break
+                    author = users.get(tweet.author_id, user)
+                    all_tweets.append(self._normalize_tweet(tweet, author))
+                    count += 1
+
+                logger.info(f"Fetched {count} tweets from @{username}")
+
+            except tweepy.TweepyException as e:
+                logger.error(f"Error fetching tweets for @{username}: {e}")
+                continue
+
+        logger.info(
+            f"Fetched {len(all_tweets)} total tweets from {len(usernames)} starred authors"
+        )
+        return all_tweets
+
+    def _get_user_with_retry(self, username: str, max_retries: int = 3):
+        """Resolve username to user object with retry."""
+        for attempt in range(max_retries):
+            try:
+                return self.client.get_user(username=username)
+            except tweepy.TweepyException as e:
+                if attempt < max_retries - 1:
+                    wait_time = 2 ** (attempt + 1)
+                    logger.warning(
+                        f"Error resolving @{username} (attempt {attempt + 1}): {e}. "
+                        f"Retrying in {wait_time}s..."
+                    )
+                    time.sleep(wait_time)
+                else:
+                    raise
+
+    def _get_user_tweets_with_retry(
+        self,
+        user_id: int,
+        max_results: int,
+        start_time: datetime,
+        tweet_fields: list[str],
+        user_fields: list[str],
+        expansions: list[str],
+        max_retries: int = 3,
+    ):
+        """Fetch user tweets with retry."""
+        for attempt in range(max_retries):
+            try:
+                return self.client.get_users_tweets(
+                    id=user_id,
+                    max_results=max_results,
+                    start_time=start_time,
+                    tweet_fields=tweet_fields,
+                    user_fields=user_fields,
+                    expansions=expansions,
+                )
+            except tweepy.TweepyException as e:
+                if attempt < max_retries - 1:
+                    wait_time = 2 ** (attempt + 1)
+                    logger.warning(
+                        f"Error fetching tweets for user {user_id} (attempt {attempt + 1}): {e}. "
+                        f"Retrying in {wait_time}s..."
+                    )
+                    time.sleep(wait_time)
+                else:
+                    raise
+
     @staticmethod
     def get_tweet_url(tweet_id: str, username: str) -> str:
         """Generate tweet URL.

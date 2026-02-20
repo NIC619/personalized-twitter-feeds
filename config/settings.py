@@ -32,6 +32,7 @@ class Settings(BaseSettings):
     filter_threshold: int = Field(default=70, description="Default threshold for tweet filtering")
     favorite_threshold_offset: int = Field(default=20, description="How much lower the threshold is for starred authors")
     muted_threshold_offset: int = Field(default=15, description="How much higher the threshold is for muted authors")
+    starred_author_max_tweets: int = Field(default=10, description="Max tweets to fetch per starred author's timeline")
     schedule_hour: int = Field(default=9, description="Hour to run daily curation")
     schedule_timezone: str = Field(default="Asia/Taipei", description="Timezone for scheduling")
 

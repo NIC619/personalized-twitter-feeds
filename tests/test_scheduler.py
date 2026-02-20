@@ -90,6 +90,7 @@ class TestRunDailyCuration:
     @pytest.mark.asyncio
     async def test_empty_timeline(self, curator):
         curator.twitter.fetch_timeline.return_value = []
+        curator.db.get_favorite_authors.return_value = []
 
         stats = await curator.run_daily_curation()
 
@@ -103,6 +104,7 @@ class TestRunDailyCuration:
             {"tweet_id": "3", "author_username": "muted_author", "text": "c", "is_retweet": False},
         ]
         curator.twitter.fetch_timeline.return_value = tweets
+        curator.twitter.fetch_user_tweets.return_value = []
         curator.db.get_tweet_by_id.return_value = None  # all new
         curator.db.get_favorite_authors.return_value = ["fav_author"]
         curator.db.get_muted_authors.return_value = ["muted_author"]
@@ -134,6 +136,7 @@ class TestRunDailyCuration:
             {"tweet_id": "3", "author_username": "normal", "text": "original", "is_retweet": False},
         ]
         curator.twitter.fetch_timeline.return_value = tweets
+        curator.twitter.fetch_user_tweets.return_value = []
         curator.db.get_tweet_by_id.return_value = None
         curator.db.get_favorite_authors.return_value = ["fav"]
         curator.db.get_muted_authors.return_value = []
@@ -160,6 +163,8 @@ class TestRunDailyCuration:
     async def test_all_duplicates(self, curator):
         tweets = [{"tweet_id": "1", "author_username": "a", "text": "x", "is_retweet": False}]
         curator.twitter.fetch_timeline.return_value = tweets
+        curator.twitter.fetch_user_tweets.return_value = []
+        curator.db.get_favorite_authors.return_value = []
         curator.db.get_tweet_by_id.return_value = {"tweet_id": "1", "filter_score": 80}
 
         stats = await curator.run_daily_curation()
