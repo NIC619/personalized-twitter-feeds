@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import re
 from typing import Callable, Optional
 
 import telegram.error
@@ -10,7 +11,10 @@ from telegram.ext import (
     Application,
     CallbackQueryHandler,
     CommandHandler,
+    ConversationHandler,
     ContextTypes,
+    MessageHandler,
+    filters,
 )
 
 logger = logging.getLogger(__name__)
@@ -121,7 +125,7 @@ class TelegramCurator:
         await update.message.reply_text(
             "Twitter Curator Help:\n\n"
             "Commands:\n"
-            "/star username — toggle starred status for an author\n"
+            "/star username or URL — toggle starred status for an author\n"
             "/starred — list all starred authors\n"
             "/stats — show author performance stats\n\n"
             "- I send you filtered tweets daily\n"
@@ -161,17 +165,45 @@ class TelegramCurator:
         message = self._format_stats_message(stats, page)
         await update.message.reply_text(message, parse_mode="HTML")
 
+    @staticmethod
+    def _extract_username(arg: str) -> str:
+        """Extract a Twitter username from a URL, @mention, or plain username.
+
+        Supports:
+            - https://twitter.com/username/status/123
+            - https://x.com/username
+            - @username
+            - username
+
+        Returns:
+            Lowercase username string
+        """
+        # Match twitter.com or x.com URLs
+        match = re.match(
+            r"https?://(?:www\.)?(?:twitter|x)\.com/([A-Za-z0-9_]+)",
+            arg,
+        )
+        if match:
+            return match.group(1).lower()
+        # Plain username or @mention
+        return arg.lower().lstrip("@")
+
     async def _handle_star(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
         """Handle /star command to toggle starred status for an author.
 
-        Usage: /star username [username2 ...]
+        Usage: /star <username, @mention, or tweet/profile URL> [...]
         """
         if not context.args:
             await update.message.reply_text(
-                "Usage: /star username [username2 ...]\n\n"
-                "Toggles starred status for the given author(s).\n"
+                "Usage: /star &lt;input&gt; [input2 ...]\n\n"
+                "Input can be:\n"
+                "  • username\n"
+                "  • @username\n"
+                "  • tweet URL (x.com/user/status/...)\n"
+                "  • profile URL (x.com/user)\n\n"
+                "Toggles starred status for the author(s).\n"
                 "Use /starred to see all starred authors."
             )
             return
@@ -181,8 +213,8 @@ class TelegramCurator:
             return
 
         results = []
-        for username in context.args:
-            username = username.lower().lstrip("@")
+        for arg in context.args:
+            username = self._extract_username(arg)
             try:
                 state = await self.favorite_author_callback(username=username)
                 if state == "favorited":

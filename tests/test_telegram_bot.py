@@ -189,3 +189,31 @@ class TestMakeTweetButtons:
         rows = markup.inline_keyboard
         assert rows[1][0].text == "Starred"
         assert rows[1][1].text == "Silenced"
+
+
+# --- _extract_username ---
+
+class TestExtractUsername:
+    def test_plain_username(self):
+        assert TelegramCurator._extract_username("vitalikbuterin") == "vitalikbuterin"
+
+    def test_at_mention(self):
+        assert TelegramCurator._extract_username("@VitalikButerin") == "vitalikbuterin"
+
+    def test_twitter_profile_url(self):
+        assert TelegramCurator._extract_username("https://twitter.com/VitalikButerin") == "vitalikbuterin"
+
+    def test_x_profile_url(self):
+        assert TelegramCurator._extract_username("https://x.com/elaboratequery") == "elaboratequery"
+
+    def test_tweet_url(self):
+        assert TelegramCurator._extract_username("https://twitter.com/alice/status/123456789") == "alice"
+
+    def test_x_tweet_url(self):
+        assert TelegramCurator._extract_username("https://x.com/Bob_dev/status/987654321") == "bob_dev"
+
+    def test_www_prefix(self):
+        assert TelegramCurator._extract_username("https://www.twitter.com/carol") == "carol"
+
+    def test_uppercase_normalized(self):
+        assert TelegramCurator._extract_username("ALICE") == "alice"
