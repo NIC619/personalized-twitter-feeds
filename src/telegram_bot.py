@@ -20,6 +20,10 @@ from telegram.ext import (
 logger = logging.getLogger(__name__)
 
 
+# Conversation states
+STAR_AWAITING_INPUT = 0
+
+
 class TelegramCurator:
     """Telegram bot for tweet curation."""
 
@@ -95,7 +99,18 @@ class TelegramCurator:
             CommandHandler("stats", self._handle_stats)
         )
         self.application.add_handler(
-            CommandHandler("star", self._handle_star)
+            ConversationHandler(
+                entry_points=[CommandHandler("star", self._handle_star)],
+                states={
+                    STAR_AWAITING_INPUT: [
+                        MessageHandler(
+                            filters.TEXT & ~filters.COMMAND,
+                            self._handle_star_input,
+                        )
+                    ],
+                },
+                fallbacks=[CommandHandler("cancel", self._handle_star_cancel)],
+            )
         )
         self.application.add_handler(
             CommandHandler("starred", self._handle_starred)
@@ -190,30 +205,50 @@ class TelegramCurator:
 
     async def _handle_star(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
-    ) -> None:
+    ) -> int:
         """Handle /star command to toggle starred status for an author.
 
-        Usage: /star <username, @mention, or tweet/profile URL> [...]
+        If called with args, processes immediately.
+        If called without args, prompts and waits for input.
         """
-        if not context.args:
-            await update.message.reply_text(
-                "Usage: /star &lt;input&gt; [input2 ...]\n\n"
-                "Input can be:\n"
-                "  • username\n"
-                "  • @username\n"
-                "  • tweet URL (x.com/user/status/...)\n"
-                "  • profile URL (x.com/user)\n\n"
-                "Toggles starred status for the author(s).\n"
-                "Use /starred to see all starred authors."
-            )
-            return
-
         if not self.favorite_author_callback:
             await update.message.reply_text("Star feature not available.")
-            return
+            return ConversationHandler.END
 
+        if not context.args:
+            await update.message.reply_text(
+                "Send me a username, @mention, or tweet/profile URL to star.\n"
+                "You can send multiple separated by spaces.\n\n"
+                "/cancel to abort."
+            )
+            return STAR_AWAITING_INPUT
+
+        await self._star_authors(update, context.args)
+        return ConversationHandler.END
+
+    async def _handle_star_input(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> int:
+        """Handle the follow-up message with usernames/URLs after /star prompt."""
+        args = update.message.text.strip().split()
+        if not args:
+            await update.message.reply_text("No input received. Try again or /cancel.")
+            return STAR_AWAITING_INPUT
+
+        await self._star_authors(update, args)
+        return ConversationHandler.END
+
+    async def _handle_star_cancel(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> int:
+        """Handle /cancel during star conversation."""
+        await update.message.reply_text("Cancelled.")
+        return ConversationHandler.END
+
+    async def _star_authors(self, update: Update, args: list[str]) -> None:
+        """Process a list of username/URL args and toggle their starred status."""
         results = []
-        for arg in context.args:
+        for arg in args:
             username = self._extract_username(arg)
             try:
                 state = await self.favorite_author_callback(username=username)
