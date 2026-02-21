@@ -12,6 +12,7 @@ from src.twitter_client import TwitterClient
 from src.claude_filter import ClaudeFilter
 from src.telegram_bot import TelegramCurator
 from src.database import DatabaseClient
+from src.embeddings import EmbeddingManager
 from src.scheduler import DailyCurator, feedback_handler
 
 # Configure logging
@@ -105,9 +106,19 @@ def init_components(settings, num_tweets=None, hours=None):
         key=settings.supabase_key,
     )
 
+    # Initialize embedding manager
+    embedding_manager = EmbeddingManager(
+        api_key=settings.openai_api_key,
+        model=settings.embedding_model,
+        db_client=db,
+    )
+
     # Create feedback callback
     async def on_feedback(tweet_id: str, vote: str, telegram_message_id: int, notes: str = None):
-        await feedback_handler(db, tweet_id, vote, telegram_message_id, notes=notes)
+        await feedback_handler(
+            db, tweet_id, vote, telegram_message_id,
+            notes=notes, embedding_manager=embedding_manager,
+        )
 
     # Create favorite author callback (toggle: muted→default, default→favorite)
     async def on_favorite_author(username: str) -> str:
@@ -148,6 +159,7 @@ def init_components(settings, num_tweets=None, hours=None):
         favorite_threshold_offset=settings.favorite_threshold_offset,
         muted_threshold_offset=settings.muted_threshold_offset,
         starred_author_max_tweets=settings.starred_author_max_tweets,
+        embedding_manager=embedding_manager,
     )
 
     logger.info(f"All components initialized (max_tweets={max_tweets}, fetch_hours={fetch_hours})")

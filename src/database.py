@@ -494,6 +494,72 @@ class DatabaseClient:
         stats.sort(key=lambda s: (-s["weighted_score"], -s["total_votes"]))
         return stats
 
+    def save_embedding(self, tweet_id: str, embedding: list[float]) -> None:
+        """Upsert a tweet embedding into tweet_embeddings.
+
+        Args:
+            tweet_id: Twitter ID of the tweet
+            embedding: Embedding vector
+        """
+        try:
+            self.client.table("tweet_embeddings").upsert(
+                {"tweet_id": tweet_id, "embedding": embedding},
+                on_conflict="tweet_id",
+            ).execute()
+            logger.info(f"Saved embedding for tweet {tweet_id}")
+        except Exception as e:
+            logger.error(f"Error saving embedding: {e}")
+            raise
+
+    def find_similar_tweets(
+        self, embedding: list[float], limit: int = 5
+    ) -> list[dict]:
+        """Find similar voted tweets using pgvector cosine similarity.
+
+        Queries tweet_embeddings joined with feedback and tweets to return
+        similar tweets the user has voted on.
+
+        Args:
+            embedding: Query embedding vector
+            limit: Maximum number of results
+
+        Returns:
+            List of dicts with: tweet_id, text, author_username, vote, similarity
+        """
+        try:
+            result = self.client.rpc(
+                "match_voted_tweets",
+                {
+                    "query_embedding": embedding,
+                    "match_count": limit,
+                },
+            ).execute()
+            return result.data if result.data else []
+        except Exception as e:
+            logger.error(f"Error finding similar tweets: {e}")
+            return []
+
+    def has_embedding(self, tweet_id: str) -> bool:
+        """Check if an embedding exists for a tweet.
+
+        Args:
+            tweet_id: Twitter ID of the tweet
+
+        Returns:
+            True if embedding exists
+        """
+        try:
+            result = (
+                self.client.table("tweet_embeddings")
+                .select("tweet_id")
+                .eq("tweet_id", tweet_id)
+                .execute()
+            )
+            return len(result.data) > 0
+        except Exception as e:
+            logger.error(f"Error checking embedding: {e}")
+            return False
+
     def toggle_mute(self, username: str) -> str:
         """Toggle mute status for an author.
 

@@ -81,8 +81,8 @@ CREATE INDEX IF NOT EXISTS idx_muted_authors_username ON muted_authors(username)
 -- Stores vector embeddings for similarity search
 CREATE TABLE IF NOT EXISTS tweet_embeddings (
     id BIGSERIAL PRIMARY KEY,
-    tweet_id TEXT REFERENCES tweets(tweet_id) ON DELETE CASCADE,
-    embedding vector(1024),  -- Adjust dimension based on embedding model
+    tweet_id TEXT UNIQUE REFERENCES tweets(tweet_id) ON DELETE CASCADE,
+    embedding vector(1536),  -- OpenAI text-embedding-3-small dimensions
     created_at TIMESTAMP DEFAULT NOW()
 );
 
@@ -105,6 +105,37 @@ CREATE POLICY "anon_all" ON public.feedback FOR ALL TO anon USING (true) WITH CH
 CREATE POLICY "anon_all" ON public.favorite_authors FOR ALL TO anon USING (true) WITH CHECK (true);
 CREATE POLICY "anon_all" ON public.muted_authors FOR ALL TO anon USING (true) WITH CHECK (true);
 CREATE POLICY "anon_all" ON public.tweet_embeddings FOR ALL TO anon USING (true) WITH CHECK (true);
+
+-- Function: match_voted_tweets
+-- Find similar tweets that have user feedback, using pgvector cosine distance
+CREATE OR REPLACE FUNCTION match_voted_tweets(
+    query_embedding vector(1536),
+    match_count int DEFAULT 5
+)
+RETURNS TABLE (
+    tweet_id text,
+    text text,
+    author_username text,
+    vote text,
+    similarity float
+)
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    RETURN QUERY
+    SELECT
+        t.tweet_id,
+        t.text,
+        t.author_username,
+        f.user_vote AS vote,
+        1 - (te.embedding <=> query_embedding) AS similarity
+    FROM tweet_embeddings te
+    JOIN tweets t ON t.tweet_id = te.tweet_id
+    JOIN feedback f ON f.tweet_id = te.tweet_id
+    ORDER BY te.embedding <=> query_embedding
+    LIMIT match_count;
+END;
+$$;
 
 -- Optional: Create a view for tweets with feedback
 CREATE OR REPLACE VIEW tweets_with_feedback

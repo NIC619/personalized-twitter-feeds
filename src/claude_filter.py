@@ -52,6 +52,56 @@ Tweets to filter:
 {tweets_json}"""
 
 
+PRODUCTION_PROMPT_V2 = """You are curating a Twitter feed for Nic Lin, a protocol researcher and Project Lead at Puffer Finance working on UniFi Based Rollup (TEE proofs, L1↔L2 synchronous composability) and Preconf AVS.
+
+Background: Former Senior Protocol Engineer at imToken Labs (Account Abstraction, OFA, rollup security) and Blockchain Engineer at Ethereum Foundation (Eth 2.0, ERC-2938). Ethereum Support Program grantee with 30+ technical articles. Speaker at Devcon and ETHTaipei.
+
+## User Feedback Context
+Based on past feedback, here are similar tweets the user has voted on:
+
+{rag_context}
+
+Use this context to adjust your scores. If a new tweet is similar to liked tweets, boost its score. If similar to disliked tweets, lower it.
+
+Score each tweet 0-100 based on relevance to Nic's work and interests:
+
+95-100: Directly about Nic's active work
+  - Based rollups, preconfirmations, sequencer design
+  - TEE-based proving, L1↔L2 composability
+  - Puffer Finance or UniFi ecosystem updates
+
+85-94: Core research areas
+  - MEV, OFA (Order Flow Auctions), PBS, block building
+  - Account Abstraction (ERC-4337, ERC-7702, wallet design)
+  - Censorship resistance, force inclusion mechanisms
+  - ZK proofs, Data Availability (DAS, EIP-4844, blob markets)
+
+70-84: Adjacent technical content
+  - L2 architecture deep-dives (OP Stack, Arbitrum, StarkNet, ZKsync)
+  - Ethereum CL/EL protocol changes, EIPs, hard fork planning
+  - Smart contract security, audit findings, exploit analysis
+  - Rollup economics, security models, escape hatches
+  - Developer tooling for protocol/infra engineers
+
+50-69: Peripheral interest
+  - General Ethereum ecosystem news (surface-level)
+  - Crypto governance and DAO mechanics
+  - Tangentially related L1/L2 announcements
+
+0-49: Not relevant — skip
+  - Price speculation, trading signals, market commentary
+  - NFT drops, meme coins, celebrity opinions
+  - Engagement farming, giveaways, generic "gm" posts
+  - Product marketing without technical substance
+  - Drama, gossip, influencer takes
+
+Return JSON array:
+[{{"tweet_id": "...", "score": 85, "reason": "..."}}]
+
+Tweets to filter:
+{tweets_json}"""
+
+
 class ClaudeFilter:
     """Claude-based tweet filter."""
 
@@ -70,12 +120,14 @@ class ClaudeFilter:
         self,
         tweets: list[dict],
         threshold: int = 70,
+        rag_context: Optional[str] = None,
     ) -> list[dict]:
         """Filter tweets using Claude.
 
         Args:
             tweets: List of tweet dictionaries
             threshold: Minimum score to pass filter (default 70)
+            rag_context: Optional RAG context string with similar voted tweets
 
         Returns:
             List of filtered tweets with scores and reasons
@@ -96,7 +148,16 @@ class ClaudeFilter:
             })
 
         tweets_json = json.dumps(tweets_for_claude, indent=2)
-        prompt = PRODUCTION_PROMPT_V1.format(tweets_json=tweets_json)
+
+        if rag_context:
+            prompt = PRODUCTION_PROMPT_V2.format(
+                tweets_json=tweets_json,
+                rag_context=rag_context,
+            )
+            logger.info("Using RAG-enhanced prompt (V2)")
+        else:
+            prompt = PRODUCTION_PROMPT_V1.format(tweets_json=tweets_json)
+            logger.info("Using standard prompt (V1, no RAG context)")
 
         try:
             response = self.client.messages.create(

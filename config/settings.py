@@ -36,8 +36,10 @@ class Settings(BaseSettings):
     schedule_hour: int = Field(default=9, description="Hour to run daily curation")
     schedule_timezone: str = Field(default="Asia/Taipei", description="Timezone for scheduling")
 
-    # Optional: Embedding service (Phase 2)
-    voyage_api_key: Optional[str] = Field(default=None, description="Voyage AI API key")
+    # OpenAI Embeddings (Phase 2 RAG)
+    openai_api_key: Optional[str] = Field(default=None, description="OpenAI API key for embeddings")
+    embedding_model: str = Field(default="text-embedding-3-small", description="OpenAI embedding model")
+    rag_similarity_limit: int = Field(default=5, description="Max similar tweets to inject as RAG context")
 
     model_config = {
         "env_file": ".env",

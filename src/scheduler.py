@@ -11,6 +11,7 @@ from src.twitter_client import TwitterClient
 from src.claude_filter import ClaudeFilter
 from src.telegram_bot import TelegramCurator
 from src.database import DatabaseClient
+from src.embeddings import EmbeddingManager
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +31,7 @@ class DailyCurator:
         favorite_threshold_offset: int = 20,
         muted_threshold_offset: int = 15,
         starred_author_max_tweets: int = 10,
+        embedding_manager: Optional[EmbeddingManager] = None,
     ):
         """Initialize daily curator with all components.
 
@@ -44,11 +46,13 @@ class DailyCurator:
             favorite_threshold_offset: How much lower for starred authors
             muted_threshold_offset: How much higher for muted authors
             starred_author_max_tweets: Max tweets per starred author timeline
+            embedding_manager: Optional EmbeddingManager for RAG
         """
         self.twitter = twitter
         self.claude = claude
         self.telegram = telegram
         self.db = db
+        self.embedding_manager = embedding_manager
         self.fetch_hours = fetch_hours
         self.max_tweets = max_tweets
         self.starred_author_max_tweets = starred_author_max_tweets
@@ -166,11 +170,29 @@ class DailyCurator:
                 logger.info("No tweets remaining after retweet filter")
                 return stats
 
+            # Step 1d: Build RAG context from similar voted tweets
+            rag_context = None
+            if self.embedding_manager and self.embedding_manager.enabled:
+                logger.info("Step 1d: Building RAG context from similar voted tweets...")
+                try:
+                    similar = self.embedding_manager.find_similar_voted_tweets(
+                        tweets_for_filtering
+                    )
+                    if similar:
+                        rag_context = self._format_rag_context(similar)
+                        stats["rag_matches"] = len(similar)
+                        logger.info(f"RAG context built with {len(similar)} similar voted tweets")
+                    else:
+                        logger.info("No similar voted tweets found for RAG context")
+                except Exception as e:
+                    logger.warning(f"RAG context generation failed, continuing without: {e}")
+
             # Step 2: Score tweets with Claude (floor threshold gets all 50+ tweets)
             logger.info("Step 2: Scoring tweets with Claude...")
             scored_tweets = self.claude.filter_tweets(
                 tweets_for_filtering,
                 threshold=self.filter_threshold,
+                rag_context=rag_context,
             )
 
             # Step 2b: Apply per-author thresholds
@@ -251,6 +273,32 @@ class DailyCurator:
 
             return stats
 
+    @staticmethod
+    def _format_rag_context(similar_tweets: list[dict]) -> str:
+        """Format similar voted tweets into RAG context string for Claude."""
+        liked = [t for t in similar_tweets if t["vote"] == "up"]
+        disliked = [t for t in similar_tweets if t["vote"] == "down"]
+
+        lines = []
+        if liked:
+            lines.append("Liked tweets (boost similar content):")
+            for t in liked:
+                text_preview = t["text"][:120].replace("\n", " ")
+                lines.append(
+                    f'- @{t["author_username"]}: "{text_preview}" (similarity: {t["similarity"]:.2f})'
+                )
+            lines.append("")
+
+        if disliked:
+            lines.append("Disliked tweets (penalize similar content):")
+            for t in disliked:
+                text_preview = t["text"][:120].replace("\n", " ")
+                lines.append(
+                    f'- @{t["author_username"]}: "{text_preview}" (similarity: {t["similarity"]:.2f})'
+                )
+
+        return "\n".join(lines)
+
     def _deduplicate_tweets(self, tweets: list[dict]) -> list[dict]:
         """Remove tweets that are already in the database.
 
@@ -300,8 +348,11 @@ async def feedback_handler(
     vote: str,
     telegram_message_id: int,
     notes: str = None,
+    embedding_manager: Optional[EmbeddingManager] = None,
 ) -> None:
     """Handle feedback from Telegram buttons.
+
+    Saves feedback and embeds the tweet for future RAG context.
 
     Args:
         db: Database client
@@ -309,6 +360,7 @@ async def feedback_handler(
         vote: 'up' or 'down'
         telegram_message_id: Telegram message ID
         notes: Optional reason for the vote
+        embedding_manager: Optional EmbeddingManager to embed voted tweet
     """
     try:
         db.save_feedback(
@@ -320,3 +372,17 @@ async def feedback_handler(
         logger.info(f"Saved feedback: tweet={tweet_id}, vote={vote}, notes={notes}")
     except Exception as e:
         logger.error(f"Error saving feedback: {e}")
+        return
+
+    # Embed the tweet for RAG (skip if already embedded)
+    if embedding_manager and embedding_manager.enabled:
+        try:
+            if not db.has_embedding(tweet_id):
+                tweet = db.get_tweet_by_id(tweet_id)
+                if tweet and tweet.get("text"):
+                    embedding = embedding_manager.generate_embedding(tweet["text"])
+                    if embedding:
+                        db.save_embedding(tweet_id, embedding)
+                        logger.info(f"Embedded voted tweet {tweet_id} for RAG")
+        except Exception as e:
+            logger.warning(f"Failed to embed voted tweet {tweet_id}: {e}")
