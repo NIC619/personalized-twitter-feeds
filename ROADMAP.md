@@ -5,23 +5,28 @@
 - [x] Twitter API client (fetch home timeline)
 - [x] Claude filtering with scoring (0-100)
 - [x] Telegram bot with formatted messages
-- [x] Feedback buttons (👍 👎)
-- [x] Favorite author button (⭐)
-- [x] Supabase storage (tweets, feedback, favorite_authors)
-- [x] CLI options (--once, --schedule, -n, --hours)
+- [x] Feedback buttons (👍 👎) with category/reason selection
+- [x] Favorite author button (⭐) with toggle
+- [x] Mute author button (🔇) with toggle
+- [x] Supabase storage (tweets, feedback, favorite_authors, muted_authors)
+- [x] CLI options (--once, --schedule, --bot-only, --test, -n, --hours)
 - [x] Debug logging for all scores
-- [ ] End-to-end testing with real data
+- [x] Comprehensive test suite (pytest)
+- [x] Undo feedback functionality (10-second grace period)
+- [x] Retweet detection and filtering
+- [x] Conversation handling for /star command
 
 ## Phase 2: Personalization & RAG
 
-### Favorite Authors Boost
-- [ ] Fetch favorite authors list before filtering
-- [ ] Add to Claude prompt: "Boost +10 for tweets from: @author1, @author2..."
-- [ ] Show ⭐ indicator in Telegram for favorite authors
+### Favorite Authors Boost ✅
+- [x] Fetch favorite authors list before filtering
+- [x] Fetch starred authors' tweets separately (configurable per-author limit)
+- [x] Per-author threshold tiers (favorite: lower threshold, muted: higher threshold)
+- [x] Show ⭐ indicator in /stats for favorite authors, 🔇 for muted
 
 ### Feedback-based RAG
-- [ ] Generate embeddings for tweets (Voyage AI or sentence-transformers)
-- [ ] Store embeddings in Supabase pgvector
+- [ ] Generate embeddings for tweets (Voyage AI or sentence-transformers) — stub exists in `src/embeddings.py`
+- [ ] Store embeddings in Supabase pgvector — schema prepared (tweet_embeddings table)
 - [ ] Before filtering: find similar past tweets user voted on
 - [ ] Add to prompt: "User liked these similar tweets: ... User disliked: ..."
 - [ ] Track accuracy: % of sent tweets that got 👍
@@ -33,10 +38,10 @@
 
 ## Phase 3: Automation & Polish
 
-### Scheduling
-- [ ] Reliable daily scheduler (cron or cloud-based)
-- [ ] Multiple runs per day option
-- [ ] Timezone-aware scheduling
+### Scheduling ✅
+- [x] Reliable daily scheduler (schedule library with async support)
+- [x] Multiple runs per day option
+- [x] Timezone-aware scheduling (default: Asia/Taipei)
 
 ### Monitoring
 - [ ] Daily stats summary in Telegram
@@ -45,9 +50,10 @@
 - [ ] Track API costs
 
 ### UX Improvements
-- [ ] /stats command in Telegram (show feedback ratio)
-- [ ] /favorites command (list favorite authors)
-- [ ] /unfav command (remove favorite author)
+- [x] /stats command in Telegram (paginated author performance table with scores, votes, filter averages)
+- [x] /starred command (list favorite authors)
+- [x] /star command (add/toggle favorite author — supports username, @mention, URL, multiple authors)
+- [ ] /unfav command (remove favorite author) — covered by /star toggle
 - [ ] Reply to tweet message to add notes
 
 ## Future Ideas
