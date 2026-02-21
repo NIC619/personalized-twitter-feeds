@@ -18,6 +18,16 @@ def components():
 
 
 @pytest.fixture
+def mock_embedding_manager():
+    """Mocked EmbeddingManager."""
+    mgr = MagicMock()
+    mgr.enabled = True
+    mgr.find_similar_voted_tweets.return_value = []
+    mgr.generate_embedding.return_value = [0.1] * 1536
+    return mgr
+
+
+@pytest.fixture
 def curator(components):
     """DailyCurator with all mocked dependencies."""
     twitter, claude, telegram, db = components
@@ -207,3 +217,151 @@ class TestFeedbackHandler:
             vote="up",
             telegram_message_id=42,
         )
+
+    @pytest.mark.asyncio
+    async def test_embeds_tweet_on_feedback(self, mock_embedding_manager):
+        db = MagicMock()
+        db.has_embedding.return_value = False
+        db.get_tweet_by_id.return_value = {"tweet_id": "123", "text": "great content"}
+
+        await feedback_handler(
+            db=db,
+            tweet_id="123",
+            vote="up",
+            telegram_message_id=42,
+            embedding_manager=mock_embedding_manager,
+        )
+
+        db.save_feedback.assert_called_once()
+        mock_embedding_manager.generate_embedding.assert_called_once_with("great content")
+        db.save_embedding.assert_called_once_with("123", [0.1] * 1536)
+
+    @pytest.mark.asyncio
+    async def test_skips_embedding_if_already_exists(self, mock_embedding_manager):
+        db = MagicMock()
+        db.has_embedding.return_value = True
+
+        await feedback_handler(
+            db=db,
+            tweet_id="123",
+            vote="up",
+            telegram_message_id=42,
+            embedding_manager=mock_embedding_manager,
+        )
+
+        mock_embedding_manager.generate_embedding.assert_not_called()
+        db.save_embedding.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_embedding_failure_does_not_block_feedback(self, mock_embedding_manager):
+        db = MagicMock()
+        db.has_embedding.side_effect = Exception("DB error")
+
+        # Feedback should still be saved
+        await feedback_handler(
+            db=db,
+            tweet_id="123",
+            vote="up",
+            telegram_message_id=42,
+            embedding_manager=mock_embedding_manager,
+        )
+
+        db.save_feedback.assert_called_once()
+
+
+class TestFormatRagContext:
+    def test_format_liked_and_disliked(self):
+        similar = [
+            {"tweet_id": "1", "text": "Great technical content about rollups", "author_username": "vitalik", "vote": "up", "similarity": 0.92},
+            {"tweet_id": "2", "text": "Buy this meme coin now", "author_username": "spammer", "vote": "down", "similarity": 0.85},
+        ]
+        result = DailyCurator._format_rag_context(similar)
+
+        assert "Liked tweets" in result
+        assert "Disliked tweets" in result
+        assert "@vitalik" in result
+        assert "@spammer" in result
+        assert "0.92" in result
+        assert "0.85" in result
+
+    def test_format_only_liked(self):
+        similar = [
+            {"tweet_id": "1", "text": "Good stuff", "author_username": "dev", "vote": "up", "similarity": 0.9},
+        ]
+        result = DailyCurator._format_rag_context(similar)
+        assert "Liked tweets" in result
+        assert "Disliked tweets" not in result
+
+    def test_format_only_disliked(self):
+        similar = [
+            {"tweet_id": "1", "text": "Bad stuff", "author_username": "troll", "vote": "down", "similarity": 0.8},
+        ]
+        result = DailyCurator._format_rag_context(similar)
+        assert "Liked tweets" not in result
+        assert "Disliked tweets" in result
+
+
+class TestRagInPipeline:
+    @pytest.mark.asyncio
+    async def test_rag_context_passed_to_claude(self, components, mock_embedding_manager):
+        twitter, claude, telegram, db = components
+
+        curator = DailyCurator(
+            twitter=twitter, claude=claude, telegram=telegram, db=db,
+            filter_threshold=70, favorite_threshold_offset=20,
+            muted_threshold_offset=15, embedding_manager=mock_embedding_manager,
+        )
+
+        tweets = [
+            {"tweet_id": "1", "author_username": "dev", "text": "rollup stuff", "is_retweet": False},
+        ]
+        twitter.fetch_timeline.return_value = tweets
+        twitter.fetch_user_tweets.return_value = []
+        db.get_tweet_by_id.return_value = None
+        db.get_favorite_authors.return_value = []
+        db.get_muted_authors.return_value = []
+
+        mock_embedding_manager.find_similar_voted_tweets.return_value = [
+            {"tweet_id": "x", "text": "liked tweet", "author_username": "a", "vote": "up", "similarity": 0.9},
+        ]
+
+        scored = [dict(tweets[0], filter_score=80, filter_reason="good", filtered=True)]
+        claude.filter_tweets.return_value = scored
+        telegram.send_daily_digest.return_value = [101]
+
+        stats = await curator.run_daily_curation()
+
+        # Verify rag_context was passed to Claude
+        call_args = claude.filter_tweets.call_args
+        assert call_args[1].get("rag_context") is not None
+        assert "liked tweet" in call_args[1]["rag_context"]
+        assert stats.get("rag_matches") == 1
+
+    @pytest.mark.asyncio
+    async def test_pipeline_works_without_embedding_manager(self, components):
+        twitter, claude, telegram, db = components
+
+        curator = DailyCurator(
+            twitter=twitter, claude=claude, telegram=telegram, db=db,
+            filter_threshold=70, favorite_threshold_offset=20,
+            muted_threshold_offset=15,
+        )
+
+        tweets = [
+            {"tweet_id": "1", "author_username": "dev", "text": "stuff", "is_retweet": False},
+        ]
+        twitter.fetch_timeline.return_value = tweets
+        twitter.fetch_user_tweets.return_value = []
+        db.get_tweet_by_id.return_value = None
+        db.get_favorite_authors.return_value = []
+        db.get_muted_authors.return_value = []
+
+        scored = [dict(tweets[0], filter_score=80, filter_reason="good", filtered=True)]
+        claude.filter_tweets.return_value = scored
+        telegram.send_daily_digest.return_value = [101]
+
+        stats = await curator.run_daily_curation()
+
+        # Should work fine with no RAG
+        call_args = claude.filter_tweets.call_args
+        assert call_args[1].get("rag_context") is None

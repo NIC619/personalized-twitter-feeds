@@ -158,6 +158,45 @@ class TestFilterTweets:
         with pytest.raises(Exception, match="API error"):
             claude_filter.filter_tweets([sample_tweet])
 
+    def test_rag_context_uses_v2_prompt(self, claude_filter, sample_tweet):
+        scores_json = json.dumps([
+            {"tweet_id": "123456789", "score": 90, "reason": "Boosted by RAG"},
+        ])
+        mock_response = MagicMock()
+        mock_response.content = [MagicMock(text=scores_json)]
+        claude_filter.client.messages.create.return_value = mock_response
+
+        rag_context = (
+            'Liked tweets (boost similar content):\n'
+            '- @vitalik: "EIP blob market" (similarity: 0.92)\n'
+        )
+        result = claude_filter.filter_tweets(
+            [sample_tweet], threshold=70, rag_context=rag_context
+        )
+
+        assert len(result) == 1
+        assert result[0]["filter_score"] == 90
+
+        # Verify V2 prompt was used (contains "User Feedback Context")
+        call_args = claude_filter.client.messages.create.call_args
+        prompt_text = call_args[1]["messages"][0]["content"]
+        assert "User Feedback Context" in prompt_text
+        assert "EIP blob market" in prompt_text
+
+    def test_no_rag_context_uses_v1_prompt(self, claude_filter, sample_tweet):
+        scores_json = json.dumps([
+            {"tweet_id": "123456789", "score": 85, "reason": "Good"},
+        ])
+        mock_response = MagicMock()
+        mock_response.content = [MagicMock(text=scores_json)]
+        claude_filter.client.messages.create.return_value = mock_response
+
+        result = claude_filter.filter_tweets([sample_tweet], threshold=70)
+
+        call_args = claude_filter.client.messages.create.call_args
+        prompt_text = call_args[1]["messages"][0]["content"]
+        assert "User Feedback Context" not in prompt_text
+
     def test_high_threshold(self, claude_filter, sample_tweets):
         scores_json = json.dumps([
             {"tweet_id": "123456789", "score": 85, "reason": "EIP discussion"},
