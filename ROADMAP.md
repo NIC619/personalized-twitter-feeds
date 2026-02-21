@@ -24,11 +24,14 @@
 - [x] Per-author threshold tiers (favorite: lower threshold, muted: higher threshold)
 - [x] Show ⭐ indicator in /stats for favorite authors, 🔇 for muted
 
-### Feedback-based RAG
-- [ ] Generate embeddings for tweets (Voyage AI or sentence-transformers) — stub exists in `src/embeddings.py`
-- [ ] Store embeddings in Supabase pgvector — schema prepared (tweet_embeddings table)
-- [ ] Before filtering: find similar past tweets user voted on
-- [ ] Add to prompt: "User liked these similar tweets: ... User disliked: ..."
+### Feedback-based RAG ✅
+- [x] Generate embeddings for tweets using OpenAI `text-embedding-3-small` (1536 dims)
+- [x] Store embeddings in Supabase pgvector (`tweet_embeddings` table with cosine similarity)
+- [x] Embed voted tweets on feedback (incremental RAG corpus building)
+- [x] Before filtering: find similar past tweets user voted on via pgvector
+- [x] Inject RAG context into Claude prompt (liked/disliked tweets with similarity scores)
+- [x] Backfill script for existing feedback (`scripts/backfill_embeddings.py`)
+- [x] Graceful fallback: works without OpenAI key (uses V1 prompt, no RAG)
 - [ ] Track accuracy: % of sent tweets that got 👍
 
 ### Improvements
