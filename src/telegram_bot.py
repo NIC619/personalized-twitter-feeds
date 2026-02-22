@@ -22,6 +22,7 @@ logger = logging.getLogger(__name__)
 
 # Conversation states
 STAR_AWAITING_INPUT = 0
+LIKE_AWAITING_INPUT = 1
 
 
 class TelegramCurator:
@@ -36,6 +37,7 @@ class TelegramCurator:
         mute_author_callback: Optional[Callable] = None,
         stats_callback: Optional[Callable] = None,
         list_starred_callback: Optional[Callable] = None,
+        like_tweet_callback: Optional[Callable] = None,
     ):
         """Initialize Telegram bot.
 
@@ -47,6 +49,7 @@ class TelegramCurator:
             mute_author_callback: Async callback function(username) → state string
             stats_callback: Async callback function() → list of author stat dicts
             list_starred_callback: Async callback function() → list of starred usernames
+            like_tweet_callback: Async callback function(tweet_id) → tweet dict or None
         """
         self.bot_token = bot_token
         self.chat_id = chat_id
@@ -55,6 +58,7 @@ class TelegramCurator:
         self.mute_author_callback = mute_author_callback
         self.stats_callback = stats_callback
         self.list_starred_callback = list_starred_callback
+        self.like_tweet_callback = like_tweet_callback
         self.application: Optional[Application] = None
         self._pending_feedback: dict[str, dict] = {}  # tweet_id → pending save info
         self._tweet_authors: dict[str, str] = {}  # tweet_id → username
@@ -76,6 +80,7 @@ class TelegramCurator:
         """Register bot commands so they appear in Telegram's command menu."""
         commands = [
             BotCommand("star", "Toggle starred status — /star username"),
+            BotCommand("like", "Upvote a tweet — /like tweet_url"),
             BotCommand("starred", "List all starred authors"),
             BotCommand("stats", "Show author performance stats"),
             BotCommand("help", "Show help message"),
@@ -113,6 +118,20 @@ class TelegramCurator:
             )
         )
         self.application.add_handler(
+            ConversationHandler(
+                entry_points=[CommandHandler("like", self._handle_like)],
+                states={
+                    LIKE_AWAITING_INPUT: [
+                        MessageHandler(
+                            filters.TEXT & ~filters.COMMAND,
+                            self._handle_like_input,
+                        )
+                    ],
+                },
+                fallbacks=[CommandHandler("cancel", self._handle_like_cancel)],
+            )
+        )
+        self.application.add_handler(
             CommandHandler("starred", self._handle_starred)
         )
 
@@ -141,6 +160,7 @@ class TelegramCurator:
             "Twitter Curator Help:\n\n"
             "Commands:\n"
             "/star username or URL — toggle starred status for an author\n"
+            "/like tweet URL or ID — upvote a tweet with a reason\n"
             "/starred — list all starred authors\n"
             "/stats — show author performance stats\n\n"
             "- I send you filtered tweets daily\n"
@@ -263,6 +283,169 @@ class TelegramCurator:
                 results.append(f"❌ @{username} — error")
 
         await update.message.reply_text("\n".join(results))
+
+    @staticmethod
+    def _extract_tweet_id(arg: str) -> str | None:
+        """Extract a tweet ID from a URL or raw numeric string.
+
+        Supports:
+            - https://twitter.com/user/status/123456
+            - https://x.com/user/status/123456
+            - 123456 (raw numeric ID)
+
+        Returns:
+            Tweet ID string, or None if unrecognizable
+        """
+        match = re.match(
+            r"https?://(?:www\.)?(?:twitter|x)\.com/[A-Za-z0-9_]+/status/(\d+)",
+            arg,
+        )
+        if match:
+            return match.group(1)
+        if arg.isdigit():
+            return arg
+        return None
+
+    async def _handle_like(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> int:
+        """Handle /like command to upvote a tweet.
+
+        If called with args, processes immediately.
+        If called without args, prompts and waits for input.
+        """
+        if not self.like_tweet_callback:
+            await update.message.reply_text("Like feature not available.")
+            return ConversationHandler.END
+
+        if not context.args:
+            await update.message.reply_text(
+                "Send me a tweet URL or ID to like.\n"
+                "You can send multiple separated by spaces.\n\n"
+                "/cancel to abort."
+            )
+            return LIKE_AWAITING_INPUT
+
+        await self._like_tweets(update, context.args)
+        return ConversationHandler.END
+
+    async def _handle_like_input(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> int:
+        """Handle follow-up message with tweet URLs/IDs after /like prompt."""
+        args = update.message.text.strip().split()
+        if not args:
+            await update.message.reply_text("No input received. Try again or /cancel.")
+            return LIKE_AWAITING_INPUT
+
+        await self._like_tweets(update, args)
+        return ConversationHandler.END
+
+    async def _handle_like_cancel(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> int:
+        """Handle /cancel during like conversation."""
+        await update.message.reply_text("Cancelled.")
+        return ConversationHandler.END
+
+    async def _like_tweets(self, update: Update, args: list[str]) -> None:
+        """Process a list of tweet URL/ID args and send each with reason buttons."""
+        for arg in args:
+            tweet_id = self._extract_tweet_id(arg)
+            if not tweet_id:
+                await update.message.reply_text(f"Could not parse tweet ID from: {arg}")
+                continue
+
+            try:
+                tweet = await self.like_tweet_callback(tweet_id)
+            except Exception as e:
+                logger.error(f"Error fetching tweet {tweet_id}: {e}")
+                await update.message.reply_text(f"Error fetching tweet {tweet_id}.")
+                continue
+
+            if not tweet:
+                await update.message.reply_text(f"Tweet {tweet_id} not found.")
+                continue
+
+            # Format message without score/reason
+            message = self._format_like_message(tweet)
+
+            # Store author mapping for undo functionality
+            self._tweet_authors[tweet_id] = tweet["author_username"]
+
+            # Send with reason category buttons
+            keyboard = self._make_like_reason_buttons(tweet_id)
+
+            try:
+                await self.application.bot.send_message(
+                    chat_id=self.chat_id,
+                    text=message,
+                    reply_markup=keyboard,
+                    parse_mode="HTML",
+                    disable_web_page_preview=True,
+                )
+            except Exception as e:
+                logger.error(f"Error sending like message for {tweet_id}: {e}")
+                await update.message.reply_text(f"Error sending tweet {tweet_id}.")
+
+    @staticmethod
+    def _make_like_reason_buttons(tweet_id: str) -> InlineKeyboardMarkup:
+        """Build the reason category buttons for a liked tweet."""
+        return InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton(
+                    "Tech content",
+                    callback_data=f"like_reason:{tweet_id}:tech",
+                ),
+                InlineKeyboardButton(
+                    "Non-tech insight",
+                    callback_data=f"like_reason:{tweet_id}:non_tech",
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    "Soft skills",
+                    callback_data=f"like_reason:{tweet_id}:soft_skills",
+                ),
+                InlineKeyboardButton(
+                    "Life wisdom",
+                    callback_data=f"like_reason:{tweet_id}:life_wisdom",
+                ),
+            ],
+        ])
+
+    def _format_like_message(self, tweet: dict) -> str:
+        """Format tweet for like message (no score/reason header)."""
+        metrics = tweet.get("metrics", {})
+        text = self._escape_html(tweet["text"])
+
+        likes = metrics.get("likes", 0)
+        retweets = metrics.get("retweets", 0)
+        replies = metrics.get("replies", 0)
+
+        likes_str = self._format_number(likes)
+        retweets_str = self._format_number(retweets)
+        replies_str = self._format_number(replies)
+
+        message = (
+            f"<b>@{tweet['author_username']}</b> | "
+            f"<a href=\"{tweet['url']}\">View Tweet</a>\n\n"
+            f"{text}"
+        )
+
+        quoted = tweet.get("quoted_tweet")
+        if quoted:
+            qt_author = self._escape_html(quoted["author_username"])
+            qt_text = self._escape_html(quoted["text"])
+            qt_lines = qt_text.split("\n")
+            qt_block = "\n".join(f"┃ {line}" for line in qt_lines)
+            message += (
+                f"\n\n┃ <b>@{qt_author}:</b>\n"
+                f"{qt_block}"
+            )
+
+        message += f"\n\n❤️ {likes_str}  🔁 {retweets_str}  💬 {replies_str}"
+        return message
 
     async def _handle_starred(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
@@ -505,6 +688,105 @@ class TelegramCurator:
                 "task": task,
                 "message_id": message_id,
             }
+
+        # Handle like reason: "like_reason:{tweet_id}:{reason_code}"
+        elif data.startswith("like_reason:"):
+            parts = data.split(":")
+            if len(parts) != 3:
+                return
+
+            _, tweet_id, reason_code = parts
+
+            reason_labels = {
+                "tech": "Tech content",
+                "non_tech": "Non-tech insight",
+                "soft_skills": "Soft skills",
+                "life_wisdom": "Life wisdom",
+            }
+            reason = reason_labels.get(reason_code, reason_code)
+            message_id = query.message.message_id
+
+            # Cancel any existing pending feedback for this tweet
+            if tweet_id in self._pending_feedback:
+                self._pending_feedback[tweet_id]["task"].cancel()
+
+            # Show confirmation with undo button
+            await query.edit_message_reply_markup(
+                reply_markup=InlineKeyboardMarkup([
+                    [
+                        InlineKeyboardButton(
+                            f"👍 {reason}", callback_data="voted"
+                        ),
+                        InlineKeyboardButton(
+                            "↩ Undo", callback_data=f"like_undo:{tweet_id}"
+                        ),
+                    ]
+                ])
+            )
+
+            # Schedule feedback save after 10 seconds
+            async def _save_like_after_delay(
+                t_id=tweet_id, r=reason, m_id=message_id
+            ):
+                await asyncio.sleep(10)
+                if t_id not in self._pending_feedback:
+                    return
+
+                if self.feedback_callback:
+                    try:
+                        await self.feedback_callback(
+                            tweet_id=t_id,
+                            vote="up",
+                            telegram_message_id=m_id,
+                            notes=r,
+                        )
+                        logger.info(
+                            f"Like feedback recorded: tweet={t_id}, reason={r}"
+                        )
+                    except Exception as e:
+                        logger.error(f"Error recording like feedback: {e}")
+
+                # Remove undo button
+                try:
+                    await self.application.bot.edit_message_reply_markup(
+                        chat_id=self.chat_id,
+                        message_id=m_id,
+                        reply_markup=InlineKeyboardMarkup([
+                            [InlineKeyboardButton(
+                                f"👍 {r}", callback_data="voted"
+                            )]
+                        ]),
+                    )
+                except Exception:
+                    pass
+
+                self._pending_feedback.pop(t_id, None)
+
+            task = asyncio.create_task(_save_like_after_delay())
+            self._pending_feedback[tweet_id] = {
+                "task": task,
+                "message_id": message_id,
+            }
+
+        # Handle like undo: "like_undo:{tweet_id}"
+        elif data.startswith("like_undo:"):
+            parts = data.split(":")
+            if len(parts) != 2:
+                return
+
+            _, tweet_id = parts
+
+            if tweet_id not in self._pending_feedback:
+                logger.info(f"Like undo too late: tweet={tweet_id}, already saved")
+                return
+
+            self._pending_feedback[tweet_id]["task"].cancel()
+            del self._pending_feedback[tweet_id]
+
+            await query.edit_message_reply_markup(
+                reply_markup=self._make_like_reason_buttons(tweet_id)
+            )
+            logger.info(f"Like feedback undone: tweet={tweet_id}")
 
         # Handle undo: "undo:{tweet_id}"
         elif data.startswith("undo:"):

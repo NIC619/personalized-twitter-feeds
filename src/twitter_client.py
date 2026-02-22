@@ -363,6 +363,70 @@ class TwitterClient:
                 else:
                     raise
 
+    def fetch_tweet(self, tweet_id: str) -> dict | None:
+        """Fetch a single tweet by ID.
+
+        Args:
+            tweet_id: Twitter ID of the tweet
+
+        Returns:
+            Normalized tweet dict, or None if not found
+        """
+        tweet_fields = [
+            "created_at",
+            "public_metrics",
+            "entities",
+            "author_id",
+            "conversation_id",
+            "referenced_tweets",
+        ]
+        user_fields = ["username", "name", "profile_image_url"]
+        expansions = ["author_id", "referenced_tweets.id", "referenced_tweets.id.author_id"]
+
+        for attempt in range(3):
+            try:
+                response = self.client.get_tweet(
+                    id=tweet_id,
+                    tweet_fields=tweet_fields,
+                    user_fields=user_fields,
+                    expansions=expansions,
+                )
+                break
+            except tweepy.TweepyException as e:
+                if attempt < 2:
+                    wait_time = 2 ** (attempt + 1)
+                    logger.warning(
+                        f"Error fetching tweet {tweet_id} (attempt {attempt + 1}): {e}. "
+                        f"Retrying in {wait_time}s..."
+                    )
+                    time.sleep(wait_time)
+                else:
+                    raise
+
+        if not response or not response.data:
+            return None
+
+        tweet = response.data
+
+        # Build user lookup from includes
+        users = {}
+        if response.includes and "users" in response.includes:
+            for user in response.includes["users"]:
+                users[user.id] = user
+
+        # Build referenced tweets lookup from includes
+        ref_tweets_map = {}
+        if response.includes and "tweets" in response.includes:
+            for ref_tweet in response.includes["tweets"]:
+                ref_tweets_map[ref_tweet.id] = ref_tweet
+
+        author = users.get(tweet.author_id)
+        if not author:
+            logger.warning(f"No author found for tweet {tweet_id}")
+            return None
+
+        return self._normalize_tweet(tweet, author, ref_tweets_map, users)
+
     @staticmethod
     def get_tweet_url(tweet_id: str, username: str) -> str:
         """Generate tweet URL.

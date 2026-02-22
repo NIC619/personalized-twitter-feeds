@@ -284,6 +284,57 @@ class TestFetchTimeline:
         assert result[0]["tweet_id"] == "1"
         assert result[1]["tweet_id"] == "2"
 
+
+# --- fetch_tweet ---
+
+class TestFetchTweet:
+    def test_returns_normalized_tweet(self, twitter_client):
+        from datetime import datetime, timezone
+        created = datetime(2025, 1, 15, 10, 0, 0, tzinfo=timezone.utc)
+        tweet = _make_tweet_obj(tweet_id=42, text="Hello world", author_id=100, created_at=created)
+        user = _make_user_obj(user_id=100, username="alice", name="Alice")
+
+        mock_resp = SimpleNamespace(
+            data=tweet,
+            includes={"users": [user]},
+        )
+        twitter_client.client.get_tweet = MagicMock(return_value=mock_resp)
+
+        result = twitter_client.fetch_tweet("42")
+
+        assert result is not None
+        assert result["tweet_id"] == "42"
+        assert result["author_username"] == "alice"
+        assert result["text"] == "Hello world"
+        assert result["url"] == "https://twitter.com/alice/status/42"
+
+    def test_returns_none_when_no_data(self, twitter_client):
+        mock_resp = SimpleNamespace(data=None, includes=None)
+        twitter_client.client.get_tweet = MagicMock(return_value=mock_resp)
+
+        result = twitter_client.fetch_tweet("999")
+        assert result is None
+
+    def test_returns_none_when_response_is_none(self, twitter_client):
+        twitter_client.client.get_tweet = MagicMock(return_value=None)
+
+        result = twitter_client.fetch_tweet("999")
+        assert result is None
+
+    def test_returns_none_when_no_author(self, twitter_client):
+        tweet = _make_tweet_obj(tweet_id=42, author_id=999)
+        user = _make_user_obj(user_id=100, username="alice", name="Alice")
+
+        mock_resp = SimpleNamespace(
+            data=tweet,
+            includes={"users": [user]},
+        )
+        twitter_client.client.get_tweet = MagicMock(return_value=mock_resp)
+
+        result = twitter_client.fetch_tweet("42")
+        assert result is None
+
+
     def test_skips_tweet_without_author(self, twitter_client):
         from datetime import datetime, timezone
         created = datetime(2025, 1, 15, 10, 0, 0, tzinfo=timezone.utc)

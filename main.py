@@ -136,6 +136,16 @@ def init_components(settings, num_tweets=None, hours=None):
     async def on_list_starred() -> list[str]:
         return db.get_favorite_authors()
 
+    # Create like tweet callback
+    async def on_like_tweet(tweet_id: str) -> dict | None:
+        tweet = db.get_tweet_by_id(tweet_id)
+        if tweet:
+            return tweet
+        tweet = twitter.fetch_tweet(tweet_id)
+        if tweet:
+            db.save_tweets([tweet])
+        return tweet
+
     # Initialize Telegram bot
     telegram = TelegramCurator(
         bot_token=settings.telegram_bot_token,
@@ -145,6 +155,7 @@ def init_components(settings, num_tweets=None, hours=None):
         mute_author_callback=on_mute_author,
         stats_callback=on_stats,
         list_starred_callback=on_list_starred,
+        like_tweet_callback=on_like_tweet,
     )
 
     # Initialize curator

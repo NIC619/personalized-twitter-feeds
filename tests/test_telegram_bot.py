@@ -264,3 +264,134 @@ class TestExtractUsername:
 
     def test_uppercase_normalized(self):
         assert TelegramCurator._extract_username("ALICE") == "alice"
+
+
+# --- _extract_tweet_id ---
+
+class TestExtractTweetId:
+    def test_twitter_url(self):
+        assert TelegramCurator._extract_tweet_id(
+            "https://twitter.com/alice/status/123456789"
+        ) == "123456789"
+
+    def test_x_url(self):
+        assert TelegramCurator._extract_tweet_id(
+            "https://x.com/bob_dev/status/987654321"
+        ) == "987654321"
+
+    def test_www_prefix(self):
+        assert TelegramCurator._extract_tweet_id(
+            "https://www.twitter.com/alice/status/111"
+        ) == "111"
+
+    def test_raw_numeric_id(self):
+        assert TelegramCurator._extract_tweet_id("123456789") == "123456789"
+
+    def test_invalid_input_returns_none(self):
+        assert TelegramCurator._extract_tweet_id("not_a_tweet") is None
+
+    def test_profile_url_returns_none(self):
+        assert TelegramCurator._extract_tweet_id("https://twitter.com/alice") is None
+
+    def test_empty_string_returns_none(self):
+        assert TelegramCurator._extract_tweet_id("") is None
+
+
+# --- like reason callback ---
+
+class TestLikeReasonCallback:
+    @pytest.fixture
+    def bot_with_feedback(self):
+        async def fake_feedback(**kwargs):
+            pass
+        return TelegramCurator(
+            bot_token="fake:token",
+            chat_id="12345",
+            feedback_callback=fake_feedback,
+        )
+
+    @pytest.mark.asyncio
+    async def test_like_reason_shows_undo_and_schedules_save(self, bot_with_feedback):
+        from unittest.mock import AsyncMock, MagicMock
+
+        feedback_mock = AsyncMock()
+        bot_with_feedback.feedback_callback = feedback_mock
+
+        query = AsyncMock()
+        query.data = "like_reason:42:tech"
+        query.message.message_id = 100
+        query.answer = AsyncMock()
+        query.edit_message_reply_markup = AsyncMock()
+
+        update = MagicMock()
+        update.callback_query = query
+        context = MagicMock()
+
+        await bot_with_feedback._handle_feedback(update, context)
+
+        # Feedback should NOT be called immediately (delayed by 10s)
+        feedback_mock.assert_not_awaited()
+
+        # Should show confirmation + undo button
+        query.edit_message_reply_markup.assert_awaited_once()
+        call_kwargs = query.edit_message_reply_markup.call_args[1]
+        buttons = call_kwargs["reply_markup"].inline_keyboard[0]
+        assert buttons[0].text == "👍 Tech content"
+        assert buttons[1].text == "↩ Undo"
+        assert buttons[1].callback_data == "like_undo:42"
+
+        # Pending feedback should be tracked
+        assert "42" in bot_with_feedback._pending_feedback
+
+        # Clean up the scheduled task
+        bot_with_feedback._pending_feedback["42"]["task"].cancel()
+
+    @pytest.mark.asyncio
+    async def test_like_undo_cancels_pending_feedback(self, bot_with_feedback):
+        import asyncio
+        from unittest.mock import AsyncMock, MagicMock
+
+        # First, trigger a like reason to create pending feedback
+        feedback_mock = AsyncMock()
+        bot_with_feedback.feedback_callback = feedback_mock
+
+        query1 = AsyncMock()
+        query1.data = "like_reason:42:tech"
+        query1.message.message_id = 100
+        query1.answer = AsyncMock()
+        query1.edit_message_reply_markup = AsyncMock()
+
+        update1 = MagicMock()
+        update1.callback_query = query1
+        context = MagicMock()
+
+        await bot_with_feedback._handle_feedback(update1, context)
+        assert "42" in bot_with_feedback._pending_feedback
+
+        # Now trigger undo
+        query2 = AsyncMock()
+        query2.data = "like_undo:42"
+        query2.message.message_id = 100
+        query2.answer = AsyncMock()
+        query2.edit_message_reply_markup = AsyncMock()
+
+        update2 = MagicMock()
+        update2.callback_query = query2
+
+        await bot_with_feedback._handle_feedback(update2, context)
+
+        # Pending feedback should be removed
+        assert "42" not in bot_with_feedback._pending_feedback
+
+        # Should restore reason buttons
+        query2.edit_message_reply_markup.assert_awaited_once()
+        call_kwargs = query2.edit_message_reply_markup.call_args[1]
+        rows = call_kwargs["reply_markup"].inline_keyboard
+        assert len(rows) == 2
+        assert rows[0][0].callback_data == "like_reason:42:tech"
+        assert rows[0][1].callback_data == "like_reason:42:non_tech"
+        assert rows[1][0].callback_data == "like_reason:42:soft_skills"
+        assert rows[1][1].callback_data == "like_reason:42:life_wisdom"
+
+        # Feedback should never have been saved
+        feedback_mock.assert_not_awaited()
