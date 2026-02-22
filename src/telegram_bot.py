@@ -677,14 +677,28 @@ class TelegramCurator:
         retweets_str = self._format_number(retweets)
         replies_str = self._format_number(replies)
 
-        return (
+        message = (
             f"<b>Score:</b> {score}/100\n"
             f"<b>Why:</b> {reason}\n\n"
             f"<b>@{tweet['author_username']}</b> | "
             f"<a href=\"{tweet['url']}\">View Tweet</a>\n\n"
-            f"{text}\n\n"
-            f"❤️ {likes_str}  🔁 {retweets_str}  💬 {replies_str}"
+            f"{text}"
         )
+
+        # Append quoted tweet block if present
+        quoted = tweet.get("quoted_tweet")
+        if quoted:
+            qt_author = self._escape_html(quoted["author_username"])
+            qt_text = self._escape_html(quoted["text"])
+            qt_lines = qt_text.split("\n")
+            qt_block = "\n".join(f"┃ {line}" for line in qt_lines)
+            message += (
+                f"\n\n┃ <b>@{qt_author}:</b>\n"
+                f"{qt_block}"
+            )
+
+        message += f"\n\n❤️ {likes_str}  🔁 {retweets_str}  💬 {replies_str}"
+        return message
 
     @staticmethod
     def _escape_html(text: str) -> str:

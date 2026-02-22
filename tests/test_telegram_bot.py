@@ -96,6 +96,53 @@ class TestFormatTweetMessage:
         assert "15.0K" in msg
         assert "2.0M" in msg
 
+    def test_quoted_tweet_displayed(self, bot, sample_quote_tweet):
+        msg = bot._format_tweet_message(sample_quote_tweet)
+
+        assert "┃" in msg
+        assert "@vitalikbuterin" in msg
+        assert "blob fee market" in msg
+        assert "This is a great analysis!" in msg
+
+    def test_no_quoted_tweet_no_quote_block(self, bot, sample_tweet):
+        msg = bot._format_tweet_message(sample_tweet)
+
+        assert "┃" not in msg
+
+    def test_quoted_tweet_html_escaped(self, bot):
+        tweet = {
+            "tweet_id": "1",
+            "author_username": "test",
+            "text": "Quote this",
+            "url": "https://twitter.com/test/status/1",
+            "metrics": {"likes": 0, "retweets": 0, "replies": 0},
+            "quoted_tweet": {
+                "author_username": "original",
+                "author_name": "Original",
+                "text": "x < y & y > z",
+                "tweet_id": "2",
+            },
+        }
+        msg = bot._format_tweet_message(tweet)
+        assert "x &lt; y &amp; y &gt; z" in msg
+
+    def test_quoted_tweet_multiline_all_prefixed(self, bot):
+        tweet = {
+            "tweet_id": "1",
+            "author_username": "test",
+            "text": "Interesting",
+            "url": "https://twitter.com/test/status/1",
+            "metrics": {"likes": 0, "retweets": 0, "replies": 0},
+            "quoted_tweet": {
+                "author_username": "original",
+                "author_name": "Original",
+                "text": "Line one\nLine two\nLine three",
+                "tweet_id": "2",
+            },
+        }
+        msg = bot._format_tweet_message(tweet)
+        assert "┃ Line one\n┃ Line two\n┃ Line three" in msg
+
     def test_score_and_reason(self, bot):
         tweet = {
             "tweet_id": "1",

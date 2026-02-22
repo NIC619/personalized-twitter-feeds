@@ -139,13 +139,19 @@ class ClaudeFilter:
         # Prepare tweets for Claude (minimal format)
         tweets_for_claude = []
         for tweet in tweets:
-            tweets_for_claude.append({
+            entry = {
                 "tweet_id": tweet["tweet_id"],
                 "author": tweet["author_username"],
                 "text": tweet["text"],
                 "likes": tweet.get("metrics", {}).get("likes", 0),
                 "retweets": tweet.get("metrics", {}).get("retweets", 0),
-            })
+            }
+            if tweet.get("quoted_tweet"):
+                entry["quoted_tweet"] = {
+                    "author": tweet["quoted_tweet"]["author_username"],
+                    "text": tweet["quoted_tweet"]["text"],
+                }
+            tweets_for_claude.append(entry)
 
         tweets_json = json.dumps(tweets_for_claude, indent=2)
 

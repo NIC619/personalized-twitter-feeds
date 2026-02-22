@@ -68,7 +68,7 @@ class TwitterClient:
             "referenced_tweets",
         ]
         user_fields = ["username", "name", "profile_image_url"]
-        expansions = ["author_id"]
+        expansions = ["author_id", "referenced_tweets.id", "referenced_tweets.id.author_id"]
 
         while fetched_count < max_results:
             batch_size = min(100, max_results - fetched_count)
@@ -93,6 +93,12 @@ class TwitterClient:
                     for user in response.includes["users"]:
                         users[user.id] = user
 
+                # Build referenced tweets lookup from includes
+                ref_tweets_map = {}
+                if response.includes and "tweets" in response.includes:
+                    for ref_tweet in response.includes["tweets"]:
+                        ref_tweets_map[ref_tweet.id] = ref_tweet
+
                 # Process tweets
                 for tweet in response.data:
                     author = users.get(tweet.author_id)
@@ -100,7 +106,7 @@ class TwitterClient:
                         logger.warning(f"No author found for tweet {tweet.id}")
                         continue
 
-                    normalized = self._normalize_tweet(tweet, author)
+                    normalized = self._normalize_tweet(tweet, author, ref_tweets_map, users)
                     tweets.append(normalized)
                     fetched_count += 1
 
@@ -162,21 +168,45 @@ class TwitterClient:
                 else:
                     raise
 
-    def _normalize_tweet(self, tweet, author) -> dict:
+    def _normalize_tweet(
+        self, tweet, author, referenced_tweets_map=None, users=None
+    ) -> dict:
         """Normalize tweet data into standard format.
 
         Args:
             tweet: Tweepy tweet object
             author: Tweepy user object
+            referenced_tweets_map: Optional dict of tweet_id → tweepy tweet objects
+                from response.includes["tweets"]
+            users: Optional dict of user_id → tweepy user objects
+                from response.includes["users"]
 
         Returns:
             Normalized tweet dictionary
         """
         metrics = tweet.public_metrics or {}
+        referenced_tweets_map = referenced_tweets_map or {}
+        users = users or {}
 
         # Detect retweets via referenced_tweets
         referenced = getattr(tweet, "referenced_tweets", None) or []
         is_retweet = any(ref["type"] == "retweeted" for ref in referenced)
+
+        # Look up quoted/retweeted tweet from includes
+        quoted_tweet = None
+        for ref in referenced:
+            if ref["type"] in ("quoted", "retweeted"):
+                ref_id = ref["id"] if isinstance(ref["id"], int) else int(ref["id"])
+                ref_tweet = referenced_tweets_map.get(ref_id)
+                if ref_tweet:
+                    ref_author = users.get(ref_tweet.author_id)
+                    quoted_tweet = {
+                        "author_username": ref_author.username if ref_author else "unknown",
+                        "author_name": ref_author.name if ref_author else "Unknown",
+                        "text": ref_tweet.text,
+                        "tweet_id": str(ref_tweet.id),
+                    }
+                break
 
         return {
             "tweet_id": str(tweet.id),
@@ -185,6 +215,7 @@ class TwitterClient:
             "text": tweet.text,
             "created_at": tweet.created_at.isoformat() if tweet.created_at else None,
             "is_retweet": is_retweet,
+            "quoted_tweet": quoted_tweet,
             "metrics": {
                 "likes": metrics.get("like_count", 0),
                 "retweets": metrics.get("retweet_count", 0),
@@ -225,7 +256,7 @@ class TwitterClient:
             "referenced_tweets",
         ]
         user_fields = ["username", "name", "profile_image_url"]
-        expansions = ["author_id"]
+        expansions = ["author_id", "referenced_tweets.id", "referenced_tweets.id.author_id"]
 
         all_tweets = []
         for username in usernames:
@@ -259,12 +290,18 @@ class TwitterClient:
                     for u in response.includes["users"]:
                         users[u.id] = u
 
+                # Build referenced tweets lookup from includes
+                ref_tweets_map = {}
+                if response.includes and "tweets" in response.includes:
+                    for ref_tweet in response.includes["tweets"]:
+                        ref_tweets_map[ref_tweet.id] = ref_tweet
+
                 count = 0
                 for tweet in response.data:
                     if count >= max_per_user:
                         break
                     author = users.get(tweet.author_id, user)
-                    all_tweets.append(self._normalize_tweet(tweet, author))
+                    all_tweets.append(self._normalize_tweet(tweet, author, ref_tweets_map, users))
                     count += 1
 
                 logger.info(f"Fetched {count} tweets from @{username}")

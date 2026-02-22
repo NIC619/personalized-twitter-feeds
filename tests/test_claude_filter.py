@@ -197,6 +197,39 @@ class TestFilterTweets:
         prompt_text = call_args[1]["messages"][0]["content"]
         assert "User Feedback Context" not in prompt_text
 
+    def test_quoted_tweet_included_in_claude_input(self, claude_filter, sample_quote_tweet):
+        scores_json = json.dumps([
+            {"tweet_id": "555666777", "score": 90, "reason": "Quote of blob analysis"},
+        ])
+        mock_response = MagicMock()
+        mock_response.content = [MagicMock(text=scores_json)]
+        claude_filter.client.messages.create.return_value = mock_response
+
+        result = claude_filter.filter_tweets([sample_quote_tweet], threshold=70)
+
+        assert len(result) == 1
+        # Verify the prompt sent to Claude includes quoted_tweet
+        call_args = claude_filter.client.messages.create.call_args
+        prompt_text = call_args[1]["messages"][0]["content"]
+        assert "quoted_tweet" in prompt_text
+        assert "vitalikbuterin" in prompt_text
+        assert "blob fee market" in prompt_text
+
+    def test_no_quoted_tweet_omits_field(self, claude_filter, sample_tweet):
+        scores_json = json.dumps([
+            {"tweet_id": "123456789", "score": 85, "reason": "Good"},
+        ])
+        mock_response = MagicMock()
+        mock_response.content = [MagicMock(text=scores_json)]
+        claude_filter.client.messages.create.return_value = mock_response
+
+        claude_filter.filter_tweets([sample_tweet], threshold=70)
+
+        call_args = claude_filter.client.messages.create.call_args
+        prompt_text = call_args[1]["messages"][0]["content"]
+        # quoted_tweet key should not appear for tweets without one
+        assert "quoted_tweet" not in prompt_text
+
     def test_high_threshold(self, claude_filter, sample_tweets):
         scores_json = json.dumps([
             {"tweet_id": "123456789", "score": 85, "reason": "EIP discussion"},
