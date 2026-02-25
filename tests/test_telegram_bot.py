@@ -395,3 +395,67 @@ class TestLikeReasonCallback:
 
         # Feedback should never have been saved
         feedback_mock.assert_not_awaited()
+
+
+# --- _format_thread_message ---
+
+class TestFormatThreadMessage:
+    def _make_thread_tweets(self, n):
+        """Generate n tweet dicts for a thread."""
+        return [
+            {
+                "tweet_id": str(i),
+                "author_username": "alice",
+                "author_name": "Alice",
+                "text": f"Tweet number {i}",
+                "created_at": f"2025-01-15T10:{i:02d}:00+00:00",
+                "is_retweet": False,
+                "quoted_tweet": None,
+                "metrics": {"likes": 0, "retweets": 0, "replies": 0, "views": 0},
+                "url": f"https://twitter.com/alice/status/{i}",
+                "raw_data": {},
+            }
+            for i in range(1, n + 1)
+        ]
+
+    def test_header_shows_author_and_count(self, bot):
+        tweets = self._make_thread_tweets(3)
+        msg = bot._format_thread_message(tweets)
+
+        assert "Thread by @alice (3 tweets)" in msg
+
+    def test_tweets_numbered(self, bot):
+        tweets = self._make_thread_tweets(3)
+        msg = bot._format_thread_message(tweets)
+
+        assert "[1/3]" in msg
+        assert "[2/3]" in msg
+        assert "[3/3]" in msg
+
+    def test_tweet_text_included(self, bot):
+        tweets = self._make_thread_tweets(2)
+        msg = bot._format_thread_message(tweets)
+
+        assert "Tweet number 1" in msg
+        assert "Tweet number 2" in msg
+
+    def test_footer_link_to_last_tweet(self, bot):
+        tweets = self._make_thread_tweets(3)
+        msg = bot._format_thread_message(tweets)
+
+        assert "https://twitter.com/alice/status/3" in msg
+        assert "View on Twitter" in msg
+
+    def test_html_escaping(self, bot):
+        tweets = self._make_thread_tweets(1)
+        tweets[0]["text"] = "x < y & y > z"
+        msg = bot._format_thread_message(tweets)
+
+        assert "x &lt; y &amp; y &gt; z" in msg
+
+    def test_single_tweet_thread(self, bot):
+        tweets = self._make_thread_tweets(1)
+        msg = bot._format_thread_message(tweets)
+
+        assert "1 tweets" in msg
+        assert "[1/1]" in msg

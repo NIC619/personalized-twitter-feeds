@@ -23,6 +23,7 @@ logger = logging.getLogger(__name__)
 # Conversation states
 STAR_AWAITING_INPUT = 0
 LIKE_AWAITING_INPUT = 1
+THREAD_AWAITING_INPUT = 2
 
 
 class TelegramCurator:
@@ -38,6 +39,7 @@ class TelegramCurator:
         stats_callback: Optional[Callable] = None,
         list_starred_callback: Optional[Callable] = None,
         like_tweet_callback: Optional[Callable] = None,
+        thread_callback: Optional[Callable] = None,
     ):
         """Initialize Telegram bot.
 
@@ -50,6 +52,7 @@ class TelegramCurator:
             stats_callback: Async callback function() → list of author stat dicts
             list_starred_callback: Async callback function() → list of starred usernames
             like_tweet_callback: Async callback function(tweet_id) → tweet dict or None
+            thread_callback: Async callback function(tweet_id) → list of tweet dicts or None
         """
         self.bot_token = bot_token
         self.chat_id = chat_id
@@ -59,6 +62,7 @@ class TelegramCurator:
         self.stats_callback = stats_callback
         self.list_starred_callback = list_starred_callback
         self.like_tweet_callback = like_tweet_callback
+        self.thread_callback = thread_callback
         self.application: Optional[Application] = None
         self._pending_feedback: dict[str, dict] = {}  # tweet_id → pending save info
         self._tweet_authors: dict[str, str] = {}  # tweet_id → username
@@ -81,6 +85,7 @@ class TelegramCurator:
         commands = [
             BotCommand("star", "Toggle starred status — /star username"),
             BotCommand("like", "Upvote a tweet — /like tweet_url"),
+            BotCommand("thread", "Fetch and display a thread — /thread tweet_url"),
             BotCommand("starred", "List all starred authors"),
             BotCommand("stats", "Show author performance stats"),
             BotCommand("help", "Show help message"),
@@ -132,6 +137,20 @@ class TelegramCurator:
             )
         )
         self.application.add_handler(
+            ConversationHandler(
+                entry_points=[CommandHandler("thread", self._handle_thread)],
+                states={
+                    THREAD_AWAITING_INPUT: [
+                        MessageHandler(
+                            filters.TEXT & ~filters.COMMAND,
+                            self._handle_thread_input,
+                        )
+                    ],
+                },
+                fallbacks=[CommandHandler("cancel", self._handle_thread_cancel)],
+            )
+        )
+        self.application.add_handler(
             CommandHandler("starred", self._handle_starred)
         )
 
@@ -161,6 +180,7 @@ class TelegramCurator:
             "Commands:\n"
             "/star username or URL — toggle starred status for an author\n"
             "/like tweet URL or ID — upvote a tweet with a reason\n"
+            "/thread tweet URL or ID — fetch and display a full thread\n"
             "/starred — list all starred authors\n"
             "/stats — show author performance stats\n\n"
             "- I send you filtered tweets daily\n"
@@ -387,6 +407,103 @@ class TelegramCurator:
             except Exception as e:
                 logger.error(f"Error sending like message for {tweet_id}: {e}")
                 await update.message.reply_text(f"Error sending tweet {tweet_id}.")
+
+    async def _handle_thread(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> int:
+        """Handle /thread command to fetch and display a thread.
+
+        If called with args, processes immediately.
+        If called without args, prompts and waits for input.
+        """
+        if not self.thread_callback:
+            await update.message.reply_text("Thread feature not available.")
+            return ConversationHandler.END
+
+        if not context.args:
+            await update.message.reply_text(
+                "Send me a tweet URL or ID (the last tweet in the thread).\n\n"
+                "/cancel to abort."
+            )
+            return THREAD_AWAITING_INPUT
+
+        await self._fetch_and_send_thread(update, context.args[0])
+        return ConversationHandler.END
+
+    async def _handle_thread_input(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> int:
+        """Handle follow-up message with tweet URL/ID after /thread prompt."""
+        arg = update.message.text.strip().split()[0] if update.message.text.strip() else ""
+        if not arg:
+            await update.message.reply_text("No input received. Try again or /cancel.")
+            return THREAD_AWAITING_INPUT
+
+        await self._fetch_and_send_thread(update, arg)
+        return ConversationHandler.END
+
+    async def _handle_thread_cancel(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> int:
+        """Handle /cancel during thread conversation."""
+        await update.message.reply_text("Cancelled.")
+        return ConversationHandler.END
+
+    async def _fetch_and_send_thread(self, update: Update, arg: str) -> None:
+        """Fetch a thread and send it as a compiled message."""
+        tweet_id = self._extract_tweet_id(arg)
+        if not tweet_id:
+            await update.message.reply_text(f"Could not parse tweet ID from: {arg}")
+            return
+
+        try:
+            tweets = await self.thread_callback(tweet_id)
+        except Exception as e:
+            logger.error(f"Error fetching thread for {tweet_id}: {e}")
+            await update.message.reply_text(f"Error fetching thread for tweet {tweet_id}.")
+            return
+
+        if not tweets:
+            await update.message.reply_text(f"Could not find thread for tweet {tweet_id}.")
+            return
+
+        message = self._format_thread_message(tweets)
+
+        try:
+            await self.application.bot.send_message(
+                chat_id=self.chat_id,
+                text=message,
+                parse_mode="HTML",
+                disable_web_page_preview=True,
+            )
+        except Exception as e:
+            logger.error(f"Error sending thread message for {tweet_id}: {e}")
+            await update.message.reply_text(f"Error sending thread for tweet {tweet_id}.")
+
+    def _format_thread_message(self, tweets: list[dict]) -> str:
+        """Format a list of thread tweets into a single compiled message.
+
+        Args:
+            tweets: List of normalized tweet dicts, sorted chronologically
+
+        Returns:
+            Formatted HTML message string
+        """
+        n = len(tweets)
+        author = tweets[0]["author_username"]
+        last_tweet = tweets[-1]
+
+        lines = [f"<b>Thread by @{author} ({n} tweets)</b>\n"]
+
+        for i, tweet in enumerate(tweets, 1):
+            text = self._escape_html(tweet["text"])
+            lines.append(f"<b>[{i}/{n}]</b> {text}\n")
+
+        lines.append(
+            f"<a href=\"{last_tweet['url']}\">View on Twitter</a>"
+        )
+
+        return "\n".join(lines)
 
     @staticmethod
     def _make_like_reason_buttons(tweet_id: str) -> InlineKeyboardMarkup:

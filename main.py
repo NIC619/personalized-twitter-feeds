@@ -146,6 +146,13 @@ def init_components(settings, num_tweets=None, hours=None):
             db.save_tweets([tweet])
         return tweet
 
+    # Create thread callback
+    async def on_fetch_thread(tweet_id: str) -> list[dict] | None:
+        tweets = twitter.fetch_thread(tweet_id)
+        if tweets:
+            db.save_tweets(tweets)
+        return tweets
+
     # Initialize Telegram bot
     telegram = TelegramCurator(
         bot_token=settings.telegram_bot_token,
@@ -156,6 +163,7 @@ def init_components(settings, num_tweets=None, hours=None):
         stats_callback=on_stats,
         list_starred_callback=on_list_starred,
         like_tweet_callback=on_like_tweet,
+        thread_callback=on_fetch_thread,
     )
 
     # Initialize curator

@@ -230,6 +230,10 @@ class TwitterClient:
                 "created_at": tweet.created_at.isoformat() if tweet.created_at else None,
                 "entities": tweet.entities if hasattr(tweet, "entities") else None,
                 "conversation_id": str(tweet.conversation_id) if tweet.conversation_id else None,
+                "referenced_tweets": [
+                    {"type": ref["type"], "id": str(ref["id"])}
+                    for ref in referenced
+                ] if referenced else None,
             },
         }
 
@@ -426,6 +430,49 @@ class TwitterClient:
             return None
 
         return self._normalize_tweet(tweet, author, ref_tweets_map, users)
+
+    def fetch_thread(self, tweet_id: str, max_tweets: int = 50) -> list[dict] | None:
+        """Fetch a full thread by walking the reply chain backwards from a tweet.
+
+        Starting from the given tweet, follows replied_to references upward
+        until reaching the root tweet (no more replied_to references).
+
+        Args:
+            tweet_id: Twitter ID of the last tweet in the thread
+            max_tweets: Safety cap to avoid runaway chains (default 50)
+
+        Returns:
+            List of normalized tweet dicts sorted chronologically (oldest first),
+            or None if the starting tweet was not found
+        """
+        tweets = []
+        current_id = tweet_id
+
+        for _ in range(max_tweets):
+            tweet = self.fetch_tweet(current_id)
+            if not tweet:
+                if not tweets:
+                    return None
+                break
+
+            tweets.append(tweet)
+
+            # Look for replied_to reference to walk up the chain
+            ref_tweets = tweet.get("raw_data", {}).get("referenced_tweets") or []
+            parent_id = None
+            for ref in ref_tweets:
+                if ref["type"] == "replied_to":
+                    parent_id = ref["id"]
+                    break
+
+            if not parent_id:
+                break
+
+            current_id = parent_id
+
+        # Return in chronological order (oldest first)
+        tweets.reverse()
+        return tweets
 
     @staticmethod
     def get_tweet_url(tweet_id: str, username: str) -> str:

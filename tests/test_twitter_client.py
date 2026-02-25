@@ -1,7 +1,7 @@
 """Tests for TwitterClient."""
 
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, patch, call
 
 import pytest
 
@@ -350,3 +350,97 @@ class TestFetchTweet:
 
         result = twitter_client.fetch_timeline(max_results=10)
         assert result == []
+
+
+# --- fetch_thread ---
+
+class TestFetchThread:
+    def _make_normalized_tweet(self, tweet_id, text="hello", author="alice", replied_to_id=None):
+        """Create a normalized tweet dict with optional replied_to reference."""
+        ref_tweets = None
+        if replied_to_id:
+            ref_tweets = [{"type": "replied_to", "id": str(replied_to_id)}]
+        return {
+            "tweet_id": str(tweet_id),
+            "author_username": author,
+            "author_name": author.title(),
+            "text": text,
+            "created_at": "2025-01-15T10:00:00+00:00",
+            "is_retweet": False,
+            "quoted_tweet": None,
+            "metrics": {"likes": 0, "retweets": 0, "replies": 0, "views": 0},
+            "url": f"https://twitter.com/{author}/status/{tweet_id}",
+            "raw_data": {
+                "id": str(tweet_id),
+                "text": text,
+                "author_id": "100",
+                "created_at": "2025-01-15T10:00:00+00:00",
+                "entities": None,
+                "conversation_id": None,
+                "referenced_tweets": ref_tweets,
+            },
+        }
+
+    def test_walks_reply_chain_chronological(self, twitter_client):
+        """Thread of 3 tweets should be returned oldest-first."""
+        tweet3 = self._make_normalized_tweet(3, "third", replied_to_id=2)
+        tweet2 = self._make_normalized_tweet(2, "second", replied_to_id=1)
+        tweet1 = self._make_normalized_tweet(1, "first")
+
+        twitter_client.fetch_tweet = MagicMock(side_effect=[tweet3, tweet2, tweet1])
+
+        result = twitter_client.fetch_thread("3")
+
+        assert result is not None
+        assert len(result) == 3
+        assert result[0]["tweet_id"] == "1"
+        assert result[1]["tweet_id"] == "2"
+        assert result[2]["tweet_id"] == "3"
+
+    def test_stops_at_root(self, twitter_client):
+        """Should stop when reaching a tweet with no replied_to."""
+        tweet2 = self._make_normalized_tweet(2, "reply", replied_to_id=1)
+        tweet1 = self._make_normalized_tweet(1, "root")
+
+        twitter_client.fetch_tweet = MagicMock(side_effect=[tweet2, tweet1])
+
+        result = twitter_client.fetch_thread("2")
+
+        assert result is not None
+        assert len(result) == 2
+        assert result[0]["tweet_id"] == "1"
+        assert result[1]["tweet_id"] == "2"
+
+    def test_returns_none_when_start_not_found(self, twitter_client):
+        """Should return None if starting tweet doesn't exist."""
+        twitter_client.fetch_tweet = MagicMock(return_value=None)
+
+        result = twitter_client.fetch_thread("999")
+
+        assert result is None
+
+    def test_single_tweet_thread(self, twitter_client):
+        """A single tweet with no replied_to should return a list of one."""
+        tweet = self._make_normalized_tweet(1, "solo tweet")
+        twitter_client.fetch_tweet = MagicMock(return_value=tweet)
+
+        result = twitter_client.fetch_thread("1")
+
+        assert result is not None
+        assert len(result) == 1
+        assert result[0]["tweet_id"] == "1"
+
+    def test_stops_at_max_tweets(self, twitter_client):
+        """Should respect the max_tweets safety cap."""
+        def make_tweet_with_parent(tweet_id_str):
+            tid = int(tweet_id_str)
+            if tid > 1:
+                return self._make_normalized_tweet(tid, f"tweet {tid}", replied_to_id=tid - 1)
+            return self._make_normalized_tweet(tid, f"tweet {tid}")
+
+        twitter_client.fetch_tweet = MagicMock(side_effect=make_tweet_with_parent)
+
+        result = twitter_client.fetch_thread("100", max_tweets=5)
+
+        assert result is not None
+        assert len(result) == 5
