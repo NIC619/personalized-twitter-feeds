@@ -148,6 +148,19 @@ Run just the Telegram bot (for receiving feedback on already-sent tweets):
 python main.py --bot-only
 ```
 
+### Telegram Bot Commands
+
+| Command | Description |
+| --- | --- |
+| `/star username` | Toggle starred status for an author. Accepts username, @mention, or profile/tweet URL. |
+| `/like tweet_url` | Upvote a tweet with a reason category. Accepts tweet URL or numeric ID. |
+| `/thread tweet_url` | Fetch a full thread and display it as a single compiled message. Give it the last tweet in the thread. |
+| `/starred` | List all currently starred authors. |
+| `/stats` | Show author performance stats (paginated). |
+| `/help` | Show help message with available commands. |
+
+Inline buttons on delivered tweets allow thumbs up/down voting with reason categories, starring/muting authors, and undoing recent votes.
+
 ### Count Timeline Tweets
 
 Check how many tweets are in your Twitter timeline (fetches directly from Twitter):
