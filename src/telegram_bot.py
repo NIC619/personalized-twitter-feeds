@@ -1007,19 +1007,34 @@ class TelegramCurator:
         # Create inline keyboard with feedback buttons
         keyboard = self._make_tweet_buttons(tweet["tweet_id"], tweet["author_username"])
 
-        try:
-            sent_message = await self.application.bot.send_message(
-                chat_id=self.chat_id,
-                text=message,
-                reply_markup=keyboard,
-                parse_mode="HTML",
-                disable_web_page_preview=True,
-            )
-            logger.info(f"Sent tweet {tweet['tweet_id']} to Telegram")
-            return sent_message.message_id
-        except Exception as e:
-            logger.error(f"Error sending tweet to Telegram: {e}")
-            return None
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                sent_message = await self.application.bot.send_message(
+                    chat_id=self.chat_id,
+                    text=message,
+                    reply_markup=keyboard,
+                    parse_mode="HTML",
+                    disable_web_page_preview=True,
+                )
+                logger.info(f"Sent tweet {tweet['tweet_id']} to Telegram")
+                return sent_message.message_id
+            except telegram.error.TimedOut:
+                if attempt < max_retries - 1:
+                    wait = 2 ** (attempt + 1)
+                    logger.warning(
+                        f"Timeout sending tweet {tweet['tweet_id']}, "
+                        f"retrying in {wait}s (attempt {attempt + 1}/{max_retries})"
+                    )
+                    await asyncio.sleep(wait)
+                else:
+                    logger.error(
+                        f"Failed to send tweet {tweet['tweet_id']} after {max_retries} attempts: Timed out"
+                    )
+                    return None
+            except Exception as e:
+                logger.error(f"Error sending tweet to Telegram: {e}")
+                return None
 
     @staticmethod
     def _make_tweet_buttons(
@@ -1160,14 +1175,14 @@ class TelegramCurator:
         message_ids = []
         for i, tweet in enumerate(tweets):
             message_id = await self.send_tweet(tweet)
-            if message_id:
-                message_ids.append(message_id)
+            message_ids.append(message_id)
 
             # Rate limit
             if i < len(tweets) - 1:
                 await asyncio.sleep(delay_seconds)
 
-        logger.info(f"Sent {len(message_ids)} tweets in daily digest")
+        sent_count = sum(1 for mid in message_ids if mid)
+        logger.info(f"Sent {sent_count} tweets in daily digest")
         return message_ids
 
     async def send_error_notification(self, error_message: str) -> None:
