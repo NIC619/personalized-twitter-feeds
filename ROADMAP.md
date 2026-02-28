@@ -34,6 +34,17 @@
 - [x] Graceful fallback: works without OpenAI key (uses V1 prompt, no RAG)
 - [ ] Track accuracy: % of sent tweets that got 👍
 
+### A/B Testing Framework ✅
+- [x] Shadow scoring: score every tweet with control + challenger prompt, send based on control only
+- [x] Prompt registry (`PROMPT_REGISTRY` in `claude_filter.py`) for named prompt variants
+- [x] `ab_test_scores` table with paired entries per experiment
+- [x] `get_ab_test_analysis` SQL function joining scores with feedback
+- [x] RAG toggle (`RAG_ENABLED`) for isolating prompt changes from RAG effects
+- [x] Analysis report: score gap, precision/recall/F1, Wilcoxon signed-rank test
+- [x] CLI: `--ab-report <experiment_id>`
+- [x] 5 prompt variants: V1 (bio+rubric), V2 (V1+RAG), V3 (interests-only), V4 (binary), V5 (strict)
+- [ ] Auto-promote winning prompt after N votes
+
 ### Improvements
 - [ ] Batch tweets by topic/thread for better context
 - [ ] Handle Twitter threads (fetch full thread if 1/N detected)
@@ -66,7 +77,7 @@
 - [ ] Topic clustering (group similar tweets together)
 - [ ] Export to Notion/Obsidian
 - [ ] Web dashboard for analytics
-- [ ] A/B test different prompts
+- [x] A/B test different prompts
 - [ ] Auto-adjust threshold based on feedback ratio
 - [ ] Support for Twitter lists (not just home timeline)
 - [ ] Keyword alerts (always show tweets mentioning X)

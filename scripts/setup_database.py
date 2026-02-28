@@ -148,6 +148,72 @@ SELECT
 FROM tweets t
 LEFT JOIN feedback f ON t.tweet_id = f.tweet_id;
 
+-- Table: ab_test_scores
+-- Stores A/B test scores for prompt comparison experiments
+CREATE TABLE IF NOT EXISTS ab_test_scores (
+    id BIGSERIAL PRIMARY KEY,
+    tweet_id TEXT REFERENCES tweets(tweet_id) ON DELETE CASCADE,
+    experiment_id TEXT NOT NULL,
+    prompt_variant TEXT NOT NULL,  -- e.g. 'control', 'challenger'
+    prompt_version TEXT NOT NULL,  -- e.g. 'V1', 'V2', 'V3'
+    score FLOAT NOT NULL,
+    reason TEXT,
+    is_control BOOLEAN NOT NULL DEFAULT FALSE,
+    scored_at TIMESTAMP DEFAULT NOW()
+);
+
+-- Indexes for ab_test_scores
+CREATE INDEX IF NOT EXISTS idx_ab_test_experiment ON ab_test_scores(experiment_id);
+CREATE INDEX IF NOT EXISTS idx_ab_test_tweet ON ab_test_scores(tweet_id);
+CREATE INDEX IF NOT EXISTS idx_ab_test_variant ON ab_test_scores(prompt_variant);
+
+-- RLS for ab_test_scores
+ALTER TABLE public.ab_test_scores ENABLE ROW LEVEL SECURITY;
+CREATE POLICY "anon_all" ON public.ab_test_scores FOR ALL TO anon USING (true) WITH CHECK (true);
+
+-- Function: get_ab_test_analysis
+-- Joins control + challenger scores with feedback for paired comparison
+CREATE OR REPLACE FUNCTION get_ab_test_analysis(p_experiment_id text)
+RETURNS TABLE (
+    tweet_id text,
+    control_score float,
+    control_reason text,
+    control_prompt text,
+    challenger_score float,
+    challenger_reason text,
+    challenger_prompt text,
+    user_vote text,
+    tweet_text text,
+    author_username text
+)
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    RETURN QUERY
+    SELECT
+        c.tweet_id,
+        c.score AS control_score,
+        c.reason AS control_reason,
+        c.prompt_version AS control_prompt,
+        ch.score AS challenger_score,
+        ch.reason AS challenger_reason,
+        ch.prompt_version AS challenger_prompt,
+        f.user_vote,
+        t.text AS tweet_text,
+        t.author_username
+    FROM ab_test_scores c
+    JOIN ab_test_scores ch
+        ON c.tweet_id = ch.tweet_id
+        AND c.experiment_id = ch.experiment_id
+        AND ch.is_control = false
+    LEFT JOIN feedback f ON f.tweet_id = c.tweet_id
+    LEFT JOIN tweets t ON t.tweet_id = c.tweet_id
+    WHERE c.experiment_id = p_experiment_id
+        AND c.is_control = true
+    ORDER BY c.scored_at DESC;
+END;
+$$;
+
 -- Optional: Function to get feedback statistics
 CREATE OR REPLACE FUNCTION get_feedback_stats()
 RETURNS TABLE (

@@ -32,6 +32,8 @@ class DailyCurator:
         muted_threshold_offset: int = 15,
         starred_author_max_tweets: int = 10,
         embedding_manager: Optional[EmbeddingManager] = None,
+        ab_test_config: Optional[dict] = None,
+        rag_enabled: bool = True,
     ):
         """Initialize daily curator with all components.
 
@@ -47,6 +49,8 @@ class DailyCurator:
             muted_threshold_offset: How much higher for muted authors
             starred_author_max_tweets: Max tweets per starred author timeline
             embedding_manager: Optional EmbeddingManager for RAG
+            ab_test_config: Optional dict with keys: enabled, experiment_id, challenger_prompt
+            rag_enabled: Whether to use RAG context in Claude prompts
         """
         self.twitter = twitter
         self.claude = claude
@@ -61,6 +65,8 @@ class DailyCurator:
         self.muted_author_threshold = filter_threshold + muted_threshold_offset
         # Claude floor = lowest tier so all potentially relevant tweets get scored
         self.filter_threshold = self.favorite_author_threshold
+        self.ab_test_config = ab_test_config or {}
+        self.rag_enabled = rag_enabled
         logger.info(
             f"DailyCurator initialized (thresholds: favorite={self.favorite_author_threshold}, "
             f"default={self.default_threshold}, muted={self.muted_author_threshold})"
@@ -172,7 +178,7 @@ class DailyCurator:
 
             # Step 1d: Build RAG context from similar voted tweets
             rag_context = None
-            if self.embedding_manager and self.embedding_manager.enabled:
+            if self.rag_enabled and self.embedding_manager and self.embedding_manager.enabled:
                 logger.info("Step 1d: Building RAG context from similar voted tweets...")
                 try:
                     similar = self.embedding_manager.find_similar_voted_tweets(
@@ -194,6 +200,48 @@ class DailyCurator:
                 threshold=self.filter_threshold,
                 rag_context=rag_context,
             )
+
+            # Step 2a: A/B test shadow scoring
+            if self.ab_test_config.get("enabled"):
+                try:
+                    experiment_id = self.ab_test_config["experiment_id"]
+                    challenger_key = self.ab_test_config["challenger_prompt"]
+                    control_key = "V2" if rag_context else "V1"
+
+                    logger.info(
+                        f"A/B test '{experiment_id}': control={control_key} vs challenger={challenger_key} "
+                        f"(RAG={'on' if rag_context else 'off'})"
+                    )
+                    challenger_scores = self.claude.score_tweets_with_prompt(
+                        tweets_for_filtering, challenger_key, rag_context=rag_context
+                    )
+
+                    # Build control scores from the scored_tweets (already scored above)
+                    control_scores = []
+                    for tweet in tweets_for_filtering:
+                        if tweet.get("filter_score") is not None:
+                            control_scores.append({
+                                "tweet_id": tweet["tweet_id"],
+                                "score": tweet["filter_score"],
+                                "reason": tweet.get("filter_reason", ""),
+                            })
+
+                    self.db.save_ab_test_scores(
+                        experiment_id=experiment_id,
+                        control_scores=control_scores,
+                        control_key=control_key,
+                        challenger_scores=challenger_scores,
+                        challenger_key=challenger_key,
+                    )
+                    stats["ab_test_control_scores"] = len(control_scores)
+                    stats["ab_test_challenger_scores"] = len(challenger_scores)
+                    logger.info(
+                        f"A/B test '{experiment_id}': saved {len(control_scores)} control({control_key}) + "
+                        f"{len(challenger_scores)} challenger({challenger_key}) scores"
+                    )
+                except Exception as e:
+                    logger.warning(f"A/B test shadow scoring failed (non-fatal): {e}")
+                    stats["ab_test_error"] = str(e)
 
             # Step 2b: Apply per-author thresholds
             filtered_tweets = []

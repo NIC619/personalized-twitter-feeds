@@ -560,6 +560,76 @@ class DatabaseClient:
             logger.error(f"Error checking embedding: {e}")
             return False
 
+    def save_ab_test_scores(
+        self,
+        experiment_id: str,
+        control_scores: list[dict],
+        control_key: str,
+        challenger_scores: list[dict],
+        challenger_key: str,
+    ) -> None:
+        """Save A/B test scores for both control and challenger prompts.
+
+        Args:
+            experiment_id: Experiment identifier
+            control_scores: Scores from control prompt [{tweet_id, score, reason}]
+            control_key: Prompt registry key for control (e.g. 'V1')
+            challenger_scores: Scores from challenger prompt
+            challenger_key: Prompt registry key for challenger (e.g. 'V3')
+        """
+        records = []
+        for s in control_scores:
+            records.append({
+                "tweet_id": s["tweet_id"],
+                "experiment_id": experiment_id,
+                "prompt_variant": "control",
+                "prompt_version": control_key,
+                "score": s["score"],
+                "reason": s.get("reason", ""),
+                "is_control": True,
+            })
+        for s in challenger_scores:
+            records.append({
+                "tweet_id": s["tweet_id"],
+                "experiment_id": experiment_id,
+                "prompt_variant": "challenger",
+                "prompt_version": challenger_key,
+                "score": s["score"],
+                "reason": s.get("reason", ""),
+                "is_control": False,
+            })
+
+        if not records:
+            return
+
+        try:
+            self.client.table("ab_test_scores").insert(records).execute()
+            logger.info(
+                f"Saved {len(records)} A/B test scores for experiment '{experiment_id}'"
+            )
+        except Exception as e:
+            logger.error(f"Error saving A/B test scores: {e}")
+            raise
+
+    def get_ab_test_results(self, experiment_id: str) -> list[dict]:
+        """Get paired A/B test results with feedback via RPC.
+
+        Args:
+            experiment_id: Experiment identifier
+
+        Returns:
+            List of paired score records with feedback
+        """
+        try:
+            result = self.client.rpc(
+                "get_ab_test_analysis",
+                {"p_experiment_id": experiment_id},
+            ).execute()
+            return result.data if result.data else []
+        except Exception as e:
+            logger.error(f"Error getting A/B test results: {e}")
+            raise
+
     def toggle_mute(self, username: str) -> str:
         """Toggle mute status for an author.
 

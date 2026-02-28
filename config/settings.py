@@ -36,7 +36,13 @@ class Settings(BaseSettings):
     schedule_hour: int = Field(default=9, description="Hour to run daily curation")
     schedule_timezone: str = Field(default="Asia/Taipei", description="Timezone for scheduling")
 
+    # A/B Testing
+    ab_test_enabled: bool = Field(default=False, description="Enable A/B testing of Claude filter prompts")
+    ab_test_experiment_id: str = Field(default="", description="Experiment ID for the current A/B test")
+    ab_test_challenger_prompt: str = Field(default="V1", description="Prompt registry key for the challenger prompt")
+
     # OpenAI Embeddings (Phase 2 RAG)
+    rag_enabled: bool = Field(default=True, description="Enable RAG context in Claude prompts (requires OpenAI key)")
     openai_api_key: Optional[str] = Field(default=None, description="OpenAI API key for embeddings")
     embedding_model: str = Field(default="text-embedding-3-small", description="OpenAI embedding model")
     rag_similarity_limit: int = Field(default=5, description="Max similar tweets to inject as RAG context")

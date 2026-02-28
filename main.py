@@ -57,6 +57,13 @@ def parse_args() -> argparse.Namespace:
         help="Run only the Telegram bot (for receiving feedback)",
     )
     parser.add_argument(
+        "--ab-report",
+        type=str,
+        default=None,
+        metavar="EXPERIMENT_ID",
+        help="Generate A/B test report for a given experiment ID",
+    )
+    parser.add_argument(
         "-n", "--num-tweets",
         type=int,
         default=None,
@@ -166,6 +173,13 @@ def init_components(settings, num_tweets=None, hours=None):
         thread_callback=on_fetch_thread,
     )
 
+    # Build A/B test config
+    ab_test_config = {
+        "enabled": settings.ab_test_enabled,
+        "experiment_id": settings.ab_test_experiment_id,
+        "challenger_prompt": settings.ab_test_challenger_prompt,
+    }
+
     # Initialize curator
     curator = DailyCurator(
         twitter=twitter,
@@ -179,6 +193,8 @@ def init_components(settings, num_tweets=None, hours=None):
         muted_threshold_offset=settings.muted_threshold_offset,
         starred_author_max_tweets=settings.starred_author_max_tweets,
         embedding_manager=embedding_manager,
+        ab_test_config=ab_test_config,
+        rag_enabled=settings.rag_enabled,
     )
 
     logger.info(f"All components initialized (max_tweets={max_tweets}, fetch_hours={fetch_hours})")
@@ -308,7 +324,12 @@ def main() -> int:
         return 1
 
     try:
-        if args.test:
+        if args.ab_report:
+            from scripts.ab_test_report import run_ab_report
+            db = DatabaseClient(url=settings.supabase_url, key=settings.supabase_key)
+            run_ab_report(db, args.ab_report)
+            return 0
+        elif args.test:
             asyncio.run(run_test(settings))
         elif args.once:
             _, _, telegram, _, curator = init_components(

@@ -175,6 +175,23 @@ python scripts/count_twitter_timeline.py --hours 48 --max 300
 
 Use this to check if `MAX_TWEETS` is high enough to capture all your timeline activity.
 
+### A/B Test Prompts
+
+Compare different Claude filter prompts to find which best predicts your preferences. See [AB_TESTING_PLAN.md](AB_TESTING_PLAN.md) for full details.
+
+```bash
+# 1. Enable in .env:
+#    AB_TEST_ENABLED=true
+#    AB_TEST_EXPERIMENT_ID=exp_001
+#    AB_TEST_CHALLENGER_PROMPT=V3
+
+# 2. Run normally — shadow scoring happens automatically
+python main.py --once
+
+# 3. After voting on ~30-50 tweets, generate report
+python main.py --ab-report exp_001
+```
+
 ### CLI Options
 
 ```bash
@@ -184,6 +201,7 @@ python main.py --once --hours 48   # Look back 48 hours instead of 24
 python main.py --schedule          # Run daily at configured hour
 python main.py --bot-only          # Run Telegram bot only
 python main.py --test              # Test all components
+python main.py --ab-report exp_001 # A/B test report for an experiment
 ```
 
 ## Project Structure
@@ -209,6 +227,7 @@ twitter-curator/
 │   └── test_embeddings.py         # EmbeddingManager unit tests
 ├── scripts/
 │   ├── setup_database.py          # Database schema SQL
+│   ├── ab_test_report.py          # A/B test analysis report
 │   ├── test_components.py         # Integration testing (live APIs)
 │   └── count_twitter_timeline.py  # Count tweets from Twitter
 ├── main.py                 # CLI entry point
@@ -258,6 +277,10 @@ Claude filters based on these interests:
 | `FILTER_THRESHOLD`  | 70          | Minimum score to send to Telegram       |
 | `SCHEDULE_HOUR`     | 9           | Hour to run daily curation (24h format) |
 | `SCHEDULE_TIMEZONE` | Asia/Taipei | Timezone for scheduling                 |
+| `RAG_ENABLED`       | true        | Enable RAG context in Claude prompts    |
+| `AB_TEST_ENABLED`   | false       | Enable A/B testing of filter prompts    |
+| `AB_TEST_EXPERIMENT_ID` | -       | Experiment ID for current A/B test      |
+| `AB_TEST_CHALLENGER_PROMPT` | V1  | Prompt registry key for challenger      |
 
 
 ## Troubleshooting
