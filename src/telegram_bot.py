@@ -73,6 +73,9 @@ class TelegramCurator:
         self.application = (
             Application.builder()
             .token(self.bot_token)
+            .connect_timeout(30.0)
+            .read_timeout(30.0)
+            .write_timeout(30.0)
             .build()
         )
         self.setup_handlers()
@@ -658,6 +661,15 @@ class TelegramCurator:
 
         data = query.data
 
+        try:
+            await self._dispatch_feedback(query, data)
+        except telegram.error.BadRequest as e:
+            logger.debug(f"BadRequest handling callback {data}: {e}")
+
+    async def _dispatch_feedback(
+        self, query, data: str
+    ) -> None:
+        """Dispatch feedback callback by type. Caller catches BadRequest."""
         # Handle vote: "vote:{tweet_id}:{up|down}"
         if data.startswith("vote:"):
             parts = data.split(":")
@@ -944,12 +956,9 @@ class TelegramCurator:
                     logger.error(f"Error toggling favorite author: {e}")
 
             label = f"⭐ @{username}" if state == "favorited" else f"⭐ Author"
-            try:
-                await query.edit_message_reply_markup(
-                    reply_markup=self._make_tweet_buttons(tweet_id, username, fav_label=label)
-                )
-            except telegram.error.BadRequest:
-                pass
+            await query.edit_message_reply_markup(
+                reply_markup=self._make_tweet_buttons(tweet_id, username, fav_label=label)
+            )
 
         # Handle mute author: "mute:{username}:{tweet_id}"
         elif data.startswith("mute:"):
@@ -968,12 +977,9 @@ class TelegramCurator:
                     logger.error(f"Error toggling mute author: {e}")
 
             label = f"🔇 @{username}" if state == "muted" else f"🔇 Mute"
-            try:
-                await query.edit_message_reply_markup(
-                    reply_markup=self._make_tweet_buttons(tweet_id, username, mute_label=label)
-                )
-            except telegram.error.BadRequest:
-                pass
+            await query.edit_message_reply_markup(
+                reply_markup=self._make_tweet_buttons(tweet_id, username, mute_label=label)
+            )
 
     async def send_tweet(
         self,
@@ -1007,34 +1013,19 @@ class TelegramCurator:
         # Create inline keyboard with feedback buttons
         keyboard = self._make_tweet_buttons(tweet["tweet_id"], tweet["author_username"])
 
-        max_retries = 3
-        for attempt in range(max_retries):
-            try:
-                sent_message = await self.application.bot.send_message(
-                    chat_id=self.chat_id,
-                    text=message,
-                    reply_markup=keyboard,
-                    parse_mode="HTML",
-                    disable_web_page_preview=True,
-                )
-                logger.info(f"Sent tweet {tweet['tweet_id']} to Telegram")
-                return sent_message.message_id
-            except telegram.error.TimedOut:
-                if attempt < max_retries - 1:
-                    wait = 2 ** (attempt + 1)
-                    logger.warning(
-                        f"Timeout sending tweet {tweet['tweet_id']}, "
-                        f"retrying in {wait}s (attempt {attempt + 1}/{max_retries})"
-                    )
-                    await asyncio.sleep(wait)
-                else:
-                    logger.error(
-                        f"Failed to send tweet {tweet['tweet_id']} after {max_retries} attempts: Timed out"
-                    )
-                    return None
-            except Exception as e:
-                logger.error(f"Error sending tweet to Telegram: {e}")
-                return None
+        try:
+            sent_message = await self.application.bot.send_message(
+                chat_id=self.chat_id,
+                text=message,
+                reply_markup=keyboard,
+                parse_mode="HTML",
+                disable_web_page_preview=True,
+            )
+            logger.info(f"Sent tweet {tweet['tweet_id']} to Telegram")
+            return sent_message.message_id
+        except Exception as e:
+            logger.error(f"Error sending tweet {tweet['tweet_id']} to Telegram: {e}")
+            return None
 
     @staticmethod
     def _make_tweet_buttons(
@@ -1210,7 +1201,7 @@ class TelegramCurator:
 
         logger.info("Starting Telegram bot polling...")
         await self.application.start()
-        await self.application.updater.start_polling()
+        await self.application.updater.start_polling(bootstrap_retries=3)
 
         # Keep running until interrupted
         try:
