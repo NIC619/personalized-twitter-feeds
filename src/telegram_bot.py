@@ -656,15 +656,15 @@ class TelegramCurator:
         query = update.callback_query
         try:
             await query.answer()
-        except telegram.error.BadRequest:
-            logger.warning(f"Callback query expired, processing anyway: {query.data}")
+        except (telegram.error.BadRequest, telegram.error.NetworkError):
+            logger.warning(f"Callback query answer failed, processing anyway: {query.data}")
 
         data = query.data
 
         try:
             await self._dispatch_feedback(query, data)
-        except telegram.error.BadRequest as e:
-            logger.debug(f"BadRequest handling callback {data}: {e}")
+        except (telegram.error.BadRequest, telegram.error.NetworkError) as e:
+            logger.debug(f"Error handling callback {data}: {e}")
 
     async def _dispatch_feedback(
         self, query, data: str
@@ -1139,42 +1139,63 @@ class TelegramCurator:
 
     async def send_daily_digest(
         self,
-        tweets: list[dict],
+        tweet_groups: list[list[dict]],
         delay_seconds: float = 1.0,
-    ) -> list[int]:
-        """Send all filtered tweets with rate limiting.
+    ) -> list[tuple[dict, Optional[int]]]:
+        """Send grouped tweets with thread headers and rate limiting.
 
         Args:
-            tweets: List of filtered tweet dictionaries
+            tweet_groups: List of tweet groups (each group is a list of 1+
+                         tweets sharing a conversation_id).
             delay_seconds: Delay between messages (default 1s)
 
         Returns:
-            List of sent Telegram message IDs
+            Flat list of (tweet, message_id) tuples for mark_tweet_sent.
         """
-        if not tweets:
+        total_tweets = sum(len(g) for g in tweet_groups)
+        if not total_tweets:
             logger.warning("No tweets to send in digest")
             return []
 
-        # Send header message
+        # Send digest header
         await self.application.bot.send_message(
             chat_id=self.chat_id,
             text=f"📰 <b>Daily Tweet Digest</b>\n\n"
-                 f"Found {len(tweets)} relevant tweets for you today.",
+                 f"Found {total_tweets} relevant tweets for you today.",
             parse_mode="HTML",
         )
 
-        message_ids = []
-        for i, tweet in enumerate(tweets):
-            message_id = await self.send_tweet(tweet)
-            message_ids.append(message_id)
+        results: list[tuple[dict, Optional[int]]] = []
+        flat_index = 0
 
-            # Rate limit
-            if i < len(tweets) - 1:
+        for group in tweet_groups:
+            # Thread header for multi-tweet groups
+            if len(group) > 1:
+                author = group[0]["author_username"]
+                header = (
+                    f"🧵 <b>Thread by @{self._escape_html(author)}</b> "
+                    f"({len(group)} tweets in this batch)\n"
+                    f"────────────────────"
+                )
+                await self.application.bot.send_message(
+                    chat_id=self.chat_id,
+                    text=header,
+                    parse_mode="HTML",
+                )
                 await asyncio.sleep(delay_seconds)
 
-        sent_count = sum(1 for mid in message_ids if mid)
+            for tweet in group:
+                message_id = await self.send_tweet(tweet)
+                results.append((tweet, message_id))
+                flat_index += 1
+
+                # Rate limit between tweets
+                if flat_index < total_tweets:
+                    await asyncio.sleep(delay_seconds)
+
+        sent_count = sum(1 for _, mid in results if mid)
         logger.info(f"Sent {sent_count} tweets in daily digest")
-        return message_ids
+        return results
 
     async def send_error_notification(self, error_message: str) -> None:
         """Send error notification to user.

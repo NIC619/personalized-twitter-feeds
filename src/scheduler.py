@@ -201,7 +201,8 @@ class DailyCurator:
                 rag_context=rag_context,
             )
 
-            # Step 2a: A/B test shadow scoring
+            # Step 2a: A/B test shadow scoring (score now, save after Step 3)
+            ab_test_data = None
             if self.ab_test_config.get("enabled"):
                 try:
                     experiment_id = self.ab_test_config["experiment_id"]
@@ -226,19 +227,13 @@ class DailyCurator:
                                 "reason": tweet.get("filter_reason", ""),
                             })
 
-                    self.db.save_ab_test_scores(
-                        experiment_id=experiment_id,
-                        control_scores=control_scores,
-                        control_key=control_key,
-                        challenger_scores=challenger_scores,
-                        challenger_key=challenger_key,
-                    )
-                    stats["ab_test_control_scores"] = len(control_scores)
-                    stats["ab_test_challenger_scores"] = len(challenger_scores)
-                    logger.info(
-                        f"A/B test '{experiment_id}': saved {len(control_scores)} control({control_key}) + "
-                        f"{len(challenger_scores)} challenger({challenger_key}) scores"
-                    )
+                    ab_test_data = {
+                        "experiment_id": experiment_id,
+                        "control_scores": control_scores,
+                        "control_key": control_key,
+                        "challenger_scores": challenger_scores,
+                        "challenger_key": challenger_key,
+                    }
                 except Exception as e:
                     logger.warning(f"A/B test shadow scoring failed (non-fatal): {e}")
                     stats["ab_test_error"] = str(e)
@@ -291,14 +286,42 @@ class DailyCurator:
             self.db.save_tweets(list(tweet_map.values()))
             logger.info(f"Saved {len(tweet_map)} tweets to database")
 
-            # Step 4: Send filtered tweets to Telegram
+            # Step 3a: Save A/B test scores (after tweets exist in DB)
+            if ab_test_data:
+                try:
+                    self.db.save_ab_test_scores(
+                        experiment_id=ab_test_data["experiment_id"],
+                        control_scores=ab_test_data["control_scores"],
+                        control_key=ab_test_data["control_key"],
+                        challenger_scores=ab_test_data["challenger_scores"],
+                        challenger_key=ab_test_data["challenger_key"],
+                    )
+                    stats["ab_test_control_scores"] = len(ab_test_data["control_scores"])
+                    stats["ab_test_challenger_scores"] = len(ab_test_data["challenger_scores"])
+                    logger.info(
+                        f"A/B test '{ab_test_data['experiment_id']}': saved "
+                        f"{len(ab_test_data['control_scores'])} control({ab_test_data['control_key']}) + "
+                        f"{len(ab_test_data['challenger_scores'])} challenger({ab_test_data['challenger_key']}) scores"
+                    )
+                except Exception as e:
+                    logger.warning(f"A/B test score saving failed (non-fatal): {e}")
+                    stats["ab_test_error"] = str(e)
+
+            # Step 4: Group by thread and send filtered tweets to Telegram
             if filtered_tweets:
                 logger.info("Step 4: Sending filtered tweets to Telegram...")
-                message_ids = await self.telegram.send_daily_digest(filtered_tweets)
-                stats["sent"] = len(message_ids)
+                tweet_groups = self._group_by_thread(filtered_tweets)
+                thread_count = sum(1 for g in tweet_groups if len(g) > 1)
+                if thread_count:
+                    logger.info(
+                        f"Grouped into {len(tweet_groups)} groups "
+                        f"({thread_count} threads)"
+                    )
+                sent_pairs = await self.telegram.send_daily_digest(tweet_groups)
+                stats["sent"] = len(sent_pairs)
 
                 # Mark tweets as sent
-                for tweet, msg_id in zip(filtered_tweets, message_ids):
+                for tweet, msg_id in sent_pairs:
                     if msg_id:
                         self.db.mark_tweet_sent(tweet["tweet_id"], msg_id)
             else:
@@ -346,6 +369,36 @@ class DailyCurator:
                 )
 
         return "\n".join(lines)
+
+    @staticmethod
+    def _group_by_thread(tweets: list[dict]) -> list[list[dict]]:
+        """Group tweets by conversation_id for thread-aware delivery.
+
+        Tweets sharing a conversation_id are grouped together and sorted
+        chronologically.  A tweet whose conversation_id equals its own
+        tweet_id and has no siblings in the batch stays as a single-item group.
+
+        Args:
+            tweets: Filtered tweet list (each must have raw_data with
+                    conversation_id, and created_at).
+
+        Returns:
+            List of groups (each group is a list of 1+ tweets).
+        """
+        from collections import OrderedDict
+
+        groups: OrderedDict[str, list[dict]] = OrderedDict()
+        for tweet in tweets:
+            conv_id = tweet.get("raw_data", {}).get("conversation_id", tweet["tweet_id"])
+            groups.setdefault(conv_id, []).append(tweet)
+
+        result: list[list[dict]] = []
+        for conv_id, group in groups.items():
+            # Sort chronologically within the group
+            group.sort(key=lambda t: t.get("created_at", ""))
+            result.append(group)
+
+        return result
 
     def _deduplicate_tweets(self, tweets: list[dict]) -> list[dict]:
         """Remove tweets that are already in the database.

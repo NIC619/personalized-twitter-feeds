@@ -129,7 +129,10 @@ class TestRunDailyCuration:
             scored_tweets.append(t_copy)
         curator.claude.filter_tweets.return_value = scored_tweets
 
-        curator.telegram.send_daily_digest.return_value = [101]
+        # send_daily_digest returns list of (tweet, message_id) tuples
+        async def mock_digest(groups, **kw):
+            return [(t, 101 + i) for i, g in enumerate(groups) for t in g]
+        curator.telegram.send_daily_digest.side_effect = mock_digest
 
         stats = await curator.run_daily_curation()
 
@@ -160,7 +163,9 @@ class TestRunDailyCuration:
             scored.append(t_copy)
         curator.claude.filter_tweets.return_value = scored
 
-        curator.telegram.send_daily_digest.return_value = [201, 202]
+        async def mock_digest(groups, **kw):
+            return [(t, 201 + i) for i, g in enumerate(groups) for t in g]
+        curator.telegram.send_daily_digest.side_effect = mock_digest
 
         stats = await curator.run_daily_curation()
 
@@ -327,7 +332,9 @@ class TestRagInPipeline:
 
         scored = [dict(tweets[0], filter_score=80, filter_reason="good", filtered=True)]
         claude.filter_tweets.return_value = scored
-        telegram.send_daily_digest.return_value = [101]
+        async def mock_digest(groups, **kw):
+            return [(t, 101 + i) for i, g in enumerate(groups) for t in g]
+        telegram.send_daily_digest.side_effect = mock_digest
 
         stats = await curator.run_daily_curation()
 
@@ -358,7 +365,9 @@ class TestRagInPipeline:
 
         scored = [dict(tweets[0], filter_score=80, filter_reason="good", filtered=True)]
         claude.filter_tweets.return_value = scored
-        telegram.send_daily_digest.return_value = [101]
+        async def mock_digest(groups, **kw):
+            return [(t, 101 + i) for i, g in enumerate(groups) for t in g]
+        telegram.send_daily_digest.side_effect = mock_digest
 
         stats = await curator.run_daily_curation()
 
