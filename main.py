@@ -64,6 +64,12 @@ def parse_args() -> argparse.Namespace:
         help="Generate A/B test report for a given experiment ID",
     )
     parser.add_argument(
+        "--threshold",
+        type=int,
+        default=70,
+        help="Score threshold for A/B report precision/recall (default 70)",
+    )
+    parser.add_argument(
         "-n", "--num-tweets",
         type=int,
         default=None,
@@ -327,7 +333,7 @@ def main() -> int:
         if args.ab_report:
             from scripts.ab_test_report import run_ab_report
             db = DatabaseClient(url=settings.supabase_url, key=settings.supabase_key)
-            run_ab_report(db, args.ab_report)
+            run_ab_report(db, args.ab_report, threshold=args.threshold)
             return 0
         elif args.test:
             asyncio.run(run_test(settings))
