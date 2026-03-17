@@ -2,9 +2,11 @@
 
 import json
 import logging
+import re
 from typing import Optional
 
 from anthropic import Anthropic
+import httpx
 
 logger = logging.getLogger(__name__)
 
@@ -234,15 +236,20 @@ PROMPT_REGISTRY = {
 class ClaudeFilter:
     """Claude-based tweet filter."""
 
-    def __init__(self, api_key: str, model: str = "claude-sonnet-4-6"):
+    def __init__(self, api_key: str, model: str = "claude-sonnet-4-6", batch_size: int = 50):
         """Initialize Anthropic client.
 
         Args:
             api_key: Anthropic API key
             model: Claude model to use
+            batch_size: Max tweets per API call (default 45)
         """
-        self.client = Anthropic(api_key=api_key)
+        self.client = Anthropic(
+            api_key=api_key,
+            timeout=httpx.Timeout(600.0, connect=10.0),
+        )
         self.model = model
+        self.batch_size = batch_size
         logger.info(f"Claude filter initialized with model: {model}")
 
     def filter_tweets(
@@ -265,7 +272,75 @@ class ClaudeFilter:
             logger.warning("No tweets to filter")
             return []
 
-        # Prepare tweets for Claude (minimal format)
+        # Batch tweets if there are more than batch_size
+        if len(tweets) > self.batch_size:
+            logger.info(
+                f"Splitting {len(tweets)} tweets into batches of {self.batch_size}"
+            )
+            all_scores = []
+            for i in range(0, len(tweets), self.batch_size):
+                batch = tweets[i : i + self.batch_size]
+                batch_num = i // self.batch_size + 1
+                total_batches = (len(tweets) + self.batch_size - 1) // self.batch_size
+                logger.info(
+                    f"Scoring batch {batch_num}/{total_batches} "
+                    f"({len(batch)} tweets)..."
+                )
+                scores = self._score_batch(batch, rag_context)
+                all_scores.extend(scores)
+        else:
+            all_scores = self._score_batch(tweets, rag_context)
+
+        # Map scores back to original tweets
+        score_map = {s["tweet_id"]: s for s in all_scores}
+        filtered_tweets = []
+
+        for tweet in tweets:
+            tweet_id = tweet["tweet_id"]
+            if tweet_id in score_map:
+                score_data = score_map[tweet_id]
+                tweet["filter_score"] = score_data["score"]
+                tweet["filter_reason"] = score_data["reason"]
+                tweet["filtered"] = score_data["score"] >= threshold
+
+                if tweet["filtered"]:
+                    filtered_tweets.append(tweet)
+            else:
+                # Tweet not scored, default to skip
+                tweet["filter_score"] = 0
+                tweet["filter_reason"] = "Not scored by Claude"
+                tweet["filtered"] = False
+
+        # Log all tweet scores for debugging
+        logger.info("--- Tweet Scores ---")
+        for tweet in tweets:
+            status = "PASS" if tweet.get("filtered") else "SKIP"
+            score = tweet.get("filter_score", 0)
+            reason = tweet.get("filter_reason", "")
+            author = tweet.get("author_username", "unknown")
+            text_preview = tweet.get("text", "")[:60].replace("\n", " ")
+            logger.info(
+                f"[{status}] Score {score:3d} | @{author}: {text_preview}..."
+            )
+            logger.info(f"         Reason: {reason}")
+        logger.info("--- End Scores ---")
+
+        logger.info(
+            f"Filtered {len(filtered_tweets)}/{len(tweets)} tweets "
+            f"(threshold: {threshold})"
+        )
+        return filtered_tweets
+
+    def _score_batch(
+        self,
+        tweets: list[dict],
+        rag_context: Optional[str] = None,
+    ) -> list[dict]:
+        """Score a single batch of tweets with Claude.
+
+        Returns:
+            List of score dicts with tweet_id, score, reason
+        """
         tweets_for_claude = []
         for tweet in tweets:
             entry = {
@@ -302,49 +377,8 @@ class ClaudeFilter:
                 messages=[{"role": "user", "content": prompt}],
             )
 
-            # Extract text response
             response_text = response.content[0].text
-            scores = self._parse_response(response_text)
-
-            # Map scores back to original tweets
-            score_map = {s["tweet_id"]: s for s in scores}
-            filtered_tweets = []
-
-            for tweet in tweets:
-                tweet_id = tweet["tweet_id"]
-                if tweet_id in score_map:
-                    score_data = score_map[tweet_id]
-                    tweet["filter_score"] = score_data["score"]
-                    tweet["filter_reason"] = score_data["reason"]
-                    tweet["filtered"] = score_data["score"] >= threshold
-
-                    if tweet["filtered"]:
-                        filtered_tweets.append(tweet)
-                else:
-                    # Tweet not scored, default to skip
-                    tweet["filter_score"] = 0
-                    tweet["filter_reason"] = "Not scored by Claude"
-                    tweet["filtered"] = False
-
-            # Log all tweet scores for debugging
-            logger.info("--- Tweet Scores ---")
-            for tweet in tweets:
-                status = "PASS" if tweet.get("filtered") else "SKIP"
-                score = tweet.get("filter_score", 0)
-                reason = tweet.get("filter_reason", "")
-                author = tweet.get("author_username", "unknown")
-                text_preview = tweet.get("text", "")[:60].replace("\n", " ")
-                logger.info(
-                    f"[{status}] Score {score:3d} | @{author}: {text_preview}..."
-                )
-                logger.info(f"         Reason: {reason}")
-            logger.info("--- End Scores ---")
-
-            logger.info(
-                f"Filtered {len(filtered_tweets)}/{len(tweets)} tweets "
-                f"(threshold: {threshold})"
-            )
-            return filtered_tweets
+            return self._parse_response(response_text)
 
         except Exception as e:
             logger.error(f"Error filtering tweets with Claude: {e}")
@@ -376,6 +410,41 @@ class ClaudeFilter:
             logger.error(f"Unknown prompt key: {prompt_key}")
             return []
 
+        # Batch tweets if there are more than batch_size
+        if len(tweets) > self.batch_size:
+            logger.info(
+                f"Splitting {len(tweets)} tweets into batches of {self.batch_size} "
+                f"for prompt '{prompt_key}'"
+            )
+            all_scores = []
+            for i in range(0, len(tweets), self.batch_size):
+                batch = tweets[i : i + self.batch_size]
+                batch_num = i // self.batch_size + 1
+                total_batches = (len(tweets) + self.batch_size - 1) // self.batch_size
+                logger.info(
+                    f"Scoring batch {batch_num}/{total_batches} "
+                    f"({len(batch)} tweets) with prompt '{prompt_key}'..."
+                )
+                scores = self._score_batch_with_prompt(
+                    batch, prompt_template, rag_context
+                )
+                all_scores.extend(scores)
+            logger.info(
+                f"Scored {len(all_scores)} tweets with prompt '{prompt_key}'"
+            )
+            return all_scores
+
+        scores = self._score_batch_with_prompt(tweets, prompt_template, rag_context)
+        logger.info(f"Scored {len(scores)} tweets with prompt '{prompt_key}'")
+        return scores
+
+    def _score_batch_with_prompt(
+        self,
+        tweets: list[dict],
+        prompt_template: str,
+        rag_context: Optional[str] = None,
+    ) -> list[dict]:
+        """Score a single batch of tweets with a given prompt template."""
         tweets_for_claude = []
         for tweet in tweets:
             entry = {
@@ -394,7 +463,6 @@ class ClaudeFilter:
 
         tweets_json = json.dumps(tweets_for_claude, indent=2)
 
-        # Format prompt - use rag_context if the template has it and context is available
         if rag_context and "{rag_context}" in prompt_template:
             prompt = prompt_template.format(
                 tweets_json=tweets_json,
@@ -411,11 +479,9 @@ class ClaudeFilter:
                 messages=[{"role": "user", "content": prompt}],
             )
             response_text = response.content[0].text
-            scores = self._parse_response(response_text)
-            logger.info(f"Scored {len(scores)} tweets with prompt '{prompt_key}'")
-            return scores
+            return self._parse_response(response_text)
         except Exception as e:
-            logger.error(f"Error scoring tweets with prompt '{prompt_key}': {e}")
+            logger.error(f"Error scoring tweets with prompt: {e}")
             raise
 
     def _parse_response(self, response_text: str) -> list[dict]:
@@ -438,6 +504,8 @@ class ClaudeFilter:
                 # Remove first line (```json or ```) and last line (```)
                 text = "\n".join(lines[1:-1])
 
+            # Remove trailing commas before ] (common LLM output issue)
+            text = re.sub(r',\s*]', ']', text)
             scores = json.loads(text)
 
             # Validate structure
@@ -470,10 +538,8 @@ class ClaudeFilter:
         Returns:
             List of score dictionaries (may be empty)
         """
-        # Try to find any JSON-like structures
-        import re
-
-        pattern = r'\{"tweet_id":\s*"([^"]+)",\s*"score":\s*(\d+),\s*"reason":\s*"([^"]*)"\}'
+        # Try to find any JSON-like structures (handles escaped quotes in reason)
+        pattern = r'\{"tweet_id":\s*"([^"]+)",\s*"score":\s*(\d+),\s*"reason":\s*"((?:[^"\\]|\\.)*)"\}'
         matches = re.findall(pattern, response_text)
 
         results = []
