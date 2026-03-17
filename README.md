@@ -202,6 +202,7 @@ python main.py --schedule          # Run daily at configured hour
 python main.py --bot-only          # Run Telegram bot only
 python main.py --test              # Test all components
 python main.py --ab-report exp_001 # A/B test report for an experiment
+python main.py --ab-report exp_001 --threshold 80  # Custom threshold for precision/recall
 ```
 
 ## Project Structure
