@@ -1087,8 +1087,19 @@ class TelegramCurator:
             f"<b>Why:</b> {reason}\n\n"
             f"<b>@{tweet['author_username']}</b> | "
             f"<a href=\"{tweet['url']}\">View Tweet</a>\n\n"
-            f"{text}"
         )
+
+        # Show article title for X Articles
+        article = tweet.get("article")
+        if article:
+            title = self._escape_html(article["title"])
+            article_url = article.get("url")
+            if article_url:
+                message += f"<b>[Article]</b> <a href=\"{article_url}\">{title}</a>\n\n"
+            else:
+                message += f"<b>[Article]</b> {title}\n\n"
+
+        message += text
 
         # Append quoted tweet block if present
         quoted = tweet.get("quoted_tweet")

@@ -66,6 +66,7 @@ class TwitterClient:
             "author_id",
             "conversation_id",
             "referenced_tweets",
+            "note_tweet",
         ]
         user_fields = ["username", "name", "profile_image_url"]
         expansions = ["author_id", "referenced_tweets.id", "referenced_tweets.id.author_id"]
@@ -208,14 +209,40 @@ class TwitterClient:
                     }
                 break
 
+        # Prefer note_tweet full text for long posts/articles
+        tweet_data = tweet.data if hasattr(tweet, "data") else {}
+        note_tweet = tweet_data.get("note_tweet") if isinstance(tweet_data, dict) else None
+        if note_tweet and isinstance(note_tweet, dict):
+            full_text = note_tweet.get("text", tweet.text)
+        else:
+            full_text = tweet.text
+
+        # Extract article info if present
+        article_data = tweet_data.get("article") if isinstance(tweet_data, dict) else None
+        article = None
+        if article_data and isinstance(article_data, dict):
+            article_title = article_data.get("title")
+            # Extract article URL from entities
+            article_url = None
+            entities = tweet.entities if hasattr(tweet, "entities") else None
+            if entities and "urls" in entities:
+                for url_entity in entities["urls"]:
+                    expanded = url_entity.get("expanded_url") or url_entity.get("unwound_url", "")
+                    if "/article/" in expanded:
+                        article_url = expanded
+                        break
+            if article_title:
+                article = {"title": article_title, "url": article_url}
+
         return {
             "tweet_id": str(tweet.id),
             "author_username": author.username,
             "author_name": author.name,
-            "text": tweet.text,
+            "text": full_text,
             "created_at": tweet.created_at.isoformat() if tweet.created_at else None,
             "is_retweet": is_retweet,
             "quoted_tweet": quoted_tweet,
+            "article": article,
             "metrics": {
                 "likes": metrics.get("like_count", 0),
                 "retweets": metrics.get("retweet_count", 0),
@@ -225,7 +252,7 @@ class TwitterClient:
             "url": self.get_tweet_url(str(tweet.id), author.username),
             "raw_data": {
                 "id": str(tweet.id),
-                "text": tweet.text,
+                "text": full_text,
                 "author_id": str(tweet.author_id),
                 "created_at": tweet.created_at.isoformat() if tweet.created_at else None,
                 "entities": tweet.entities if hasattr(tweet, "entities") else None,
@@ -258,6 +285,7 @@ class TwitterClient:
             "author_id",
             "conversation_id",
             "referenced_tweets",
+            "note_tweet",
         ]
         user_fields = ["username", "name", "profile_image_url"]
         expansions = ["author_id", "referenced_tweets.id", "referenced_tweets.id.author_id"]
@@ -383,6 +411,7 @@ class TwitterClient:
             "author_id",
             "conversation_id",
             "referenced_tweets",
+            "note_tweet",
         ]
         user_fields = ["username", "name", "profile_image_url"]
         expansions = ["author_id", "referenced_tweets.id", "referenced_tweets.id.author_id"]
