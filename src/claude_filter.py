@@ -355,6 +355,11 @@ class ClaudeFilter:
                     "author": tweet["quoted_tweet"]["author_username"],
                     "text": tweet["quoted_tweet"]["text"],
                 }
+            if tweet.get("article"):
+                entry["article"] = {
+                    "title": tweet["article"]["title"],
+                    "body": tweet["article"].get("body", ""),
+                }
             tweets_for_claude.append(entry)
 
         tweets_json = json.dumps(tweets_for_claude, indent=2)
@@ -458,6 +463,11 @@ class ClaudeFilter:
                 entry["quoted_tweet"] = {
                     "author": tweet["quoted_tweet"]["author_username"],
                     "text": tweet["quoted_tweet"]["text"],
+                }
+            if tweet.get("article"):
+                entry["article"] = {
+                    "title": tweet["article"]["title"],
+                    "body": tweet["article"].get("body", ""),
                 }
             tweets_for_claude.append(entry)
 

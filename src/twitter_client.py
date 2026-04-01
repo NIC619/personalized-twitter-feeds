@@ -222,6 +222,7 @@ class TwitterClient:
         article = None
         if article_data and isinstance(article_data, dict):
             article_title = article_data.get("title")
+            article_body = article_data.get("plain_text")
             # Extract article URL from entities
             article_url = None
             entities = tweet.entities if hasattr(tweet, "entities") else None
@@ -232,7 +233,11 @@ class TwitterClient:
                         article_url = expanded
                         break
             if article_title:
-                article = {"title": article_title, "url": article_url}
+                article = {
+                    "title": article_title,
+                    "url": article_url,
+                    "body": article_body,
+                }
 
         return {
             "tweet_id": str(tweet.id),
