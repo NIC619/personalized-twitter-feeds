@@ -15,13 +15,30 @@ from src.database import DatabaseClient
 from src.embeddings import EmbeddingManager
 from src.scheduler import DailyCurator, feedback_handler
 
-# Configure logging
+# Configure logging with colored console output
+class ColorFormatter(logging.Formatter):
+    COLORS = {
+        logging.WARNING: "\033[33m",  # yellow
+        logging.ERROR: "\033[31m",    # red
+        logging.CRITICAL: "\033[1;31m",  # bold red
+    }
+    RESET = "\033[0m"
+
+    def format(self, record):
+        msg = super().format(record)
+        color = self.COLORS.get(record.levelno)
+        return f"{color}{msg}{self.RESET}" if color else msg
+
+_fmt = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+_console = logging.StreamHandler()
+_console.setFormatter(ColorFormatter(_fmt))
+
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    format=_fmt,
     handlers=[
         logging.FileHandler("curator.log"),
-        logging.StreamHandler(),
+        _console,
     ],
 )
 logger = logging.getLogger(__name__)
