@@ -289,6 +289,16 @@ class DailyCurator:
             # Step 3a: Save A/B test scores (after tweets exist in DB)
             if ab_test_data:
                 try:
+                    # Filter out scores for tweet IDs not in DB (e.g. hallucinated by Claude)
+                    valid_ids = set(tweet_map.keys())
+                    ab_test_data["control_scores"] = [
+                        s for s in ab_test_data["control_scores"]
+                        if s["tweet_id"] in valid_ids
+                    ]
+                    ab_test_data["challenger_scores"] = [
+                        s for s in ab_test_data["challenger_scores"]
+                        if s["tweet_id"] in valid_ids
+                    ]
                     self.db.save_ab_test_scores(
                         experiment_id=ab_test_data["experiment_id"],
                         control_scores=ab_test_data["control_scores"],
