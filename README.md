@@ -1,13 +1,14 @@
-# Twitter Curator
+# Content Curator
 
-AI-powered Twitter feed curation that filters your timeline using Claude and delivers relevant tweets to Telegram.
+AI-powered content curation that filters your Twitter timeline and blog posts using Claude and delivers relevant content to Telegram.
 
 ## Features
 
-- **Smart Filtering**: Claude AI scores tweets based on your interests (blockchain research, Ethereum scaling, smart contract security)
-- **Telegram Delivery**: Filtered tweets sent to your Telegram with engagement metrics
-- **Feedback Loop**: Thumbs up/down buttons to improve future curation (Phase 2: RAG)
-- **Persistent Storage**: All tweets and feedback stored in Supabase
+- **Smart Filtering**: Claude AI scores tweets and blog posts based on your interests (blockchain research, Ethereum scaling, smart contract security)
+- **Telegram Delivery**: Filtered content sent to your Telegram with engagement metrics
+- **Blog Post Support**: Like individual blog posts or parse entire newsletters to score and review all articles
+- **Feedback Loop**: Thumbs up/down buttons to improve future curation via RAG
+- **Persistent Storage**: All tweets, blog posts, and feedback stored in Supabase
 
 ## Prerequisites
 
@@ -153,13 +154,14 @@ python main.py --bot-only
 | Command | Description |
 | --- | --- |
 | `/star username` | Toggle starred status for an author. Accepts username, @mention, or profile/tweet URL. |
-| `/like tweet_url` | Upvote a tweet with a reason category. Accepts tweet URL or numeric ID. |
+| `/like url` | Upvote a tweet or blog post with a reason category. Accepts tweet URLs, blog post URLs, or numeric tweet IDs. |
+| `/newsletter url` | Parse a newsletter, score all articles with Claude, and send them for review. |
 | `/thread tweet_url` | Fetch a full thread and display it as a single compiled message. Give it the last tweet in the thread. |
 | `/starred` | List all currently starred authors. |
 | `/stats` | Show author performance stats (paginated). |
 | `/help` | Show help message with available commands. |
 
-Inline buttons on delivered tweets allow thumbs up/down voting with reason categories, starring/muting authors, and undoing recent votes.
+Inline buttons on delivered content allow thumbs up/down voting with reason categories, starring/muting authors, and undoing recent votes.
 
 ### Count Timeline Tweets
 
@@ -216,8 +218,10 @@ twitter-curator/
 │   ├── claude_filter.py    # Claude AI filtering
 │   ├── telegram_bot.py     # Telegram bot with feedback buttons
 │   ├── database.py         # Supabase operations
-│   ├── embeddings.py       # Phase 2: RAG embeddings (stub)
-│   └── scheduler.py        # Daily curation orchestration
+│   ├── embeddings.py       # RAG embeddings for feedback-driven curation
+│   ├── scheduler.py        # Daily curation orchestration
+│   ├── content.py          # Content ID utilities (blog ID generation, URL detection)
+│   └── blog_fetcher.py     # Blog post fetching and newsletter parsing
 ├── tests/
 │   ├── conftest.py                # Shared test fixtures
 │   ├── test_claude_filter.py      # ClaudeFilter unit tests
@@ -225,7 +229,8 @@ twitter-curator/
 │   ├── test_twitter_client.py     # TwitterClient unit tests
 │   ├── test_scheduler.py          # DailyCurator unit tests
 │   ├── test_telegram_bot.py       # TelegramCurator unit tests
-│   └── test_embeddings.py         # EmbeddingManager unit tests
+│   ├── test_embeddings.py         # EmbeddingManager unit tests
+│   └── test_blog_fetcher.py       # BlogFetcher and content utils unit tests
 ├── scripts/
 │   ├── setup_database.py          # Database schema SQL
 │   ├── ab_test_report.py          # A/B test analysis report
@@ -239,11 +244,18 @@ twitter-curator/
 
 ## How It Works
 
+### Tweets
 1. **Fetch**: Pulls tweets from your home timeline (last 24 hours)
 2. **Filter**: Claude scores each tweet 0-100 based on your interests
 3. **Send**: Tweets scoring ≥70 are sent to Telegram with 👍/👎 buttons
 4. **Store**: All tweets and feedback saved to Supabase
-5. **Learn**: (Phase 2) Past feedback improves future filtering via RAG
+5. **Learn**: Past feedback improves future filtering via RAG
+
+### Blog Posts
+1. **Like**: Send `/like <blog_url>` to fetch, score, and save a blog post you enjoyed
+2. **Newsletter**: Send `/newsletter <url>` to parse a newsletter — all articles are scored and sent for review (no filtering threshold, all are shown)
+3. **Feedback**: Vote on blog posts just like tweets to train the system
+4. **Store**: Blog posts stored alongside tweets with `content_type='blog_post'`
 
 ## Filtering Criteria
 
@@ -329,7 +341,9 @@ Logs are written to `curator.log` and stdout. Check here for errors and curation
 
 - Phase 1: Core MVP (fetch, filter, send, feedback buttons)
 - Phase 2: RAG with embeddings (use feedback to improve filtering)
-- Phase 3: Analytics dashboard, multi-account support
+- Phase 3: Blog post and newsletter support
+- Phase 4: LLM-based blog post filtering (once enough feedback is accumulated)
+- Phase 5: RSS feed support, analytics dashboard, multi-account support
 
 ## License
 

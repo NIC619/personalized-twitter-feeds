@@ -28,7 +28,8 @@ CREATE TABLE IF NOT EXISTS tweets (
     filter_score FLOAT,  -- Claude's confidence score (0-100)
     filter_reason TEXT,  -- Why it was filtered in/out
     sent_to_telegram TIMESTAMP,  -- When sent to user
-    telegram_message_id INTEGER  -- Telegram message ID for reference
+    telegram_message_id INTEGER,  -- Telegram message ID for reference
+    content_type TEXT DEFAULT 'tweet'  -- 'tweet' or 'blog_post'
 );
 
 -- Indexes for tweets table
@@ -36,6 +37,7 @@ CREATE INDEX IF NOT EXISTS idx_tweets_tweet_id ON tweets(tweet_id);
 CREATE INDEX IF NOT EXISTS idx_tweets_created_at ON tweets(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_tweets_filtered ON tweets(filtered);
 CREATE INDEX IF NOT EXISTS idx_tweets_sent ON tweets(sent_to_telegram);
+CREATE INDEX IF NOT EXISTS idx_tweets_content_type ON tweets(content_type);
 
 -- Table: feedback
 -- Stores user feedback (thumbs up/down) on tweets

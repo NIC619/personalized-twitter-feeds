@@ -61,6 +61,7 @@ class DatabaseClient:
                 "filtered": tweet.get("filtered", False),
                 "filter_score": tweet.get("filter_score"),
                 "filter_reason": tweet.get("filter_reason"),
+                "content_type": tweet.get("content_type", "tweet"),
             }
             records.append(record)
 

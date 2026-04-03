@@ -17,6 +17,8 @@ from telegram.ext import (
     filters,
 )
 
+from src.content import is_blog_content, is_http_url, is_tweet_url
+
 logger = logging.getLogger(__name__)
 
 
@@ -24,6 +26,7 @@ logger = logging.getLogger(__name__)
 STAR_AWAITING_INPUT = 0
 LIKE_AWAITING_INPUT = 1
 THREAD_AWAITING_INPUT = 2
+NEWSLETTER_AWAITING_INPUT = 3
 
 
 class TelegramCurator:
@@ -40,6 +43,8 @@ class TelegramCurator:
         list_starred_callback: Optional[Callable] = None,
         like_tweet_callback: Optional[Callable] = None,
         thread_callback: Optional[Callable] = None,
+        like_blog_callback: Optional[Callable] = None,
+        newsletter_callback: Optional[Callable] = None,
     ):
         """Initialize Telegram bot.
 
@@ -53,6 +58,8 @@ class TelegramCurator:
             list_starred_callback: Async callback function() → list of starred usernames
             like_tweet_callback: Async callback function(tweet_id) → tweet dict or None
             thread_callback: Async callback function(tweet_id) → list of tweet dicts or None
+            like_blog_callback: Async callback function(url) → blog post dict or None
+            newsletter_callback: Async callback function(url) → list of blog post dicts
         """
         self.bot_token = bot_token
         self.chat_id = chat_id
@@ -63,6 +70,8 @@ class TelegramCurator:
         self.list_starred_callback = list_starred_callback
         self.like_tweet_callback = like_tweet_callback
         self.thread_callback = thread_callback
+        self.like_blog_callback = like_blog_callback
+        self.newsletter_callback = newsletter_callback
         self.application: Optional[Application] = None
         self._pending_feedback: dict[str, dict] = {}  # tweet_id → pending save info
         self._tweet_authors: dict[str, str] = {}  # tweet_id → username
@@ -87,7 +96,8 @@ class TelegramCurator:
         """Register bot commands so they appear in Telegram's command menu."""
         commands = [
             BotCommand("star", "Toggle starred status — /star username"),
-            BotCommand("like", "Upvote a tweet — /like tweet_url"),
+            BotCommand("like", "Upvote a tweet or blog post — /like url"),
+            BotCommand("newsletter", "Parse and score a newsletter — /newsletter url"),
             BotCommand("thread", "Fetch and display a thread — /thread tweet_url"),
             BotCommand("starred", "List all starred authors"),
             BotCommand("stats", "Show author performance stats"),
@@ -154,6 +164,20 @@ class TelegramCurator:
             )
         )
         self.application.add_handler(
+            ConversationHandler(
+                entry_points=[CommandHandler("newsletter", self._handle_newsletter)],
+                states={
+                    NEWSLETTER_AWAITING_INPUT: [
+                        MessageHandler(
+                            filters.TEXT & ~filters.COMMAND,
+                            self._handle_newsletter_input,
+                        )
+                    ],
+                },
+                fallbacks=[CommandHandler("cancel", self._handle_newsletter_cancel)],
+            )
+        )
+        self.application.add_handler(
             CommandHandler("starred", self._handle_starred)
         )
 
@@ -179,16 +203,18 @@ class TelegramCurator:
     ) -> None:
         """Handle /help command."""
         await update.message.reply_text(
-            "Twitter Curator Help:\n\n"
+            "Content Curator Help:\n\n"
             "Commands:\n"
             "/star username or URL — toggle starred status for an author\n"
-            "/like tweet URL or ID — upvote a tweet with a reason\n"
+            "/like URL or tweet ID — upvote a tweet or blog post with a reason\n"
+            "/newsletter URL — parse a newsletter, score and send all posts\n"
             "/thread tweet URL or ID — fetch and display a full thread\n"
             "/starred — list all starred authors\n"
             "/stats — show author performance stats\n\n"
             "- I send you filtered tweets daily\n"
             "- Use the buttons to tell me what you like\n"
-            "- Your feedback helps improve future curation"
+            "- Your feedback helps improve future curation\n"
+            "- /like accepts both tweet URLs and blog post URLs"
         )
 
     async def _handle_stats(
@@ -332,18 +358,18 @@ class TelegramCurator:
     async def _handle_like(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> int:
-        """Handle /like command to upvote a tweet.
+        """Handle /like command to upvote a tweet or blog post.
 
         If called with args, processes immediately.
         If called without args, prompts and waits for input.
         """
-        if not self.like_tweet_callback:
+        if not self.like_tweet_callback and not self.like_blog_callback:
             await update.message.reply_text("Like feature not available.")
             return ConversationHandler.END
 
         if not context.args:
             await update.message.reply_text(
-                "Send me a tweet URL or ID to like.\n"
+                "Send me a tweet URL, blog post URL, or tweet ID to like.\n"
                 "You can send multiple separated by spaces.\n\n"
                 "/cancel to abort."
             )
@@ -372,11 +398,16 @@ class TelegramCurator:
         return ConversationHandler.END
 
     async def _like_tweets(self, update: Update, args: list[str]) -> None:
-        """Process a list of tweet URL/ID args and send each with reason buttons."""
+        """Process a list of tweet/blog URL/ID args and send each with reason buttons."""
         for arg in args:
+            # Check if this is a blog post URL (not a tweet URL)
+            if is_http_url(arg) and not is_tweet_url(arg):
+                await self._like_blog_post(update, arg)
+                continue
+
             tweet_id = self._extract_tweet_id(arg)
             if not tweet_id:
-                await update.message.reply_text(f"Could not parse tweet ID from: {arg}")
+                await update.message.reply_text(f"Could not parse ID from: {arg}")
                 continue
 
             try:
@@ -410,6 +441,46 @@ class TelegramCurator:
             except Exception as e:
                 logger.error(f"Error sending like message for {tweet_id}: {e}")
                 await update.message.reply_text(f"Error sending tweet {tweet_id}.")
+
+    async def _like_blog_post(self, update: Update, url: str) -> None:
+        """Process a blog post URL for liking."""
+        if not self.like_blog_callback:
+            await update.message.reply_text("Blog post liking not available.")
+            return
+
+        await update.message.reply_text("Fetching and scoring blog post...")
+
+        try:
+            post = await self.like_blog_callback(url)
+        except Exception as e:
+            logger.error(f"Error fetching blog post {url}: {e}")
+            await update.message.reply_text(f"Error fetching blog post.")
+            return
+
+        if not post:
+            await update.message.reply_text("Could not fetch blog post.")
+            return
+
+        content_id = post["tweet_id"]
+        message = self._format_blog_like_message(post)
+
+        # Store author mapping for undo functionality
+        self._tweet_authors[content_id] = post["author_username"]
+
+        # Send with reason category buttons
+        keyboard = self._make_like_reason_buttons(content_id)
+
+        try:
+            await self.application.bot.send_message(
+                chat_id=self.chat_id,
+                text=message,
+                reply_markup=keyboard,
+                parse_mode="HTML",
+                disable_web_page_preview=True,
+            )
+        except Exception as e:
+            logger.error(f"Error sending blog like message for {content_id}: {e}")
+            await update.message.reply_text("Error sending blog post.")
 
     async def _handle_thread(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
@@ -507,6 +578,155 @@ class TelegramCurator:
         )
 
         return "\n".join(lines)
+
+    # --- Newsletter handlers ---
+
+    async def _handle_newsletter(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> int:
+        """Handle /newsletter command to parse and score a newsletter.
+
+        If called with args, processes immediately.
+        If called without args, prompts and waits for input.
+        """
+        if not self.newsletter_callback:
+            await update.message.reply_text("Newsletter feature not available.")
+            return ConversationHandler.END
+
+        if not context.args:
+            await update.message.reply_text(
+                "Send me a newsletter URL to parse.\n\n"
+                "/cancel to abort."
+            )
+            return NEWSLETTER_AWAITING_INPUT
+
+        await self._process_newsletter(update, context.args[0])
+        return ConversationHandler.END
+
+    async def _handle_newsletter_input(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> int:
+        """Handle follow-up message with newsletter URL after /newsletter prompt."""
+        arg = update.message.text.strip().split()[0] if update.message.text.strip() else ""
+        if not arg:
+            await update.message.reply_text("No input received. Try again or /cancel.")
+            return NEWSLETTER_AWAITING_INPUT
+
+        await self._process_newsletter(update, arg)
+        return ConversationHandler.END
+
+    async def _handle_newsletter_cancel(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> int:
+        """Handle /cancel during newsletter conversation."""
+        await update.message.reply_text("Cancelled.")
+        return ConversationHandler.END
+
+    async def _process_newsletter(self, update: Update, url: str) -> None:
+        """Parse a newsletter, score all posts, and send them for feedback."""
+        if not is_http_url(url):
+            await update.message.reply_text("Please provide a valid URL.")
+            return
+
+        await update.message.reply_text("Parsing newsletter...")
+
+        try:
+            posts = await self.newsletter_callback(url)
+        except Exception as e:
+            logger.error(f"Error processing newsletter {url}: {e}")
+            await update.message.reply_text("Error processing newsletter.")
+            return
+
+        if not posts:
+            await update.message.reply_text("No articles found in newsletter.")
+            return
+
+        await update.message.reply_text(
+            f"Found {len(posts)} articles. Sending..."
+        )
+
+        sent_count = 0
+        for post in posts:
+            content_id = post["tweet_id"]
+            self._tweet_authors[content_id] = post["author_username"]
+
+            message = self._format_blog_scored_message(post)
+            keyboard = self._make_tweet_buttons(
+                content_id,
+                post["author_username"],
+                fav_label="⭐ Source",
+                mute_label="🔇 Mute",
+            )
+
+            try:
+                await self.application.bot.send_message(
+                    chat_id=self.chat_id,
+                    text=message,
+                    reply_markup=keyboard,
+                    parse_mode="HTML",
+                    disable_web_page_preview=True,
+                )
+                sent_count += 1
+                # Small delay to avoid rate limiting
+                await asyncio.sleep(1.0)
+            except Exception as e:
+                logger.error(f"Error sending newsletter post {content_id}: {e}")
+
+        await update.message.reply_text(
+            f"Newsletter processed: {sent_count}/{len(posts)} articles sent."
+        )
+
+    # --- Blog post formatting ---
+
+    def _format_blog_like_message(self, post: dict) -> str:
+        """Format a blog post for like message (no score/reason header)."""
+        article = post.get("article", {})
+        title = self._escape_html(article.get("title", post["text"][:100]))
+        url = post["url"]
+        source = post["author_username"]
+        author_name = post.get("author_name", source)
+
+        message = (
+            f"<b>{self._escape_html(author_name)}</b> | "
+            f"<a href=\"{url}\">{source}</a>\n\n"
+            f"<b>{title}</b>\n"
+        )
+
+        body = article.get("body", "")
+        if body:
+            preview = self._escape_html(body[:300])
+            if len(body) > 300:
+                preview += "..."
+            message += f"\n{preview}"
+
+        return message
+
+    def _format_blog_scored_message(self, post: dict) -> str:
+        """Format a blog post with score for newsletter digest."""
+        score = post.get("filter_score", 0)
+        reason = self._escape_html(post.get("filter_reason", ""))
+        article = post.get("article", {})
+        title = self._escape_html(article.get("title", post["text"][:100]))
+        url = post["url"]
+        source = post["author_username"]
+        author_name = post.get("author_name", source)
+
+        message = (
+            f"<b>Score:</b> {score}/100\n"
+            f"<b>Why:</b> {reason}\n\n"
+            f"<b>{self._escape_html(author_name)}</b> | "
+            f"<a href=\"{url}\">{source}</a>\n\n"
+            f"<b>{title}</b>\n"
+        )
+
+        body = article.get("body", "")
+        if body:
+            preview = self._escape_html(body[:300])
+            if len(body) > 300:
+                preview += "..."
+            message += f"\n{preview}"
+
+        return message
 
     @staticmethod
     def _make_like_reason_buttons(tweet_id: str) -> InlineKeyboardMarkup:

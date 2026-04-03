@@ -14,6 +14,7 @@ from src.telegram_bot import TelegramCurator
 from src.database import DatabaseClient
 from src.embeddings import EmbeddingManager
 from src.scheduler import DailyCurator, feedback_handler
+from src.blog_fetcher import BlogFetcher
 
 # Configure logging with colored console output
 class ColorFormatter(logging.Formatter):
@@ -183,6 +184,83 @@ def init_components(settings, num_tweets=None, hours=None):
             db.save_tweets(tweets)
         return tweets
 
+    # Build A/B test config (needed by blog callbacks below and curator)
+    ab_test_config = {
+        "enabled": settings.ab_test_enabled,
+        "experiment_id": settings.ab_test_experiment_id,
+        "challenger_prompt": settings.ab_test_challenger_prompt,
+    }
+
+    # Initialize blog fetcher
+    blog_fetcher = BlogFetcher()
+
+    # Determine control prompt key for A/B testing
+    rag_enabled = settings.rag_enabled and embedding_manager.enabled
+    control_key = "V2" if rag_enabled else "V1"
+
+    # Create blog post like callback
+    async def on_like_blog(url: str) -> dict | None:
+        post = blog_fetcher.fetch_blog_post(url)
+        if not post:
+            return None
+        # Score with Claude (threshold=0 to always return scores)
+        scored = claude.filter_tweets([post], threshold=0)
+        if scored:
+            post = scored[0]
+        # A/B test scoring
+        if ab_test_config["enabled"]:
+            try:
+                control_scores = [{
+                    "tweet_id": post["tweet_id"],
+                    "score": post.get("filter_score", 0),
+                    "reason": post.get("filter_reason", ""),
+                }]
+                challenger_scores = claude.score_tweets_with_prompt(
+                    [post], ab_test_config["challenger_prompt"],
+                )
+                db.save_ab_test_scores(
+                    ab_test_config["experiment_id"],
+                    control_scores, control_key,
+                    challenger_scores, ab_test_config["challenger_prompt"],
+                )
+            except Exception as e:
+                logger.warning(f"A/B test scoring failed for blog post: {e}")
+        db.save_tweets([post])
+        return post
+
+    # Create newsletter callback
+    async def on_newsletter(url: str) -> list[dict]:
+        posts = blog_fetcher.parse_newsletter(url)
+        if not posts:
+            return []
+        # Score all posts with Claude (threshold=0, no filtering)
+        scored = claude.filter_tweets(posts, threshold=0)
+        if scored:
+            posts = scored
+        # A/B test scoring
+        if ab_test_config["enabled"]:
+            try:
+                control_scores = [
+                    {
+                        "tweet_id": p["tweet_id"],
+                        "score": p.get("filter_score", 0),
+                        "reason": p.get("filter_reason", ""),
+                    }
+                    for p in posts
+                ]
+                challenger_scores = claude.score_tweets_with_prompt(
+                    posts, ab_test_config["challenger_prompt"],
+                )
+                db.save_ab_test_scores(
+                    ab_test_config["experiment_id"],
+                    control_scores, control_key,
+                    challenger_scores, ab_test_config["challenger_prompt"],
+                )
+            except Exception as e:
+                logger.warning(f"A/B test scoring failed for newsletter: {e}")
+        db.save_tweets(posts)
+        return posts
+
     # Initialize Telegram bot
     telegram = TelegramCurator(
         bot_token=settings.telegram_bot_token,
@@ -194,14 +272,9 @@ def init_components(settings, num_tweets=None, hours=None):
         list_starred_callback=on_list_starred,
         like_tweet_callback=on_like_tweet,
         thread_callback=on_fetch_thread,
+        like_blog_callback=on_like_blog,
+        newsletter_callback=on_newsletter,
     )
-
-    # Build A/B test config
-    ab_test_config = {
-        "enabled": settings.ab_test_enabled,
-        "experiment_id": settings.ab_test_experiment_id,
-        "challenger_prompt": settings.ab_test_challenger_prompt,
-    }
 
     # Initialize curator
     curator = DailyCurator(
