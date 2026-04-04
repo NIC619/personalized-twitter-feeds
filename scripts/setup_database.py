@@ -216,6 +216,20 @@ BEGIN
 END;
 $$;
 
+-- Table: newsletter_preferences
+-- Stores per-domain section ignore preferences for newsletters
+CREATE TABLE IF NOT EXISTS newsletter_preferences (
+    domain TEXT PRIMARY KEY,
+    ignored_sections JSONB NOT NULL DEFAULT '[]'::jsonb,
+    all_sections JSONB NOT NULL DEFAULT '[]'::jsonb,
+    created_at TIMESTAMP DEFAULT NOW(),
+    updated_at TIMESTAMP DEFAULT NOW()
+);
+
+-- RLS for newsletter_preferences
+ALTER TABLE public.newsletter_preferences ENABLE ROW LEVEL SECURITY;
+CREATE POLICY "anon_all" ON public.newsletter_preferences FOR ALL TO anon USING (true) WITH CHECK (true);
+
 -- Optional: Function to get feedback statistics
 CREATE OR REPLACE FUNCTION get_feedback_stats()
 RETURNS TABLE (

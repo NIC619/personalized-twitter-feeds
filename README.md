@@ -155,7 +155,8 @@ python main.py --bot-only
 | --- | --- |
 | `/star username` | Toggle starred status for an author. Accepts username, @mention, or profile/tweet URL. |
 | `/like url` | Upvote a tweet or blog post with a reason category. Accepts tweet URLs, blog post URLs, or numeric tweet IDs. |
-| `/newsletter url` | Parse a newsletter, score all articles with Claude, and send them for review. |
+| `/newsletter url` | Parse a newsletter, score all articles with Claude, and send them for review. On first use of a domain, prompts to select sections to ignore. |
+| `/newsletter_prefs domain_or_url` | Edit ignored sections for a newsletter. Accepts a domain name or a full URL to re-extract sections. |
 | `/thread tweet_url` | Fetch a full thread and display it as a single compiled message. Give it the last tweet in the thread. |
 | `/starred` | List all currently starred authors. |
 | `/stats` | Show author performance stats (paginated). |
@@ -254,8 +255,9 @@ twitter-curator/
 ### Blog Posts
 1. **Like**: Send `/like <blog_url>` to fetch, score, and save a blog post you enjoyed
 2. **Newsletter**: Send `/newsletter <url>` to parse a newsletter — all articles are scored and sent for review (no filtering threshold, all are shown)
-3. **Feedback**: Vote on blog posts just like tweets to train the system
-4. **Store**: Blog posts stored alongside tweets with `content_type='blog_post'`
+3. **Section Filtering**: On first use of a newsletter domain, you're prompted to select sections to ignore (e.g. Regulation, Sponsor). Preferences are saved per domain. Edit later with `/newsletter_prefs`.
+4. **Feedback**: Vote on blog posts just like tweets to train the system
+5. **Store**: Blog posts stored alongside tweets with `content_type='blog_post'`
 
 ## Filtering Criteria
 

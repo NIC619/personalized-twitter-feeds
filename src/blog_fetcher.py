@@ -79,12 +79,19 @@ class BlogFetcher:
             "is_retweet": False,
         }
 
-    def parse_newsletter(self, url: str) -> list[dict]:
+    def parse_newsletter(
+        self, url: str, ignored_sections: list[str] | None = None,
+    ) -> list[dict]:
         """Parse a newsletter URL and extract all blog post entries.
 
         Returns a list of normalized dicts compatible with the tweet pipeline.
         Each entry has content from the newsletter description plus any
         fetched article content.
+
+        Args:
+            url: Newsletter URL to parse
+            ignored_sections: Section names to skip (case-insensitive match).
+                If None, all sections are included.
         """
         try:
             response = self._client.get(url)
@@ -94,8 +101,19 @@ class BlogFetcher:
             return []
 
         soup = BeautifulSoup(response.text, "html.parser")
-        entries = self._extract_newsletter_entries(soup)
+        entries = self._extract_newsletter_entries(soup, ignored_sections)
         logger.info(f"Extracted {len(entries)} entries from newsletter")
+
+        if not entries:
+            # Check if we found sections but no entries — likely an unsupported layout
+            container, htag = self._find_newsletter_container(soup)
+            headings = [h.get_text(strip=True) for h in container.find_all(htag)]
+            links = soup.find_all("a", href=True)
+            logger.warning(
+                f"No entries extracted from newsletter. "
+                f"Layout debug: container=<{container.name}>, heading_tag={htag}, "
+                f"headings={len(headings)}, total_links={len(links)}"
+            )
 
         posts = []
         for entry in entries:
@@ -111,6 +129,28 @@ class BlogFetcher:
 
         logger.info(f"Built {len(posts)} blog posts from newsletter")
         return posts
+
+    def extract_sections(self, url: str) -> list[str]:
+        """Extract section headings from a newsletter URL.
+
+        Looks for <h3> headings in the article content which are the
+        standard section delimiters in Substack-style newsletters.
+
+        Args:
+            url: Newsletter URL
+
+        Returns:
+            List of section heading strings
+        """
+        try:
+            response = self._client.get(url)
+            response.raise_for_status()
+        except httpx.HTTPError as e:
+            logger.error(f"Error fetching newsletter for sections {url}: {e}")
+            return []
+
+        soup = BeautifulSoup(response.text, "html.parser")
+        return self._get_section_headings(soup)
 
     def fetch_and_enrich_post(self, post: dict) -> dict:
         """Fetch the actual article content for a newsletter post.
@@ -142,55 +182,165 @@ class BlogFetcher:
 
         return post
 
-    def _extract_newsletter_entries(self, soup: BeautifulSoup) -> list[dict]:
-        """Extract blog post entries from newsletter HTML.
+    @staticmethod
+    def _find_newsletter_container(soup: BeautifulSoup) -> tuple:
+        """Find the DOM container and heading tag name for newsletter sections.
 
-        Looks for <li> elements containing links, which is the common
-        pattern for newsletter article listings.
+        Supported layouts:
+        - Substack: <article> > div.body.markup > h3 + ul
+        - Mailerlite: <table> > td > h2 + ul (email-style table layout)
+        - Generic: any element with the most direct h2/h3 children
+
+        Returns:
+            (container_element, heading_tag) e.g. (div_element, "h3")
         """
+        # Try Substack-style: div with class "body" inside article
+        article = soup.find("article")
+        if article:
+            body_div = article.find("div", class_="body")
+            if body_div:
+                direct_h3s = [c for c in body_div.children
+                              if getattr(c, "name", None) == "h3"]
+                if direct_h3s:
+                    return body_div, "h3"
+
+            direct_h3s = [c for c in article.children
+                          if getattr(c, "name", None) == "h3"]
+            if direct_h3s:
+                return article, "h3"
+
+        # Generic: find element with most direct h2 or h3 children
+        body = soup.find("body") or soup
+        best = body
+        best_count = 0
+        best_tag = "h3"
+
+        for element in body.find_all(True):  # all tags
+            for htag in ("h3", "h2"):
+                count = sum(1 for c in element.children
+                            if getattr(c, "name", None) == htag)
+                if count > best_count:
+                    best_count = count
+                    best = element
+                    best_tag = htag
+
+        return (best, best_tag) if best_count > 0 else (body, "h3")
+
+    @staticmethod
+    def _get_section_headings(soup: BeautifulSoup) -> list[str]:
+        """Extract section headings that contain article links.
+
+        Supports both h2 and h3 as section delimiters depending on the
+        newsletter layout. Headings with no linked list items underneath
+        are skipped (e.g. subtitles, decorative headings).
+        """
+        container, htag = BlogFetcher._find_newsletter_container(soup)
+        sections = []
+        for heading in container.find_all(htag):
+            text = heading.get_text(strip=True)
+            if not text or len(text) <= 1:
+                continue
+            # Check if this section has any <ul> with <li><a> before the next heading
+            has_links = False
+            sibling = heading.find_next_sibling()
+            while sibling and getattr(sibling, "name", None) != htag:
+                if getattr(sibling, "name", None) == "ul":
+                    for li in sibling.find_all("li", recursive=False):
+                        if li.find("a", href=True):
+                            has_links = True
+                            break
+                if has_links:
+                    break
+                sibling = sibling.find_next_sibling()
+            if has_links:
+                sections.append(text)
+        return sections
+
+    def _extract_newsletter_entries(
+        self,
+        soup: BeautifulSoup,
+        ignored_sections: list[str] | None = None,
+    ) -> list[dict]:
+        """Extract blog post entries from newsletter HTML, grouped by section.
+
+        Supports both h2-sectioned (mailerlite) and h3-sectioned (Substack)
+        newsletters. Sections are detected by the heading tag that appears
+        most frequently as direct children of the content container.
+
+        Args:
+            soup: Parsed newsletter HTML
+            ignored_sections: Section names to skip (case-insensitive).
+                If None, all sections are included.
+        """
+        container, htag = BlogFetcher._find_newsletter_container(soup)
+        ignored = {s.lower() for s in (ignored_sections or [])}
+
         entries = []
         seen_urls = set()
+        current_section = None
 
-        for li in soup.find_all("li"):
-            links = li.find_all("a", href=True)
-            if not links:
+        # Walk through top-level children of the container to track sections
+        for element in container.children:
+            if not hasattr(element, "name") or element.name is None:
                 continue
 
-            # First link is typically the article title
-            first_link = links[0]
-            url = first_link.get("href", "").strip()
-            title = first_link.get_text(strip=True)
-
-            if not url or not title:
+            # Detect section boundaries
+            if element.name == htag:
+                current_section = element.get_text(strip=True)
                 continue
 
-            # Skip non-article links (anchors, mailto, etc.)
-            if not url.startswith("http"):
+            # Skip content in ignored sections
+            if current_section and current_section.lower() in ignored:
                 continue
 
-            # Skip very short titles (likely navigation elements)
-            if len(title) < 10:
-                continue
+            # Look for list items with links
+            lis = []
+            if element.name == "ul":
+                lis = element.find_all("li", recursive=False)
+            elif element.name == "li":
+                lis = [element]
 
-            # Skip duplicate URLs
-            if url in seen_urls:
-                continue
-            seen_urls.add(url)
-
-            # Extract author — look for "by" pattern in the list item text
-            author = self._extract_author_from_li(li, first_link)
-
-            # Extract description — remaining text after title and author
-            description = self._extract_description_from_li(li, first_link)
-
-            entries.append({
-                "url": url,
-                "title": title,
-                "author": author,
-                "description": description,
-            })
+            for li in lis:
+                entry = self._extract_entry_from_li(li, seen_urls)
+                if entry:
+                    entry["section"] = current_section
+                    entries.append(entry)
 
         return entries
+
+    def _extract_entry_from_li(self, li, seen_urls: set) -> dict | None:
+        """Extract a single article entry from a <li> element.
+
+        Returns:
+            Entry dict with url, title, author, description, or None if invalid.
+        """
+        links = li.find_all("a", href=True)
+        if not links:
+            return None
+
+        first_link = links[0]
+        url = first_link.get("href", "").strip()
+        title = first_link.get_text(strip=True)
+
+        if not url or not title:
+            return None
+        if not url.startswith("http"):
+            return None
+        if len(title) < 10:
+            return None
+        if url in seen_urls:
+            return None
+        seen_urls.add(url)
+
+        author = self._extract_author_from_li(li, first_link)
+        description = self._extract_description_from_li(li, first_link)
+
+        return {
+            "url": url,
+            "title": title,
+            "author": author,
+            "description": description,
+        }
 
     def _extract_author_from_li(self, li, title_link) -> str | None:
         """Extract author name from a newsletter list item.
@@ -240,6 +390,9 @@ class BlogFetcher:
                 if sep_idx != -1:
                     after_title = after_title[sep_idx + 1:].strip()
                     break
+
+        # Strip leading punctuation/whitespace left after author removal
+        after_title = after_title.lstrip(" .,;:—–-")
 
         return after_title[:500] if after_title else ""
 

@@ -27,6 +27,7 @@ STAR_AWAITING_INPUT = 0
 LIKE_AWAITING_INPUT = 1
 THREAD_AWAITING_INPUT = 2
 NEWSLETTER_AWAITING_INPUT = 3
+NEWSLETTER_PREFS_AWAITING_INPUT = 4
 
 
 class TelegramCurator:
@@ -45,6 +46,9 @@ class TelegramCurator:
         thread_callback: Optional[Callable] = None,
         like_blog_callback: Optional[Callable] = None,
         newsletter_callback: Optional[Callable] = None,
+        get_newsletter_prefs_callback: Optional[Callable] = None,
+        save_newsletter_prefs_callback: Optional[Callable] = None,
+        extract_sections_callback: Optional[Callable] = None,
     ):
         """Initialize Telegram bot.
 
@@ -59,7 +63,10 @@ class TelegramCurator:
             like_tweet_callback: Async callback function(tweet_id) → tweet dict or None
             thread_callback: Async callback function(tweet_id) → list of tweet dicts or None
             like_blog_callback: Async callback function(url) → blog post dict or None
-            newsletter_callback: Async callback function(url) → list of blog post dicts
+            newsletter_callback: Async callback function(url, ignored_sections) → list of blog post dicts
+            get_newsletter_prefs_callback: Async callback function(domain) → prefs dict or None
+            save_newsletter_prefs_callback: Async callback function(domain, ignored, all_sections) → dict
+            extract_sections_callback: Async callback function(url) → list of section names
         """
         self.bot_token = bot_token
         self.chat_id = chat_id
@@ -72,9 +79,13 @@ class TelegramCurator:
         self.thread_callback = thread_callback
         self.like_blog_callback = like_blog_callback
         self.newsletter_callback = newsletter_callback
+        self.get_newsletter_prefs_callback = get_newsletter_prefs_callback
+        self.save_newsletter_prefs_callback = save_newsletter_prefs_callback
+        self.extract_sections_callback = extract_sections_callback
         self.application: Optional[Application] = None
         self._pending_feedback: dict[str, dict] = {}  # tweet_id → pending save info
         self._tweet_authors: dict[str, str] = {}  # tweet_id → username
+        self._section_selection: dict[str, dict] = {}  # chat_id → {url, domain, sections, ignored}
         logger.info("Telegram bot initialized")
 
     async def initialize(self) -> None:
@@ -98,6 +109,7 @@ class TelegramCurator:
             BotCommand("star", "Toggle starred status — /star username"),
             BotCommand("like", "Upvote a tweet or blog post — /like url"),
             BotCommand("newsletter", "Parse and score a newsletter — /newsletter url"),
+            BotCommand("newsletter_prefs", "Edit newsletter section preferences — /newsletter_prefs domain"),
             BotCommand("thread", "Fetch and display a thread — /thread tweet_url"),
             BotCommand("starred", "List all starred authors"),
             BotCommand("stats", "Show author performance stats"),
@@ -178,6 +190,20 @@ class TelegramCurator:
             )
         )
         self.application.add_handler(
+            ConversationHandler(
+                entry_points=[CommandHandler("newsletter_prefs", self._handle_newsletter_prefs)],
+                states={
+                    NEWSLETTER_PREFS_AWAITING_INPUT: [
+                        MessageHandler(
+                            filters.TEXT & ~filters.COMMAND,
+                            self._handle_newsletter_prefs_input,
+                        )
+                    ],
+                },
+                fallbacks=[CommandHandler("cancel", self._handle_newsletter_prefs_cancel)],
+            )
+        )
+        self.application.add_handler(
             CommandHandler("starred", self._handle_starred)
         )
 
@@ -208,6 +234,7 @@ class TelegramCurator:
             "/star username or URL — toggle starred status for an author\n"
             "/like URL or tweet ID — upvote a tweet or blog post with a reason\n"
             "/newsletter URL — parse a newsletter, score and send all posts\n"
+            "/newsletter_prefs domain — edit ignored sections for a newsletter\n"
             "/thread tweet URL or ID — fetch and display a full thread\n"
             "/starred — list all starred authors\n"
             "/stats — show author performance stats\n\n"
@@ -600,8 +627,7 @@ class TelegramCurator:
             )
             return NEWSLETTER_AWAITING_INPUT
 
-        await self._process_newsletter(update, context.args[0])
-        return ConversationHandler.END
+        return await self._process_newsletter(update, context.args[0])
 
     async def _handle_newsletter_input(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
@@ -612,8 +638,7 @@ class TelegramCurator:
             await update.message.reply_text("No input received. Try again or /cancel.")
             return NEWSLETTER_AWAITING_INPUT
 
-        await self._process_newsletter(update, arg)
-        return ConversationHandler.END
+        return await self._process_newsletter(update, arg)
 
     async def _handle_newsletter_cancel(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
@@ -622,23 +647,225 @@ class TelegramCurator:
         await update.message.reply_text("Cancelled.")
         return ConversationHandler.END
 
-    async def _process_newsletter(self, update: Update, url: str) -> None:
-        """Parse a newsletter, score all posts, and send them for feedback."""
+    async def _process_newsletter(self, update: Update, url: str) -> int:
+        """Parse a newsletter, checking section preferences first.
+
+        If the domain is new and section extraction is available, prompts
+        the user to select sections to ignore before processing.
+
+        Returns:
+            ConversationHandler.END or NEWSLETTER_AWAITING_INPUT (if awaiting section selection)
+        """
         if not is_http_url(url):
             await update.message.reply_text("Please provide a valid URL.")
+            return ConversationHandler.END
+
+        from urllib.parse import urlparse
+        domain = urlparse(url).netloc.removeprefix("www.")
+
+        # Check for existing preferences
+        ignored_sections = None
+        if self.get_newsletter_prefs_callback:
+            prefs = await self.get_newsletter_prefs_callback(domain)
+            if prefs:
+                ignored_sections = prefs.get("ignored_sections", [])
+                if ignored_sections:
+                    logger.info(f"Skipping {len(ignored_sections)} sections for {domain}")
+            elif self.extract_sections_callback:
+                # New domain — prompt for section selection
+                sections = await self.extract_sections_callback(url)
+                if sections:
+                    chat_id = str(update.effective_chat.id)
+                    self._section_selection[chat_id] = {
+                        "url": url,
+                        "domain": domain,
+                        "sections": sections,
+                        "ignored": set(),
+                    }
+                    await self._send_section_picker(update, chat_id)
+                    return ConversationHandler.END  # Selection handled via callback buttons
+
+        await self._do_process_newsletter(update, url, ignored_sections)
+        return ConversationHandler.END
+
+    async def _send_section_picker(self, update: Update, chat_id: str) -> None:
+        """Send section selection message with toggle buttons."""
+        state = self._section_selection[chat_id]
+        sections = state["sections"]
+        ignored = state["ignored"]
+        domain = state["domain"]
+
+        buttons = []
+        for i, section in enumerate(sections):
+            checked = "☐" if section in ignored else "☑"
+            buttons.append([
+                InlineKeyboardButton(
+                    f"{checked} {section}",
+                    callback_data=f"nsec:{i}",
+                )
+            ])
+        buttons.append([
+            InlineKeyboardButton("✅ Done — process newsletter", callback_data="nsec:done"),
+            InlineKeyboardButton("❌ Cancel", callback_data="nsec:cancel"),
+        ])
+
+        text = (
+            f"New newsletter: <b>{self._escape_html(domain)}</b>\n\n"
+            f"Found {len(sections)} sections. "
+            "Tap to toggle sections you want to <b>ignore</b>.\n"
+            "☑ = included, ☐ = ignored"
+        )
+
+        msg = await update.message.reply_text(
+            text,
+            reply_markup=InlineKeyboardMarkup(buttons),
+            parse_mode="HTML",
+        )
+        state["message_id"] = msg.message_id
+
+    async def _handle_section_toggle(self, query, data: str) -> None:
+        """Handle section toggle/done/cancel button presses."""
+        chat_id = str(query.message.chat_id)
+        state = self._section_selection.get(chat_id)
+        if not state:
+            await query.edit_message_text("Section selection expired. Run /newsletter again.")
             return
 
+        action = data.split(":", 1)[1]
+
+        if action == "cancel":
+            del self._section_selection[chat_id]
+            await query.edit_message_text("Newsletter cancelled.")
+            return
+
+        if action == "done":
+            # Save preferences
+            domain = state["domain"]
+            url = state["url"]
+            ignored = list(state["ignored"])
+            sections = state["sections"]
+            del self._section_selection[chat_id]
+
+            if self.save_newsletter_prefs_callback:
+                await self.save_newsletter_prefs_callback(domain, ignored, sections)
+
+            if url:
+                # From /newsletter — save prefs then process
+                await query.edit_message_text(
+                    f"Saved preferences for {domain}: ignoring {len(ignored)} sections.\n"
+                    "Processing newsletter..."
+                )
+                await self._do_process_newsletter_by_chat(url, ignored or None)
+            else:
+                # From /newsletter_prefs — just save
+                await query.edit_message_text(
+                    f"Saved preferences for {domain}: ignoring {len(ignored)} sections."
+                )
+            return
+
+        # Toggle a section
+        try:
+            idx = int(action)
+        except ValueError:
+            return
+
+        sections = state["sections"]
+        if idx < 0 or idx >= len(sections):
+            return
+
+        section = sections[idx]
+        if section in state["ignored"]:
+            state["ignored"].discard(section)
+        else:
+            state["ignored"].add(section)
+
+        # Rebuild buttons with updated state
+        ignored = state["ignored"]
+        buttons = []
+        for i, sec in enumerate(sections):
+            checked = "☐" if sec in ignored else "☑"
+            buttons.append([
+                InlineKeyboardButton(
+                    f"{checked} {sec}",
+                    callback_data=f"nsec:{i}",
+                )
+            ])
+        buttons.append([
+            InlineKeyboardButton("✅ Done — process newsletter", callback_data="nsec:done"),
+            InlineKeyboardButton("❌ Cancel", callback_data="nsec:cancel"),
+        ])
+
+        try:
+            await query.edit_message_reply_markup(
+                reply_markup=InlineKeyboardMarkup(buttons),
+            )
+        except telegram.error.BadRequest:
+            pass  # Message not modified (same state)
+
+    async def _do_process_newsletter_by_chat(
+        self, url: str, ignored_sections: list[str] | None,
+    ) -> None:
+        """Process newsletter and send results directly to chat."""
+        try:
+            posts = await self.newsletter_callback(url, ignored_sections)
+        except Exception as e:
+            logger.error(f"Error processing newsletter {url}: {e}")
+            await self.application.bot.send_message(
+                chat_id=self.chat_id, text="Error processing newsletter."
+            )
+            return
+
+        if not posts:
+            await self.application.bot.send_message(
+                chat_id=self.chat_id, text="No articles found in newsletter. The newsletter layout may not be supported — check logs for details."
+            )
+            return
+
+        await self.application.bot.send_message(
+            chat_id=self.chat_id,
+            text=f"Found {len(posts)} articles. Sending...",
+        )
+
+        sent_count = 0
+        for post in posts:
+            content_id = post["tweet_id"]
+            self._tweet_authors[content_id] = post["author_username"]
+            message = self._format_blog_scored_message(post)
+            keyboard = self._make_tweet_buttons(
+                content_id, post["author_username"],
+                fav_label="⭐ Source", mute_label="🔇 Mute",
+            )
+            try:
+                await self.application.bot.send_message(
+                    chat_id=self.chat_id, text=message,
+                    reply_markup=keyboard, parse_mode="HTML",
+                    disable_web_page_preview=True,
+                )
+                sent_count += 1
+                await asyncio.sleep(1.0)
+            except Exception as e:
+                logger.error(f"Error sending newsletter post {content_id}: {e}")
+
+        await self.application.bot.send_message(
+            chat_id=self.chat_id,
+            text=f"Newsletter processed: {sent_count}/{len(posts)} articles sent.",
+        )
+
+    async def _do_process_newsletter(
+        self, update: Update, url: str, ignored_sections: list[str] | None,
+    ) -> None:
+        """Parse a newsletter, score all posts, and send them for feedback."""
         await update.message.reply_text("Parsing newsletter...")
 
         try:
-            posts = await self.newsletter_callback(url)
+            posts = await self.newsletter_callback(url, ignored_sections)
         except Exception as e:
             logger.error(f"Error processing newsletter {url}: {e}")
             await update.message.reply_text("Error processing newsletter.")
             return
 
         if not posts:
-            await update.message.reply_text("No articles found in newsletter.")
+            await update.message.reply_text("No articles found in newsletter. The newsletter layout may not be supported — check logs for details.")
             return
 
         await update.message.reply_text(
@@ -675,6 +902,101 @@ class TelegramCurator:
         await update.message.reply_text(
             f"Newsletter processed: {sent_count}/{len(posts)} articles sent."
         )
+
+    # --- Newsletter preferences handlers ---
+
+    async def _handle_newsletter_prefs(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> int:
+        """Handle /newsletter_prefs command to edit section preferences.
+
+        Accepts a domain name or a full newsletter URL.
+        If given a URL, extracts fresh sections from it.
+        """
+        if not self.get_newsletter_prefs_callback:
+            await update.message.reply_text("Newsletter preferences not available.")
+            return ConversationHandler.END
+
+        if not context.args:
+            await update.message.reply_text(
+                "Send me a newsletter domain or URL to edit preferences.\n"
+                "Example: etherealnews.substack.com\n"
+                "Or: https://etherealnews.substack.com/p/ethereal-news-weekly-18\n\n"
+                "/cancel to abort."
+            )
+            return NEWSLETTER_PREFS_AWAITING_INPUT
+
+        await self._show_prefs_editor(update, context.args[0].strip())
+        return ConversationHandler.END
+
+    async def _handle_newsletter_prefs_input(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> int:
+        """Handle follow-up message with domain/URL for /newsletter_prefs."""
+        arg = update.message.text.strip().split()[0] if update.message.text.strip() else ""
+        if not arg:
+            await update.message.reply_text("No input received. Try again or /cancel.")
+            return NEWSLETTER_PREFS_AWAITING_INPUT
+
+        await self._show_prefs_editor(update, arg)
+        return ConversationHandler.END
+
+    async def _handle_newsletter_prefs_cancel(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> int:
+        """Handle /cancel during newsletter_prefs conversation."""
+        await update.message.reply_text("Cancelled.")
+        return ConversationHandler.END
+
+    async def _show_prefs_editor(self, update: Update, arg: str) -> None:
+        """Show section toggle picker for a newsletter domain or URL.
+
+        If arg is a URL, extracts fresh sections from it.
+        If arg is a domain, loads saved sections from preferences.
+        """
+        from urllib.parse import urlparse
+
+        if is_http_url(arg):
+            # Given a URL — extract fresh sections
+            domain = urlparse(arg).netloc.removeprefix("www.")
+            if not self.extract_sections_callback:
+                await update.message.reply_text("Section extraction not available.")
+                return
+            await update.message.reply_text("Extracting sections...")
+            sections = await self.extract_sections_callback(arg)
+            if not sections:
+                await update.message.reply_text(f"No sections found in {arg}")
+                return
+            # Load existing ignored list if any
+            prefs = await self.get_newsletter_prefs_callback(domain)
+            ignored = set(prefs.get("ignored_sections", [])) if prefs else set()
+        else:
+            # Given a domain name — load from saved prefs
+            domain = arg
+            prefs = await self.get_newsletter_prefs_callback(domain)
+            if not prefs:
+                await update.message.reply_text(
+                    f"No preferences found for {domain}. "
+                    "Try with a full newsletter URL instead."
+                )
+                return
+            sections = prefs.get("all_sections", [])
+            if not sections:
+                await update.message.reply_text(
+                    f"No sections recorded for {domain}. "
+                    "Try with a full newsletter URL to re-extract sections."
+                )
+                return
+            ignored = set(prefs.get("ignored_sections", []))
+
+        chat_id = str(update.effective_chat.id)
+        self._section_selection[chat_id] = {
+            "url": None,  # No URL to process — just editing prefs
+            "domain": domain,
+            "sections": sections,
+            "ignored": ignored,
+        }
+        await self._send_section_picker(update, chat_id)
 
     # --- Blog post formatting ---
 
@@ -890,6 +1212,11 @@ class TelegramCurator:
         self, query, data: str
     ) -> None:
         """Dispatch feedback callback by type. Caller catches BadRequest."""
+        # Handle newsletter section toggle: "nsec:{index|done|cancel}"
+        if data.startswith("nsec:"):
+            await self._handle_section_toggle(query, data)
+            return
+
         # Handle vote: "vote:{tweet_id}:{up|down}"
         if data.startswith("vote:"):
             parts = data.split(":")

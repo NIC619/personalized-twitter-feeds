@@ -631,6 +631,58 @@ class DatabaseClient:
             logger.error(f"Error getting A/B test results: {e}")
             raise
 
+    def get_newsletter_preferences(self, domain: str) -> dict | None:
+        """Get newsletter section preferences for a domain.
+
+        Args:
+            domain: Newsletter domain (e.g. 'etherealnews.substack.com')
+
+        Returns:
+            Preferences dict with ignored_sections and all_sections, or None if not set
+        """
+        try:
+            result = (
+                self.client.table("newsletter_preferences")
+                .select("*")
+                .eq("domain", domain)
+                .execute()
+            )
+            return result.data[0] if result.data else None
+        except Exception as e:
+            logger.error(f"Error getting newsletter preferences for {domain}: {e}")
+            return None
+
+    def save_newsletter_preferences(
+        self, domain: str, ignored_sections: list[str], all_sections: list[str]
+    ) -> dict:
+        """Save newsletter section preferences for a domain.
+
+        Args:
+            domain: Newsletter domain
+            ignored_sections: List of section names to skip
+            all_sections: List of all section names found in the newsletter
+
+        Returns:
+            Saved preferences record
+        """
+        record = {
+            "domain": domain,
+            "ignored_sections": ignored_sections,
+            "all_sections": all_sections,
+            "updated_at": datetime.utcnow().isoformat(),
+        }
+        try:
+            result = (
+                self.client.table("newsletter_preferences")
+                .upsert(record, on_conflict="domain")
+                .execute()
+            )
+            logger.info(f"Saved newsletter preferences for {domain}: ignoring {len(ignored_sections)} sections")
+            return result.data[0] if result.data else {}
+        except Exception as e:
+            logger.error(f"Error saving newsletter preferences for {domain}: {e}")
+            raise
+
     def toggle_mute(self, username: str) -> str:
         """Toggle mute status for an author.
 

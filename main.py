@@ -194,19 +194,35 @@ def init_components(settings, num_tweets=None, hours=None):
     # Initialize blog fetcher
     blog_fetcher = BlogFetcher()
 
-    # Determine control prompt key for A/B testing
+    # RAG setup
     rag_enabled = settings.rag_enabled and embedding_manager.enabled
-    control_key = "V2" if rag_enabled else "V1"
+
+    def _build_rag_context(content: list[dict]) -> str | None:
+        """Build RAG context from similar voted content, if RAG is enabled."""
+        if not rag_enabled:
+            return None
+        try:
+            similar = embedding_manager.find_similar_voted_tweets(content)
+            if similar:
+                from src.scheduler import DailyCurator
+                return DailyCurator._format_rag_context(similar)
+        except Exception as e:
+            logger.warning(f"RAG context generation failed: {e}")
+        return None
 
     # Create blog post like callback
     async def on_like_blog(url: str) -> dict | None:
         post = blog_fetcher.fetch_blog_post(url)
         if not post:
             return None
-        # Score with Claude (threshold=0 to always return scores)
-        scored = claude.filter_tweets([post], threshold=0)
+        # Build RAG context and score with Claude
+        rag_context = _build_rag_context([post])
+        control_key = "V2" if rag_context else "V1"
+        scored = claude.filter_tweets([post], threshold=0, rag_context=rag_context)
         if scored:
             post = scored[0]
+        # Save to DB first (A/B test scores have FK to tweets table)
+        db.save_tweets([post])
         # A/B test scoring
         if ab_test_config["enabled"]:
             try:
@@ -217,6 +233,7 @@ def init_components(settings, num_tweets=None, hours=None):
                 }]
                 challenger_scores = claude.score_tweets_with_prompt(
                     [post], ab_test_config["challenger_prompt"],
+                    rag_context=rag_context,
                 )
                 db.save_ab_test_scores(
                     ab_test_config["experiment_id"],
@@ -225,18 +242,21 @@ def init_components(settings, num_tweets=None, hours=None):
                 )
             except Exception as e:
                 logger.warning(f"A/B test scoring failed for blog post: {e}")
-        db.save_tweets([post])
         return post
 
     # Create newsletter callback
-    async def on_newsletter(url: str) -> list[dict]:
-        posts = blog_fetcher.parse_newsletter(url)
+    async def on_newsletter(url: str, ignored_sections: list[str] | None = None) -> list[dict]:
+        posts = blog_fetcher.parse_newsletter(url, ignored_sections=ignored_sections)
         if not posts:
             return []
-        # Score all posts with Claude (threshold=0, no filtering)
-        scored = claude.filter_tweets(posts, threshold=0)
+        # Build RAG context and score all posts with Claude
+        rag_context = _build_rag_context(posts)
+        control_key = "V2" if rag_context else "V1"
+        scored = claude.filter_tweets(posts, threshold=0, rag_context=rag_context)
         if scored:
             posts = scored
+        # Save to DB first (A/B test scores have FK to tweets table)
+        db.save_tweets(posts)
         # A/B test scoring
         if ab_test_config["enabled"]:
             try:
@@ -250,6 +270,7 @@ def init_components(settings, num_tweets=None, hours=None):
                 ]
                 challenger_scores = claude.score_tweets_with_prompt(
                     posts, ab_test_config["challenger_prompt"],
+                    rag_context=rag_context,
                 )
                 db.save_ab_test_scores(
                     ab_test_config["experiment_id"],
@@ -258,8 +279,19 @@ def init_components(settings, num_tweets=None, hours=None):
                 )
             except Exception as e:
                 logger.warning(f"A/B test scoring failed for newsletter: {e}")
-        db.save_tweets(posts)
         return posts
+
+    # Create newsletter preferences callbacks
+    async def on_get_newsletter_prefs(domain: str) -> dict | None:
+        return db.get_newsletter_preferences(domain)
+
+    async def on_save_newsletter_prefs(
+        domain: str, ignored_sections: list[str], all_sections: list[str],
+    ) -> dict:
+        return db.save_newsletter_preferences(domain, ignored_sections, all_sections)
+
+    async def on_extract_sections(url: str) -> list[str]:
+        return blog_fetcher.extract_sections(url)
 
     # Initialize Telegram bot
     telegram = TelegramCurator(
@@ -274,6 +306,9 @@ def init_components(settings, num_tweets=None, hours=None):
         thread_callback=on_fetch_thread,
         like_blog_callback=on_like_blog,
         newsletter_callback=on_newsletter,
+        get_newsletter_prefs_callback=on_get_newsletter_prefs,
+        save_newsletter_prefs_callback=on_save_newsletter_prefs,
+        extract_sections_callback=on_extract_sections,
     )
 
     # Initialize curator
