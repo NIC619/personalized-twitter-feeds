@@ -217,27 +217,18 @@ class TwitterClient:
         else:
             full_text = tweet.text
 
-        # Extract article info if present
-        article_data = tweet_data.get("article") if isinstance(tweet_data, dict) else None
-        article = None
-        if article_data and isinstance(article_data, dict):
-            article_title = article_data.get("title")
-            article_body = article_data.get("plain_text")
-            # Extract article URL from entities
-            article_url = None
-            entities = tweet.entities if hasattr(tweet, "entities") else None
-            if entities and "urls" in entities:
-                for url_entity in entities["urls"]:
-                    expanded = url_entity.get("expanded_url") or url_entity.get("unwound_url", "")
-                    if "/article/" in expanded:
-                        article_url = expanded
-                        break
-            if article_title:
-                article = {
-                    "title": article_title,
-                    "url": article_url,
-                    "body": article_body,
-                }
+        # Extract article info if present — check outer tweet first, then referenced tweet
+        article = self._extract_article(tweet_data, tweet)
+        if not article:
+            for ref in referenced:
+                if ref["type"] in ("quoted", "retweeted"):
+                    ref_id = ref["id"] if isinstance(ref["id"], int) else int(ref["id"])
+                    ref_tweet = referenced_tweets_map.get(ref_id)
+                    if ref_tweet:
+                        ref_data = ref_tweet.data if hasattr(ref_tweet, "data") else {}
+                        article = self._extract_article(ref_data, ref_tweet)
+                        if article:
+                            break
 
         return {
             "tweet_id": str(tweet.id),
@@ -507,6 +498,35 @@ class TwitterClient:
         # Return in chronological order (oldest first)
         tweets.reverse()
         return tweets
+
+    @staticmethod
+    def _extract_article(tweet_data: dict, tweet_obj) -> dict | None:
+        """Extract article info from a tweet's data if present."""
+        if not isinstance(tweet_data, dict):
+            return None
+        article_data = tweet_data.get("article")
+        if not article_data or not isinstance(article_data, dict):
+            return None
+
+        article_title = article_data.get("title")
+        if not article_title:
+            return None
+
+        article_body = article_data.get("plain_text")
+        article_url = None
+        entities = tweet_obj.entities if hasattr(tweet_obj, "entities") else None
+        if entities and "urls" in entities:
+            for url_entity in entities["urls"]:
+                expanded = url_entity.get("expanded_url") or url_entity.get("unwound_url", "")
+                if "/article/" in expanded:
+                    article_url = expanded
+                    break
+
+        return {
+            "title": article_title,
+            "url": article_url,
+            "body": article_body,
+        }
 
     @staticmethod
     def get_tweet_url(tweet_id: str, username: str) -> str:
