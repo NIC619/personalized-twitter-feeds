@@ -1,6 +1,7 @@
 """Telegram bot for sending curated tweets and collecting feedback."""
 
 import asyncio
+import html
 import logging
 import re
 from typing import Callable, Optional
@@ -1679,6 +1680,7 @@ class TelegramCurator:
         Returns:
             HTML-escaped text
         """
+        text = html.unescape(text)
         return (
             text.replace("&", "&amp;")
             .replace("<", "&lt;")
