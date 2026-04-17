@@ -45,6 +45,13 @@
 - [x] 5 prompt variants: V1 (bio+rubric), V2 (V1+RAG), V3 (interests-only), V4 (binary), V5 (strict)
 - [ ] Auto-promote winning prompt after N votes
 
+### Keyword Blocklist ✅
+- [x] `blocked_keywords` table + CRUD in DatabaseClient
+- [x] Pre-LLM filter: whole-word, case-insensitive across tweet text, X Article title/body, and quoted-tweet text
+- [x] Scheduler hook applied between retweet filter and Claude scoring
+- [x] Starred authors exempt from blocklist (documented in README and `/help`)
+- [x] Telegram `/blockword` (add via conversation; one-per-line or comma-separated) and `/blockwords` (list with tap-to-remove inline buttons)
+
 ### Improvements
 - [ ] Batch tweets by topic/thread for better context
 - [ ] Handle Twitter threads (fetch full thread if 1/N detected)
