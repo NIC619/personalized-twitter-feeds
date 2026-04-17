@@ -922,6 +922,7 @@ class TelegramCurator:
             await update.message.reply_text(
                 "Send me a newsletter domain or URL to edit preferences.\n"
                 "Example: etherealnews.substack.com\n"
+                "Or: https://etherealnews.substack.com\n"
                 "Or: https://etherealnews.substack.com/p/ethereal-news-weekly-18\n\n"
                 "/cancel to abort."
             )
@@ -952,14 +953,23 @@ class TelegramCurator:
     async def _show_prefs_editor(self, update: Update, arg: str) -> None:
         """Show section toggle picker for a newsletter domain or URL.
 
-        If arg is a URL, extracts fresh sections from it.
-        If arg is a domain, loads saved sections from preferences.
+        If arg is a URL to a specific newsletter issue, extracts fresh sections
+        from it. If arg is a bare domain (or a URL with no path, like
+        "https://etherealnews.substack.com"), loads saved sections from preferences.
         """
         from urllib.parse import urlparse
 
+        is_url_with_path = False
         if is_http_url(arg):
-            # Given a URL — extract fresh sections
-            domain = urlparse(arg).netloc.removeprefix("www.")
+            parsed = urlparse(arg)
+            domain = parsed.netloc.removeprefix("www.")
+            # A URL with just the origin (no path or "/") is effectively a domain
+            is_url_with_path = parsed.path.strip("/") != ""
+        else:
+            domain = arg
+
+        if is_url_with_path:
+            # Given a newsletter issue URL — extract fresh sections
             if not self.extract_sections_callback:
                 await update.message.reply_text("Section extraction not available.")
                 return
@@ -972,8 +982,7 @@ class TelegramCurator:
             prefs = await self.get_newsletter_prefs_callback(domain)
             ignored = set(prefs.get("ignored_sections", [])) if prefs else set()
         else:
-            # Given a domain name — load from saved prefs
-            domain = arg
+            # Given a domain name (or origin-only URL) — load from saved prefs
             prefs = await self.get_newsletter_prefs_callback(domain)
             if not prefs:
                 await update.message.reply_text(
