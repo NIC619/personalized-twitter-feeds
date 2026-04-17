@@ -320,17 +320,22 @@ class BlogFetcher:
 
         first_link = links[0]
         url = first_link.get("href", "").strip()
-        title = first_link.get_text(strip=True)
+        link_text = first_link.get_text(strip=True)
 
-        if not url or not title:
+        if not url or not link_text:
             return None
         if not url.startswith("http"):
             return None
-        if len(title) < 10:
+        if len(link_text) < 10:
             return None
         if url in seen_urls:
             return None
         seen_urls.add(url)
+
+        # Text before the link (e.g. "Etherscan (block explorer)") is context
+        # about what the link refers to — fold it into the title so it isn't lost.
+        prefix = self._extract_prefix_from_li(li, first_link)
+        title = f"{prefix} {link_text}" if prefix else link_text
 
         author = self._extract_author_from_li(li, first_link)
         description = self._extract_description_from_li(li, first_link)
@@ -341,6 +346,18 @@ class BlogFetcher:
             "author": author,
             "description": description,
         }
+
+    @staticmethod
+    def _extract_prefix_from_li(li, title_link) -> str:
+        """Extract text that appears before the title link in the list item."""
+        full_text = li.get_text(" ", strip=True)
+        title_text = title_link.get_text(strip=True)
+
+        idx = full_text.find(title_text)
+        if idx <= 0:
+            return ""
+
+        return full_text[:idx].rstrip()
 
     def _extract_author_from_li(self, li, title_link) -> str | None:
         """Extract author name from a newsletter list item.

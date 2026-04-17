@@ -181,6 +181,46 @@ class TestBlogFetcher:
         assert posts[1]["article"]["title"] == "Second Article Title Here"
 
     @patch("src.blog_fetcher.httpx.Client")
+    def test_parse_newsletter_preserves_text_before_link(self, mock_client_cls):
+        """Text before the <a> link (e.g. "Etherscan (block explorer)") should
+        become part of the title so context isn't lost."""
+        from src.blog_fetcher import BlogFetcher
+
+        newsletter_html = """
+        <html><body>
+        <ul>
+            <li>Etherscan (block explorer) <a href="https://example.com/etherscan">token holders overview</a>, concentration, tier distribution &amp; Gini score; beta</li>
+            <li><a href="https://example.com/evmnow">open source contract metadata</a>: standard, SDK &amp; dapp UI</li>
+        </ul>
+        </body></html>
+        """
+
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.text = newsletter_html
+        mock_response.url = "https://newsletter.example.com/issue/2"
+
+        def mock_head(url):
+            resp = MagicMock()
+            resp.url = url
+            return resp
+
+        mock_client = MagicMock()
+        mock_client.get.return_value = mock_response
+        mock_client.head.side_effect = mock_head
+        mock_client_cls.return_value = mock_client
+
+        fetcher = BlogFetcher()
+        posts = fetcher.parse_newsletter("https://newsletter.example.com/issue/2")
+
+        assert len(posts) == 2
+        # Prefix text is folded into the title
+        assert posts[0]["article"]["title"] == "Etherscan (block explorer) token holders overview"
+        assert "concentration" in posts[0]["article"]["body"]
+        # When there's no prefix, title is unchanged
+        assert posts[1]["article"]["title"] == "open source contract metadata"
+
+    @patch("src.blog_fetcher.httpx.Client")
     def test_blog_post_dict_compatible_with_pipeline(self, mock_client_cls):
         """Verify the returned dict has all fields needed by the tweet pipeline."""
         from src.blog_fetcher import BlogFetcher
