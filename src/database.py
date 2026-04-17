@@ -71,7 +71,7 @@ class DatabaseClient:
                 .upsert(records, on_conflict="tweet_id")
                 .execute()
             )
-            logger.info(f"Saved {len(result.data)} tweets to database")
+            logger.info(f"Saved {len(result.data)} items to database")
             return result.data
         except Exception as e:
             logger.error(f"Error saving tweets: {e}")

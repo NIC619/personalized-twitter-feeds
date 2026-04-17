@@ -269,13 +269,13 @@ class ClaudeFilter:
             List of filtered tweets with scores and reasons
         """
         if not tweets:
-            logger.warning("No tweets to filter")
+            logger.warning("No items to filter")
             return []
 
-        # Batch tweets if there are more than batch_size
+        # Batch items if there are more than batch_size
         if len(tweets) > self.batch_size:
             logger.info(
-                f"Splitting {len(tweets)} tweets into batches of {self.batch_size}"
+                f"Splitting {len(tweets)} items into batches of {self.batch_size}"
             )
             all_scores = []
             for i in range(0, len(tweets), self.batch_size):
@@ -284,7 +284,7 @@ class ClaudeFilter:
                 total_batches = (len(tweets) + self.batch_size - 1) // self.batch_size
                 logger.info(
                     f"Scoring batch {batch_num}/{total_batches} "
-                    f"({len(batch)} tweets)..."
+                    f"({len(batch)} items)..."
                 )
                 scores = self._score_batch(batch, rag_context)
                 all_scores.extend(scores)
@@ -311,8 +311,8 @@ class ClaudeFilter:
                 tweet["filter_reason"] = "Not scored by Claude"
                 tweet["filtered"] = False
 
-        # Log all tweet scores for debugging
-        logger.info("--- Tweet Scores ---")
+        # Log all item scores for debugging
+        logger.info("--- Item Scores ---")
         for tweet in tweets:
             status = "PASS" if tweet.get("filtered") else "SKIP"
             score = tweet.get("filter_score", 0)
@@ -326,7 +326,7 @@ class ClaudeFilter:
         logger.info("--- End Scores ---")
 
         logger.info(
-            f"Filtered {len(filtered_tweets)}/{len(tweets)} tweets "
+            f"Filtered {len(filtered_tweets)}/{len(tweets)} items "
             f"(threshold: {threshold})"
         )
         return filtered_tweets
@@ -415,10 +415,10 @@ class ClaudeFilter:
             logger.error(f"Unknown prompt key: {prompt_key}")
             return []
 
-        # Batch tweets if there are more than batch_size
+        # Batch items if there are more than batch_size
         if len(tweets) > self.batch_size:
             logger.info(
-                f"Splitting {len(tweets)} tweets into batches of {self.batch_size} "
+                f"Splitting {len(tweets)} items into batches of {self.batch_size} "
                 f"for prompt '{prompt_key}'"
             )
             all_scores = []
@@ -428,19 +428,19 @@ class ClaudeFilter:
                 total_batches = (len(tweets) + self.batch_size - 1) // self.batch_size
                 logger.info(
                     f"Scoring batch {batch_num}/{total_batches} "
-                    f"({len(batch)} tweets) with prompt '{prompt_key}'..."
+                    f"({len(batch)} items) with prompt '{prompt_key}'..."
                 )
                 scores = self._score_batch_with_prompt(
                     batch, prompt_template, rag_context
                 )
                 all_scores.extend(scores)
             logger.info(
-                f"Scored {len(all_scores)} tweets with prompt '{prompt_key}'"
+                f"Scored {len(all_scores)} items with prompt '{prompt_key}'"
             )
             return all_scores
 
         scores = self._score_batch_with_prompt(tweets, prompt_template, rag_context)
-        logger.info(f"Scored {len(scores)} tweets with prompt '{prompt_key}'")
+        logger.info(f"Scored {len(scores)} items with prompt '{prompt_key}'")
         return scores
 
     def _score_batch_with_prompt(
