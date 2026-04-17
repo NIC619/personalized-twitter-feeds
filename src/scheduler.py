@@ -12,6 +12,7 @@ from src.claude_filter import ClaudeFilter
 from src.telegram_bot import TelegramCurator
 from src.database import DatabaseClient
 from src.embeddings import EmbeddingManager
+from src.keyword_filter import filter_blocked_keywords
 
 logger = logging.getLogger(__name__)
 
@@ -174,6 +175,26 @@ class DailyCurator:
 
             if not tweets_for_filtering:
                 logger.info("No tweets remaining after retweet filter")
+                return stats
+
+            # Step 1c2: Apply keyword blocklist (pre-LLM, favorite authors exempt)
+            blocked_keywords = self.db.get_blocked_keywords()
+            if blocked_keywords:
+                kept, blocked = filter_blocked_keywords(
+                    tweets_for_filtering,
+                    blocked_keywords,
+                    exempt_authors=favorite_authors_set,
+                )
+                stats["skipped_blocked_keywords"] = len(blocked)
+                if blocked:
+                    logger.info(
+                        f"Skipped {len(blocked)} items by keyword blocklist "
+                        f"({len(blocked_keywords)} keywords active)"
+                    )
+                tweets_for_filtering = kept
+
+            if not tweets_for_filtering:
+                logger.info("No tweets remaining after keyword blocklist")
                 return stats
 
             # Step 1d: Build RAG context from similar voted tweets

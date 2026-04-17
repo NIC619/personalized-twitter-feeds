@@ -683,6 +683,66 @@ class DatabaseClient:
             logger.error(f"Error saving newsletter preferences for {domain}: {e}")
             raise
 
+    def save_blocked_keyword(self, keyword: str) -> dict:
+        """Save a keyword to the block list.
+
+        Args:
+            keyword: Keyword or phrase to block (matched whole-word, case-insensitive)
+
+        Returns:
+            Saved record
+        """
+        keyword = keyword.strip().lower()
+        if not keyword:
+            raise ValueError("Keyword cannot be empty")
+
+        record = {"keyword": keyword}
+        try:
+            result = (
+                self.client.table("blocked_keywords")
+                .upsert(record, on_conflict="keyword")
+                .execute()
+            )
+            logger.info(f"Saved blocked keyword: '{keyword}'")
+            return result.data[0] if result.data else {}
+        except Exception as e:
+            logger.error(f"Error saving blocked keyword: {e}")
+            raise
+
+    def get_blocked_keywords(self) -> list[str]:
+        """Get all blocked keywords (lowercased).
+
+        Returns:
+            List of keyword strings
+        """
+        try:
+            result = (
+                self.client.table("blocked_keywords")
+                .select("keyword")
+                .order("keyword")
+                .execute()
+            )
+            return [r["keyword"] for r in result.data]
+        except Exception as e:
+            logger.error(f"Error getting blocked keywords: {e}")
+            raise
+
+    def remove_blocked_keyword(self, keyword: str) -> None:
+        """Remove a keyword from the block list.
+
+        Args:
+            keyword: Keyword to remove (case-insensitive)
+        """
+        keyword = keyword.strip().lower()
+        try:
+            self.client.table("blocked_keywords").delete().eq(
+                "keyword", keyword
+            ).execute()
+            logger.info(f"Removed blocked keyword: '{keyword}'")
+        except Exception as e:
+            logger.error(f"Error removing blocked keyword: {e}")
+            raise
+
     def toggle_mute(self, username: str) -> str:
         """Toggle mute status for an author.
 

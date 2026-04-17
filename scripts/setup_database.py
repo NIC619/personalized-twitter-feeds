@@ -230,6 +230,18 @@ CREATE TABLE IF NOT EXISTS newsletter_preferences (
 ALTER TABLE public.newsletter_preferences ENABLE ROW LEVEL SECURITY;
 CREATE POLICY "anon_all" ON public.newsletter_preferences FOR ALL TO anon USING (true) WITH CHECK (true);
 
+-- Table: blocked_keywords
+-- Stores keywords/phrases to filter out from the pipeline before Claude scoring.
+-- Matching is whole-word, case-insensitive. Favorite authors are exempt.
+CREATE TABLE IF NOT EXISTS blocked_keywords (
+    keyword TEXT PRIMARY KEY,
+    created_at TIMESTAMP DEFAULT NOW()
+);
+
+-- RLS for blocked_keywords
+ALTER TABLE public.blocked_keywords ENABLE ROW LEVEL SECURITY;
+CREATE POLICY "anon_all" ON public.blocked_keywords FOR ALL TO anon USING (true) WITH CHECK (true);
+
 -- Optional: Function to get feedback statistics
 CREATE OR REPLACE FUNCTION get_feedback_stats()
 RETURNS TABLE (

@@ -159,6 +159,8 @@ python main.py --bot-only
 | `/newsletter_prefs domain_or_url` | Edit ignored sections for a newsletter. Accepts a domain name or a full URL to re-extract sections. |
 | `/thread tweet_url` | Fetch a full thread and display it as a single compiled message. Give it the last tweet in the thread. |
 | `/starred` | List all currently starred authors. |
+| `/blockword` | Block keyword(s) from the pipeline. Paste one per line or comma-separated. Whole-word, case-insensitive. Starred authors are exempt. |
+| `/blockwords` | List blocked keywords; tap a keyword to remove it. |
 | `/stats` | Show author performance stats (paginated). |
 | `/help` | Show help message with available commands. |
 
@@ -222,6 +224,7 @@ twitter-curator/
 │   ├── embeddings.py       # RAG embeddings for feedback-driven curation
 │   ├── scheduler.py        # Daily curation orchestration
 │   ├── content.py          # Content ID utilities (blog ID generation, URL detection)
+│   ├── keyword_filter.py   # Pre-LLM blocklist filter (whole-word, case-insensitive)
 │   └── blog_fetcher.py     # Blog post fetching and newsletter parsing
 ├── tests/
 │   ├── conftest.py                # Shared test fixtures
@@ -231,6 +234,7 @@ twitter-curator/
 │   ├── test_scheduler.py          # DailyCurator unit tests
 │   ├── test_telegram_bot.py       # TelegramCurator unit tests
 │   ├── test_embeddings.py         # EmbeddingManager unit tests
+│   ├── test_keyword_filter.py     # Keyword blocklist filter unit tests
 │   └── test_blog_fetcher.py       # BlogFetcher and content utils unit tests
 ├── scripts/
 │   ├── setup_database.py          # Database schema SQL
@@ -247,10 +251,11 @@ twitter-curator/
 
 ### Tweets
 1. **Fetch**: Pulls tweets from your home timeline (last 24 hours)
-2. **Filter**: Claude scores each tweet 0-100 based on your interests
-3. **Send**: Tweets scoring ≥70 are sent to Telegram with 👍/👎 buttons
-4. **Store**: All tweets and feedback saved to Supabase
-5. **Learn**: Past feedback improves future filtering via RAG
+2. **Pre-filter**: Items containing blocked keywords (managed via `/blockword`) are dropped before Claude scoring. Matching is whole-word, case-insensitive, across tweet text, X Article title/body, and quoted-tweet text. Content from starred authors is currently exempt from the blocklist.
+3. **Filter**: Claude scores each tweet 0-100 based on your interests
+4. **Send**: Tweets scoring ≥70 are sent to Telegram with 👍/👎 buttons
+5. **Store**: All tweets and feedback saved to Supabase
+6. **Learn**: Past feedback improves future filtering via RAG
 
 ### Blog Posts
 1. **Like**: Send `/like <blog_url>` to fetch, score, and save a blog post you enjoyed

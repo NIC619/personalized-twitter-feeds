@@ -227,3 +227,38 @@ class TestGetAuthorStats:
 
         assert stats[0]["author_username"] == "high"
         assert stats[1]["author_username"] == "low"
+
+
+# --- blocked_keywords ---
+
+class TestBlockedKeywords:
+    def test_save_normalizes_case_and_whitespace(self, db):
+        mock_result = MagicMock()
+        mock_result.data = [{"keyword": "client diversity"}]
+        db.client.table.return_value.upsert.return_value.execute.return_value = mock_result
+
+        db.save_blocked_keyword("  Client Diversity  ")
+
+        call_args = db.client.table.return_value.upsert.call_args
+        record = call_args[0][0]
+        assert record == {"keyword": "client diversity"}
+        assert call_args.kwargs["on_conflict"] == "keyword"
+
+    def test_save_empty_raises(self, db):
+        with pytest.raises(ValueError, match="cannot be empty"):
+            db.save_blocked_keyword("   ")
+
+    def test_get_returns_keyword_list(self, db):
+        mock_result = MagicMock()
+        mock_result.data = [{"keyword": "client diversity"}, {"keyword": "staking marketshare"}]
+        db.client.table.return_value.select.return_value.order.return_value.execute.return_value = mock_result
+
+        result = db.get_blocked_keywords()
+
+        assert result == ["client diversity", "staking marketshare"]
+
+    def test_remove_normalizes_case(self, db):
+        db.remove_blocked_keyword("  Client Diversity  ")
+
+        eq_call = db.client.table.return_value.delete.return_value.eq
+        eq_call.assert_called_once_with("keyword", "client diversity")

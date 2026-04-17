@@ -29,6 +29,7 @@ LIKE_AWAITING_INPUT = 1
 THREAD_AWAITING_INPUT = 2
 NEWSLETTER_AWAITING_INPUT = 3
 NEWSLETTER_PREFS_AWAITING_INPUT = 4
+BLOCKWORD_AWAITING_INPUT = 5
 
 
 class TelegramCurator:
@@ -50,6 +51,9 @@ class TelegramCurator:
         get_newsletter_prefs_callback: Optional[Callable] = None,
         save_newsletter_prefs_callback: Optional[Callable] = None,
         extract_sections_callback: Optional[Callable] = None,
+        add_blocked_keyword_callback: Optional[Callable] = None,
+        list_blocked_keywords_callback: Optional[Callable] = None,
+        remove_blocked_keyword_callback: Optional[Callable] = None,
     ):
         """Initialize Telegram bot.
 
@@ -68,6 +72,9 @@ class TelegramCurator:
             get_newsletter_prefs_callback: Async callback function(domain) → prefs dict or None
             save_newsletter_prefs_callback: Async callback function(domain, ignored, all_sections) → dict
             extract_sections_callback: Async callback function(url) → list of section names
+            add_blocked_keyword_callback: Async callback function(keyword) → saved keyword
+            list_blocked_keywords_callback: Async callback function() → list of keywords
+            remove_blocked_keyword_callback: Async callback function(keyword) → None
         """
         self.bot_token = bot_token
         self.chat_id = chat_id
@@ -83,10 +90,14 @@ class TelegramCurator:
         self.get_newsletter_prefs_callback = get_newsletter_prefs_callback
         self.save_newsletter_prefs_callback = save_newsletter_prefs_callback
         self.extract_sections_callback = extract_sections_callback
+        self.add_blocked_keyword_callback = add_blocked_keyword_callback
+        self.list_blocked_keywords_callback = list_blocked_keywords_callback
+        self.remove_blocked_keyword_callback = remove_blocked_keyword_callback
         self.application: Optional[Application] = None
         self._pending_feedback: dict[str, dict] = {}  # tweet_id → pending save info
         self._tweet_authors: dict[str, str] = {}  # tweet_id → username
         self._section_selection: dict[str, dict] = {}  # chat_id → {url, domain, sections, ignored}
+        self._blockword_list: dict[str, list[str]] = {}  # chat_id → keyword list shown
         logger.info("Telegram bot initialized")
 
     async def initialize(self) -> None:
@@ -113,6 +124,8 @@ class TelegramCurator:
             BotCommand("newsletter_prefs", "Edit newsletter section preferences — /newsletter_prefs domain"),
             BotCommand("thread", "Fetch and display a thread — /thread tweet_url"),
             BotCommand("starred", "List all starred authors"),
+            BotCommand("blockword", "Block keyword(s) from pipeline — paste one per line or comma-separated"),
+            BotCommand("blockwords", "List blocked keywords — tap to remove"),
             BotCommand("stats", "Show author performance stats"),
             BotCommand("help", "Show help message"),
         ]
@@ -207,6 +220,23 @@ class TelegramCurator:
         self.application.add_handler(
             CommandHandler("starred", self._handle_starred)
         )
+        self.application.add_handler(
+            ConversationHandler(
+                entry_points=[CommandHandler("blockword", self._handle_blockword)],
+                states={
+                    BLOCKWORD_AWAITING_INPUT: [
+                        MessageHandler(
+                            filters.TEXT & ~filters.COMMAND,
+                            self._handle_blockword_input,
+                        )
+                    ],
+                },
+                fallbacks=[CommandHandler("cancel", self._handle_blockword_cancel)],
+            )
+        )
+        self.application.add_handler(
+            CommandHandler("blockwords", self._handle_blockwords)
+        )
 
         # Callback handler for inline buttons
         self.application.add_handler(
@@ -238,11 +268,15 @@ class TelegramCurator:
             "/newsletter_prefs domain — edit ignored sections for a newsletter\n"
             "/thread tweet URL or ID — fetch and display a full thread\n"
             "/starred — list all starred authors\n"
+            "/blockword — block keyword(s) from the pipeline (one per line or comma-separated)\n"
+            "/blockwords — list blocked keywords, tap to remove\n"
             "/stats — show author performance stats\n\n"
             "- I send you filtered tweets daily\n"
             "- Use the buttons to tell me what you like\n"
             "- Your feedback helps improve future curation\n"
-            "- /like accepts both tweet URLs and blog post URLs"
+            "- /like accepts both tweet URLs and blog post URLs\n"
+            "- Blocked keywords are matched whole-word, case-insensitive, before LLM scoring\n"
+            "  (content from starred authors is exempt from the blocklist)"
         )
 
     async def _handle_stats(
@@ -1148,6 +1182,150 @@ class TelegramCurator:
 
         await update.message.reply_text("\n".join(lines), parse_mode="HTML")
 
+    # --- Blocked keyword handlers ---
+
+    async def _handle_blockword(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> int:
+        """Handle /blockword command to add keyword(s) to the blocklist."""
+        if not self.add_blocked_keyword_callback:
+            await update.message.reply_text("Keyword blocking not available.")
+            return ConversationHandler.END
+
+        if context.args:
+            await self._add_blocked_keywords(update, " ".join(context.args))
+            return ConversationHandler.END
+
+        await update.message.reply_text(
+            "Send me the keyword(s) to block. One per line or comma-separated.\n"
+            "Matching is whole-word, case-insensitive.\n"
+            "Content from starred authors is exempt.\n\n"
+            "/cancel to abort."
+        )
+        return BLOCKWORD_AWAITING_INPUT
+
+    async def _handle_blockword_input(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> int:
+        """Handle follow-up message with keyword(s) after /blockword prompt."""
+        text = update.message.text.strip()
+        if not text:
+            await update.message.reply_text("No input received. Try again or /cancel.")
+            return BLOCKWORD_AWAITING_INPUT
+
+        await self._add_blocked_keywords(update, text)
+        return ConversationHandler.END
+
+    async def _handle_blockword_cancel(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> int:
+        """Handle /cancel during blockword conversation."""
+        await update.message.reply_text("Cancelled.")
+        return ConversationHandler.END
+
+    async def _add_blocked_keywords(self, update: Update, text: str) -> None:
+        """Parse keyword input (one per line or comma-separated) and save each."""
+        raw_parts = re.split(r"[\n,]", text)
+        keywords = []
+        seen = set()
+        for part in raw_parts:
+            kw = part.strip().lower()
+            if kw and kw not in seen:
+                keywords.append(kw)
+                seen.add(kw)
+
+        if not keywords:
+            await update.message.reply_text("No valid keywords found.")
+            return
+
+        results = []
+        for kw in keywords:
+            try:
+                await self.add_blocked_keyword_callback(kw)
+                results.append(f"🚫 '{kw}' blocked")
+            except Exception as e:
+                logger.error(f"Error saving blocked keyword '{kw}': {e}")
+                results.append(f"❌ '{kw}' — error")
+
+        await update.message.reply_text("\n".join(results))
+
+    async def _handle_blockwords(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Handle /blockwords command to list blocked keywords."""
+        if not self.list_blocked_keywords_callback:
+            await update.message.reply_text("Keyword blocking not available.")
+            return
+
+        try:
+            keywords = await self.list_blocked_keywords_callback()
+        except Exception as e:
+            logger.error(f"Error fetching blocked keywords: {e}")
+            await update.message.reply_text("Error fetching blocked keywords.")
+            return
+
+        if not keywords:
+            await update.message.reply_text(
+                "No blocked keywords yet.\nUse /blockword to add some."
+            )
+            return
+
+        chat_id = str(update.effective_chat.id)
+        self._blockword_list[chat_id] = keywords
+        await update.message.reply_text(
+            f"🚫 <b>Blocked keywords</b> ({len(keywords)})\n"
+            "Tap to remove.",
+            reply_markup=self._make_blockword_buttons(keywords),
+            parse_mode="HTML",
+        )
+
+    @staticmethod
+    def _make_blockword_buttons(keywords: list[str]) -> InlineKeyboardMarkup:
+        """Build one-button-per-keyword inline keyboard keyed by index."""
+        buttons = [
+            [InlineKeyboardButton(f"✖ {kw}", callback_data=f"bkrm:{i}")]
+            for i, kw in enumerate(keywords)
+        ]
+        return InlineKeyboardMarkup(buttons)
+
+    async def _handle_blockword_remove(self, query, data: str) -> None:
+        """Handle tap on a blocked-keyword button: remove it and re-render."""
+        chat_id = str(query.message.chat_id)
+        keywords = self._blockword_list.get(chat_id)
+        if keywords is None:
+            await query.edit_message_text("Blocked keyword list expired. Run /blockwords again.")
+            return
+
+        try:
+            idx = int(data.split(":", 1)[1])
+        except (ValueError, IndexError):
+            return
+        if idx < 0 or idx >= len(keywords):
+            return
+
+        kw = keywords[idx]
+        if self.remove_blocked_keyword_callback:
+            try:
+                await self.remove_blocked_keyword_callback(kw)
+            except Exception as e:
+                logger.error(f"Error removing blocked keyword '{kw}': {e}")
+                return
+
+        remaining = [k for k in keywords if k != kw]
+        self._blockword_list[chat_id] = remaining
+
+        if not remaining:
+            del self._blockword_list[chat_id]
+            await query.edit_message_text("All blocked keywords removed.")
+            return
+
+        try:
+            await query.edit_message_reply_markup(
+                reply_markup=self._make_blockword_buttons(remaining),
+            )
+        except telegram.error.BadRequest:
+            pass
+
     @staticmethod
     def _format_stats_message(stats: list[dict], page: int = 1, per_page: int = 15) -> str:
         """Format author stats into a paginated table.
@@ -1225,6 +1403,11 @@ class TelegramCurator:
         # Handle newsletter section toggle: "nsec:{index|done|cancel}"
         if data.startswith("nsec:"):
             await self._handle_section_toggle(query, data)
+            return
+
+        # Handle blocked-keyword removal: "bkrm:{index}"
+        if data.startswith("bkrm:"):
+            await self._handle_blockword_remove(query, data)
             return
 
         # Handle vote: "vote:{tweet_id}:{up|down}"

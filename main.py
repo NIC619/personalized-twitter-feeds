@@ -293,6 +293,16 @@ def init_components(settings, num_tweets=None, hours=None):
     async def on_extract_sections(url: str) -> list[str]:
         return blog_fetcher.extract_sections(url)
 
+    # Blocked keyword callbacks
+    async def on_add_blocked_keyword(keyword: str) -> dict:
+        return db.save_blocked_keyword(keyword)
+
+    async def on_list_blocked_keywords() -> list[str]:
+        return db.get_blocked_keywords()
+
+    async def on_remove_blocked_keyword(keyword: str) -> None:
+        db.remove_blocked_keyword(keyword)
+
     # Initialize Telegram bot
     telegram = TelegramCurator(
         bot_token=settings.telegram_bot_token,
@@ -309,6 +319,9 @@ def init_components(settings, num_tweets=None, hours=None):
         get_newsletter_prefs_callback=on_get_newsletter_prefs,
         save_newsletter_prefs_callback=on_save_newsletter_prefs,
         extract_sections_callback=on_extract_sections,
+        add_blocked_keyword_callback=on_add_blocked_keyword,
+        list_blocked_keywords_callback=on_list_blocked_keywords,
+        remove_blocked_keyword_callback=on_remove_blocked_keyword,
     )
 
     # Initialize curator
