@@ -1,68 +1,86 @@
-"""Tests for TwitterClient."""
+"""Tests for TwitterClient (xdk-based)."""
 
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch, call
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 from src.twitter_client import TwitterClient
 
 
+def _make_mock_xdk_client():
+    """Create a mock XDK client with get_me pre-configured."""
+    mock_client = MagicMock()
+    mock_client.users.get_me.return_value = SimpleNamespace(
+        data={"id": "self_user_id"}
+    )
+    return mock_client
+
+
 @pytest.fixture
 def twitter_client():
-    """TwitterClient with mocked Tweepy client."""
-    with patch("src.twitter_client.tweepy.Client"):
-        tc = TwitterClient(
-            api_key="k",
-            api_secret="s",
-            access_token="at",
-            access_secret="as",
-            bearer_token="bt",
-        )
+    """TwitterClient with mocked XDK client."""
+    with patch("src.twitter_client.XdkClient", return_value=_make_mock_xdk_client()):
+        with patch("src.twitter_client.OAuth1"):
+            tc = TwitterClient(
+                api_key="k",
+                api_secret="s",
+                access_token="at",
+                access_secret="as",
+                bearer_token="bt",
+            )
     return tc
 
 
-def _make_tweet_obj(
+def _make_tweet(
     tweet_id=1,
     text="hello",
-    author_id=100,
+    author_id="100",
     created_at=None,
     public_metrics=None,
     referenced_tweets=None,
     entities=None,
     conversation_id=None,
 ):
-    """Create a mock tweet object that behaves like tweepy Tweet."""
+    """Create a tweet dict matching XDK response format."""
+    return {
+        "id": str(tweet_id),
+        "text": text,
+        "author_id": str(author_id),
+        "created_at": created_at,
+        "public_metrics": public_metrics or {},
+        "referenced_tweets": referenced_tweets,
+        "entities": entities,
+        "conversation_id": conversation_id,
+    }
+
+
+def _make_user(user_id="100", username="testuser", name="Test User"):
+    """Create a user dict matching XDK response format."""
+    return {"id": str(user_id), "username": username, "name": name}
+
+
+def _make_page(data=None, includes=None, meta=None):
+    """Create a mock XDK response page."""
     return SimpleNamespace(
-        id=tweet_id,
-        text=text,
-        author_id=author_id,
-        created_at=created_at,
-        public_metrics=public_metrics or {},
-        referenced_tweets=referenced_tweets,
-        entities=entities,
-        conversation_id=conversation_id,
+        data=data,
+        includes=includes,
+        meta=SimpleNamespace(**(meta or {})),
     )
-
-
-def _make_user_obj(user_id=100, username="testuser", name="Test User"):
-    return SimpleNamespace(id=user_id, username=username, name=name)
 
 
 # --- _normalize_tweet ---
 
 class TestNormalizeTweet:
     def test_basic_field_mapping(self, twitter_client):
-        from datetime import datetime, timezone
-        created = datetime(2025, 1, 15, 10, 0, 0, tzinfo=timezone.utc)
-        tweet = _make_tweet_obj(
+        tweet = _make_tweet(
             tweet_id=42,
             text="Test tweet",
-            author_id=100,
-            created_at=created,
+            author_id="100",
+            created_at="2025-01-15T10:00:00+00:00",
             public_metrics={"like_count": 10, "retweet_count": 5, "reply_count": 2, "impression_count": 1000},
         )
-        author = _make_user_obj(user_id=100, username="alice", name="Alice")
+        author = _make_user(user_id="100", username="alice", name="Alice")
 
         result = twitter_client._normalize_tweet(tweet, author)
 
@@ -79,44 +97,42 @@ class TestNormalizeTweet:
         assert result["url"] == "https://twitter.com/alice/status/42"
 
     def test_retweet_detection(self, twitter_client):
-        tweet = _make_tweet_obj(
+        tweet = _make_tweet(
             referenced_tweets=[{"type": "retweeted", "id": "999"}],
         )
-        author = _make_user_obj()
+        author = _make_user()
 
         result = twitter_client._normalize_tweet(tweet, author)
         assert result["is_retweet"] is True
 
     def test_non_retweet_reference(self, twitter_client):
-        tweet = _make_tweet_obj(
+        tweet = _make_tweet(
             referenced_tweets=[{"type": "quoted", "id": "999"}],
         )
-        author = _make_user_obj()
+        author = _make_user()
 
         result = twitter_client._normalize_tweet(tweet, author)
         assert result["is_retweet"] is False
 
     def test_no_referenced_tweets(self, twitter_client):
-        tweet = _make_tweet_obj(referenced_tweets=None)
-        author = _make_user_obj()
+        tweet = _make_tweet(referenced_tweets=None)
+        author = _make_user()
 
         result = twitter_client._normalize_tweet(tweet, author)
         assert result["is_retweet"] is False
 
     def test_quoted_tweet_attached(self, twitter_client):
-        tweet = _make_tweet_obj(
+        tweet = _make_tweet(
             tweet_id=42,
             text="Great thread!",
-            author_id=100,
-            referenced_tweets=[{"type": "quoted", "id": 999}],
+            author_id="100",
+            referenced_tweets=[{"type": "quoted", "id": "999"}],
         )
-        author = _make_user_obj(user_id=100, username="alice", name="Alice")
-        ref_tweet = _make_tweet_obj(
-            tweet_id=999, text="Original content here", author_id=200
-        )
-        ref_author = _make_user_obj(user_id=200, username="bob", name="Bob")
-        ref_map = {999: ref_tweet}
-        users = {100: author, 200: ref_author}
+        author = _make_user(user_id="100", username="alice", name="Alice")
+        ref_tweet = _make_tweet(tweet_id=999, text="Original content here", author_id="200")
+        ref_author = _make_user(user_id="200", username="bob", name="Bob")
+        ref_map = {"999": ref_tweet}
+        users = {"100": author, "200": ref_author}
 
         result = twitter_client._normalize_tweet(tweet, author, ref_map, users)
 
@@ -127,19 +143,17 @@ class TestNormalizeTweet:
         assert result["is_retweet"] is False
 
     def test_retweeted_tweet_attached(self, twitter_client):
-        tweet = _make_tweet_obj(
+        tweet = _make_tweet(
             tweet_id=42,
             text="RT @bob: Original content",
-            author_id=100,
-            referenced_tweets=[{"type": "retweeted", "id": 999}],
+            author_id="100",
+            referenced_tweets=[{"type": "retweeted", "id": "999"}],
         )
-        author = _make_user_obj(user_id=100, username="alice", name="Alice")
-        ref_tweet = _make_tweet_obj(
-            tweet_id=999, text="Original content", author_id=200
-        )
-        ref_author = _make_user_obj(user_id=200, username="bob", name="Bob")
-        ref_map = {999: ref_tweet}
-        users = {100: author, 200: ref_author}
+        author = _make_user(user_id="100", username="alice", name="Alice")
+        ref_tweet = _make_tweet(tweet_id=999, text="Original content", author_id="200")
+        ref_author = _make_user(user_id="200", username="bob", name="Bob")
+        ref_map = {"999": ref_tweet}
+        users = {"100": author, "200": ref_author}
 
         result = twitter_client._normalize_tweet(tweet, author, ref_map, users)
 
@@ -148,41 +162,41 @@ class TestNormalizeTweet:
         assert result["quoted_tweet"]["author_username"] == "bob"
 
     def test_referenced_tweet_not_in_includes(self, twitter_client):
-        tweet = _make_tweet_obj(
+        tweet = _make_tweet(
             tweet_id=42,
             text="Quote tweet",
-            author_id=100,
-            referenced_tweets=[{"type": "quoted", "id": 999}],
+            author_id="100",
+            referenced_tweets=[{"type": "quoted", "id": "999"}],
         )
-        author = _make_user_obj(user_id=100, username="alice", name="Alice")
+        author = _make_user(user_id="100", username="alice", name="Alice")
 
         result = twitter_client._normalize_tweet(tweet, author, {}, {})
 
         assert result["quoted_tweet"] is None
 
     def test_no_ref_map_defaults_none(self, twitter_client):
-        tweet = _make_tweet_obj(
+        tweet = _make_tweet(
             tweet_id=42,
             text="Normal tweet",
-            author_id=100,
+            author_id="100",
         )
-        author = _make_user_obj(user_id=100, username="alice", name="Alice")
+        author = _make_user(user_id="100", username="alice", name="Alice")
 
         result = twitter_client._normalize_tweet(tweet, author)
 
         assert result["quoted_tweet"] is None
 
     def test_missing_metrics_default_zero(self, twitter_client):
-        tweet = _make_tweet_obj(public_metrics=None)
-        author = _make_user_obj()
+        tweet = _make_tweet(public_metrics=None)
+        author = _make_user()
 
         result = twitter_client._normalize_tweet(tweet, author)
         assert result["metrics"]["likes"] == 0
         assert result["metrics"]["retweets"] == 0
 
     def test_none_created_at(self, twitter_client):
-        tweet = _make_tweet_obj(created_at=None)
-        author = _make_user_obj()
+        tweet = _make_tweet(created_at=None)
+        author = _make_user()
 
         result = twitter_client._normalize_tweet(tweet, author)
         assert result["created_at"] is None
@@ -200,32 +214,38 @@ class TestGetTweetUrl:
 
 class TestFetchTimeline:
     def test_empty_response(self, twitter_client):
-        twitter_client._fetch_with_retry = MagicMock(return_value=None)
+        twitter_client._fetch_timeline_with_retry = MagicMock(
+            return_value=iter([_make_page(data=None)])
+        )
 
-        result = twitter_client.fetch_timeline(max_results=10)
+        result = twitter_client.fetch_timeline(max_results=5)
         assert result == []
 
     def test_no_data_in_response(self, twitter_client):
-        mock_resp = SimpleNamespace(data=None, includes=None, meta=None)
-        twitter_client._fetch_with_retry = MagicMock(return_value=mock_resp)
+        twitter_client._fetch_timeline_with_retry = MagicMock(
+            return_value=iter([_make_page(data=None)])
+        )
 
-        result = twitter_client.fetch_timeline(max_results=10)
+        result = twitter_client.fetch_timeline(max_results=5)
         assert result == []
 
     def test_single_page(self, twitter_client):
-        from datetime import datetime, timezone
-        created = datetime(2025, 1, 15, 10, 0, 0, tzinfo=timezone.utc)
-        tweet = _make_tweet_obj(tweet_id=1, text="hello", author_id=100, created_at=created)
-        user = _make_user_obj(user_id=100, username="alice", name="Alice")
+        tweet = _make_tweet(
+            tweet_id=1, text="hello", author_id="100",
+            created_at="2025-01-15T10:00:00+00:00",
+        )
+        user = _make_user(user_id="100", username="alice", name="Alice")
 
-        mock_resp = SimpleNamespace(
+        page = _make_page(
             data=[tweet],
             includes={"users": [user]},
             meta={"result_count": 1},
         )
-        twitter_client._fetch_with_retry = MagicMock(return_value=mock_resp)
+        twitter_client._fetch_timeline_with_retry = MagicMock(
+            return_value=iter([page])
+        )
 
-        result = twitter_client.fetch_timeline(max_results=10)
+        result = twitter_client.fetch_timeline(max_results=5)
 
         assert len(result) == 1
         assert result[0]["tweet_id"] == "1"
@@ -233,24 +253,25 @@ class TestFetchTimeline:
         assert result[0]["quoted_tweet"] is None
 
     def test_single_page_with_quoted_tweet(self, twitter_client):
-        from datetime import datetime, timezone
-        created = datetime(2025, 1, 15, 10, 0, 0, tzinfo=timezone.utc)
-        tweet = _make_tweet_obj(
-            tweet_id=1, text="Great!", author_id=100, created_at=created,
-            referenced_tweets=[{"type": "quoted", "id": 50}],
+        tweet = _make_tweet(
+            tweet_id=1, text="Great!", author_id="100",
+            created_at="2025-01-15T10:00:00+00:00",
+            referenced_tweets=[{"type": "quoted", "id": "50"}],
         )
-        ref_tweet = _make_tweet_obj(tweet_id=50, text="Original post", author_id=200)
-        user = _make_user_obj(user_id=100, username="alice", name="Alice")
-        ref_user = _make_user_obj(user_id=200, username="bob", name="Bob")
+        ref_tweet = _make_tweet(tweet_id=50, text="Original post", author_id="200")
+        user = _make_user(user_id="100", username="alice", name="Alice")
+        ref_user = _make_user(user_id="200", username="bob", name="Bob")
 
-        mock_resp = SimpleNamespace(
+        page = _make_page(
             data=[tweet],
             includes={"users": [user, ref_user], "tweets": [ref_tweet]},
             meta={"result_count": 1},
         )
-        twitter_client._fetch_with_retry = MagicMock(return_value=mock_resp)
+        twitter_client._fetch_timeline_with_retry = MagicMock(
+            return_value=iter([page])
+        )
 
-        result = twitter_client.fetch_timeline(max_results=10)
+        result = twitter_client.fetch_timeline(max_results=5)
 
         assert len(result) == 1
         assert result[0]["quoted_tweet"] is not None
@@ -258,27 +279,32 @@ class TestFetchTimeline:
         assert result[0]["quoted_tweet"]["text"] == "Original post"
 
     def test_pagination(self, twitter_client):
-        from datetime import datetime, timezone
-        created = datetime(2025, 1, 15, 10, 0, 0, tzinfo=timezone.utc)
+        tweet1 = _make_tweet(
+            tweet_id=1, text="first", author_id="100",
+            created_at="2025-01-15T10:00:00+00:00",
+        )
+        tweet2 = _make_tweet(
+            tweet_id=2, text="second", author_id="100",
+            created_at="2025-01-15T10:00:00+00:00",
+        )
+        user = _make_user(user_id="100", username="alice", name="Alice")
 
-        tweet1 = _make_tweet_obj(tweet_id=1, text="first", author_id=100, created_at=created)
-        tweet2 = _make_tweet_obj(tweet_id=2, text="second", author_id=100, created_at=created)
-        user = _make_user_obj(user_id=100, username="alice", name="Alice")
-
-        page1 = SimpleNamespace(
+        page1 = _make_page(
             data=[tweet1],
             includes={"users": [user]},
             meta={"result_count": 1, "next_token": "page2"},
         )
-        page2 = SimpleNamespace(
+        page2 = _make_page(
             data=[tweet2],
             includes={"users": [user]},
             meta={"result_count": 1},
         )
 
-        twitter_client._fetch_with_retry = MagicMock(side_effect=[page1, page2])
+        twitter_client._fetch_timeline_with_retry = MagicMock(
+            return_value=iter([page1, page2])
+        )
 
-        result = twitter_client.fetch_timeline(max_results=10)
+        result = twitter_client.fetch_timeline(max_results=5)
 
         assert len(result) == 2
         assert result[0]["tweet_id"] == "1"
@@ -289,16 +315,17 @@ class TestFetchTimeline:
 
 class TestFetchTweet:
     def test_returns_normalized_tweet(self, twitter_client):
-        from datetime import datetime, timezone
-        created = datetime(2025, 1, 15, 10, 0, 0, tzinfo=timezone.utc)
-        tweet = _make_tweet_obj(tweet_id=42, text="Hello world", author_id=100, created_at=created)
-        user = _make_user_obj(user_id=100, username="alice", name="Alice")
+        tweet = _make_tweet(
+            tweet_id=42, text="Hello world", author_id="100",
+            created_at="2025-01-15T10:00:00+00:00",
+        )
+        user = _make_user(user_id="100", username="alice", name="Alice")
 
         mock_resp = SimpleNamespace(
             data=tweet,
             includes={"users": [user]},
         )
-        twitter_client.client.get_tweet = MagicMock(return_value=mock_resp)
+        twitter_client.client.posts.get_by_id = MagicMock(return_value=mock_resp)
 
         result = twitter_client.fetch_tweet("42")
 
@@ -310,45 +337,47 @@ class TestFetchTweet:
 
     def test_returns_none_when_no_data(self, twitter_client):
         mock_resp = SimpleNamespace(data=None, includes=None)
-        twitter_client.client.get_tweet = MagicMock(return_value=mock_resp)
+        twitter_client.client.posts.get_by_id = MagicMock(return_value=mock_resp)
 
         result = twitter_client.fetch_tweet("999")
         assert result is None
 
     def test_returns_none_when_response_is_none(self, twitter_client):
-        twitter_client.client.get_tweet = MagicMock(return_value=None)
+        twitter_client.client.posts.get_by_id = MagicMock(return_value=None)
 
         result = twitter_client.fetch_tweet("999")
         assert result is None
 
     def test_returns_none_when_no_author(self, twitter_client):
-        tweet = _make_tweet_obj(tweet_id=42, author_id=999)
-        user = _make_user_obj(user_id=100, username="alice", name="Alice")
+        tweet = _make_tweet(tweet_id=42, author_id="999")
+        user = _make_user(user_id="100", username="alice", name="Alice")
 
         mock_resp = SimpleNamespace(
             data=tweet,
             includes={"users": [user]},
         )
-        twitter_client.client.get_tweet = MagicMock(return_value=mock_resp)
+        twitter_client.client.posts.get_by_id = MagicMock(return_value=mock_resp)
 
         result = twitter_client.fetch_tweet("42")
         assert result is None
 
-
     def test_skips_tweet_without_author(self, twitter_client):
-        from datetime import datetime, timezone
-        created = datetime(2025, 1, 15, 10, 0, 0, tzinfo=timezone.utc)
-        tweet = _make_tweet_obj(tweet_id=1, text="hello", author_id=999, created_at=created)
-        user = _make_user_obj(user_id=100, username="alice", name="Alice")  # different id
+        tweet = _make_tweet(
+            tweet_id=1, text="hello", author_id="999",
+            created_at="2025-01-15T10:00:00+00:00",
+        )
+        user = _make_user(user_id="100", username="alice", name="Alice")
 
-        mock_resp = SimpleNamespace(
+        page = _make_page(
             data=[tweet],
             includes={"users": [user]},
             meta={"result_count": 1},
         )
-        twitter_client._fetch_with_retry = MagicMock(return_value=mock_resp)
+        twitter_client._fetch_timeline_with_retry = MagicMock(
+            return_value=iter([page])
+        )
 
-        result = twitter_client.fetch_timeline(max_results=10)
+        result = twitter_client.fetch_timeline(max_results=5)
         assert result == []
 
 

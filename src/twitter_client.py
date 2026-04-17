@@ -1,17 +1,19 @@
-"""Twitter API v2 client for fetching timeline."""
+"""X API v2 client for fetching timeline using official XDK."""
 
 import logging
 import time
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
-import tweepy
+import requests
+from xdk import Client as XdkClient
+from xdk.oauth1_auth import OAuth1
 
 logger = logging.getLogger(__name__)
 
 
 class TwitterClient:
-    """Twitter API v2 client using OAuth 1.0a User Context."""
+    """X API v2 client using OAuth 1.0a User Context via official XDK."""
 
     def __init__(
         self,
@@ -21,24 +23,30 @@ class TwitterClient:
         access_secret: str,
         bearer_token: str,
     ):
-        """Initialize Tweepy client with OAuth 1.0a credentials.
+        """Initialize XDK client with OAuth 1.0a credentials.
 
         Args:
-            api_key: Twitter API key
-            api_secret: Twitter API secret
+            api_key: X API consumer key
+            api_secret: X API consumer secret
             access_token: User's access token
             access_secret: User's access token secret
             bearer_token: App bearer token
         """
-        self.client = tweepy.Client(
-            bearer_token=bearer_token,
-            consumer_key=api_key,
-            consumer_secret=api_secret,
+        oauth1 = OAuth1(
+            api_key=api_key,
+            api_secret=api_secret,
             access_token=access_token,
             access_token_secret=access_secret,
-            wait_on_rate_limit=True,
+            callback="http://localhost:8080/callback",
         )
-        logger.info("Twitter client initialized")
+        self.client = XdkClient(
+            bearer_token=bearer_token,
+            auth=oauth1,
+        )
+        # Resolve authenticated user ID (required for timeline endpoint)
+        me = self.client.users.get_me()
+        self.user_id = me.data["id"]
+        logger.info("X client initialized (user_id=%s)", self.user_id)
 
     def fetch_timeline(
         self, max_results: int = 100, hours: int = 24
@@ -55,8 +63,6 @@ class TwitterClient:
         start_time = datetime.now(timezone.utc) - timedelta(hours=hours)
 
         tweets = []
-        pagination_token = None
-        fetched_count = 0
 
         # Tweet fields to request
         tweet_fields = [
@@ -71,171 +77,148 @@ class TwitterClient:
         user_fields = ["username", "name", "profile_image_url"]
         expansions = ["author_id", "referenced_tweets.id", "referenced_tweets.id.author_id"]
 
-        while fetched_count < max_results:
-            batch_size = min(100, max_results - fetched_count)
+        for page in self._fetch_timeline_with_retry(
+            max_results=min(100, max_results),
+            start_time=self._format_time(start_time),
+            tweet_fields=tweet_fields,
+            user_fields=user_fields,
+            expansions=expansions,
+        ):
+            if not page.data:
+                break
 
-            try:
-                response = self._fetch_with_retry(
-                    batch_size=batch_size,
-                    start_time=start_time,
-                    pagination_token=pagination_token,
-                    tweet_fields=tweet_fields,
-                    user_fields=user_fields,
-                    expansions=expansions,
-                )
+            # Build user lookup from includes
+            users = {}
+            if page.includes and "users" in page.includes:
+                for user in page.includes["users"]:
+                    users[user["id"]] = user
 
-                if not response or not response.data:
-                    logger.info("No more tweets to fetch")
-                    break
+            # Build referenced tweets lookup from includes
+            ref_tweets_map = {}
+            if page.includes and "tweets" in page.includes:
+                for ref_tweet in page.includes["tweets"]:
+                    ref_tweets_map[ref_tweet["id"]] = ref_tweet
 
-                # Build user lookup from includes
-                users = {}
-                if response.includes and "users" in response.includes:
-                    for user in response.includes["users"]:
-                        users[user.id] = user
+            # Process tweets
+            for tweet in page.data:
+                author = users.get(tweet.get("author_id"))
+                if not author:
+                    logger.warning("No author found for tweet %s", tweet.get("id"))
+                    continue
 
-                # Build referenced tweets lookup from includes
-                ref_tweets_map = {}
-                if response.includes and "tweets" in response.includes:
-                    for ref_tweet in response.includes["tweets"]:
-                        ref_tweets_map[ref_tweet.id] = ref_tweet
+                normalized = self._normalize_tweet(tweet, author, ref_tweets_map, users)
+                tweets.append(normalized)
 
-                # Process tweets
-                for tweet in response.data:
-                    author = users.get(tweet.author_id)
-                    if not author:
-                        logger.warning(f"No author found for tweet {tweet.id}")
-                        continue
+            if len(tweets) >= max_results:
+                tweets = tweets[:max_results]
+                break
 
-                    normalized = self._normalize_tweet(tweet, author, ref_tweets_map, users)
-                    tweets.append(normalized)
-                    fetched_count += 1
-
-                # Check for more pages
-                if response.meta and response.meta.get("next_token"):
-                    pagination_token = response.meta["next_token"]
-                else:
-                    break
-
-            except tweepy.TweepyException as e:
-                logger.error(f"Twitter API error: {e}")
-                raise
-
-        logger.info(f"Fetched {len(tweets)} tweets from timeline")
+        logger.info("Fetched %d tweets from timeline", len(tweets))
         return tweets
 
-    def _fetch_with_retry(
+    def _fetch_timeline_with_retry(
         self,
-        batch_size: int,
-        start_time: datetime,
-        pagination_token: Optional[str],
+        max_results: int,
+        start_time: str,
         tweet_fields: list[str],
         user_fields: list[str],
         expansions: list[str],
         max_retries: int = 3,
     ):
-        """Fetch timeline with exponential backoff retry.
+        """Fetch timeline pages with exponential backoff retry.
 
-        Args:
-            batch_size: Number of tweets to fetch
-            start_time: Start time for tweet filter
-            pagination_token: Token for pagination
-            tweet_fields: Tweet fields to request
-            user_fields: User fields to request
-            expansions: Expansions to request
-            max_retries: Maximum retry attempts
-
-        Returns:
-            Tweepy response object
+        Yields pages from the XDK auto-pagination generator.
+        Retries the entire generator on transient errors.
         """
         for attempt in range(max_retries):
             try:
-                return self.client.get_home_timeline(
-                    max_results=batch_size,
+                yield from self.client.users.get_timeline(
+                    id=self.user_id,
+                    max_results=max_results,
                     start_time=start_time,
-                    pagination_token=pagination_token,
                     tweet_fields=tweet_fields,
                     user_fields=user_fields,
                     expansions=expansions,
                 )
-            except tweepy.TweepyException as e:
+                return
+            except requests.exceptions.HTTPError as e:
                 if attempt < max_retries - 1:
                     wait_time = 2 ** (attempt + 1)
                     logger.warning(
-                        f"Twitter API error (attempt {attempt + 1}): {e}. "
-                        f"Retrying in {wait_time}s..."
+                        "X API error (attempt %d): %s. Retrying in %ds...",
+                        attempt + 1, e, wait_time,
                     )
                     time.sleep(wait_time)
                 else:
                     raise
 
     def _normalize_tweet(
-        self, tweet, author, referenced_tweets_map=None, users=None
+        self, tweet: dict, author: dict, referenced_tweets_map=None, users=None
     ) -> dict:
         """Normalize tweet data into standard format.
 
         Args:
-            tweet: Tweepy tweet object
-            author: Tweepy user object
-            referenced_tweets_map: Optional dict of tweet_id → tweepy tweet objects
+            tweet: Tweet dict from XDK response
+            author: User dict from XDK response includes
+            referenced_tweets_map: Optional dict of tweet_id → tweet dicts
                 from response.includes["tweets"]
-            users: Optional dict of user_id → tweepy user objects
+            users: Optional dict of user_id → user dicts
                 from response.includes["users"]
 
         Returns:
             Normalized tweet dictionary
         """
-        metrics = tweet.public_metrics or {}
+        metrics = tweet.get("public_metrics") or {}
         referenced_tweets_map = referenced_tweets_map or {}
         users = users or {}
 
         # Detect retweets via referenced_tweets
-        referenced = getattr(tweet, "referenced_tweets", None) or []
+        referenced = tweet.get("referenced_tweets") or []
         is_retweet = any(ref["type"] == "retweeted" for ref in referenced)
 
         # Look up quoted/retweeted tweet from includes
         quoted_tweet = None
         for ref in referenced:
             if ref["type"] in ("quoted", "retweeted"):
-                ref_id = ref["id"] if isinstance(ref["id"], int) else int(ref["id"])
+                ref_id = str(ref["id"])
                 ref_tweet = referenced_tweets_map.get(ref_id)
                 if ref_tweet:
-                    ref_author = users.get(ref_tweet.author_id)
+                    ref_author = users.get(ref_tweet.get("author_id"))
                     quoted_tweet = {
-                        "author_username": ref_author.username if ref_author else "unknown",
-                        "author_name": ref_author.name if ref_author else "Unknown",
-                        "text": ref_tweet.text,
-                        "tweet_id": str(ref_tweet.id),
+                        "author_username": ref_author["username"] if ref_author else "unknown",
+                        "author_name": ref_author["name"] if ref_author else "Unknown",
+                        "text": ref_tweet.get("text", ""),
+                        "tweet_id": str(ref_tweet["id"]),
                     }
                 break
 
         # Prefer note_tweet full text for long posts/articles
-        tweet_data = tweet.data if hasattr(tweet, "data") else {}
-        note_tweet = tweet_data.get("note_tweet") if isinstance(tweet_data, dict) else None
+        note_tweet = tweet.get("note_tweet")
         if note_tweet and isinstance(note_tweet, dict):
-            full_text = note_tweet.get("text", tweet.text)
+            full_text = note_tweet.get("text", tweet.get("text", ""))
         else:
-            full_text = tweet.text
+            full_text = tweet.get("text", "")
 
         # Extract article info if present — check outer tweet first, then referenced tweet
-        article = self._extract_article(tweet_data, tweet)
+        article = self._extract_article(tweet)
         if not article:
             for ref in referenced:
                 if ref["type"] in ("quoted", "retweeted"):
-                    ref_id = ref["id"] if isinstance(ref["id"], int) else int(ref["id"])
+                    ref_id = str(ref["id"])
                     ref_tweet = referenced_tweets_map.get(ref_id)
                     if ref_tweet:
-                        ref_data = ref_tweet.data if hasattr(ref_tweet, "data") else {}
-                        article = self._extract_article(ref_data, ref_tweet)
+                        article = self._extract_article(ref_tweet)
                         if article:
                             break
 
+        created_at = tweet.get("created_at")
+
         return {
-            "tweet_id": str(tweet.id),
-            "author_username": author.username,
-            "author_name": author.name,
+            "tweet_id": str(tweet["id"]),
+            "author_username": author["username"],
+            "author_name": author["name"],
             "text": full_text,
-            "created_at": tweet.created_at.isoformat() if tweet.created_at else None,
+            "created_at": created_at,
             "is_retweet": is_retweet,
             "quoted_tweet": quoted_tweet,
             "article": article,
@@ -245,14 +228,14 @@ class TwitterClient:
                 "replies": metrics.get("reply_count", 0),
                 "views": metrics.get("impression_count", 0),
             },
-            "url": self.get_tweet_url(str(tweet.id), author.username),
+            "url": self.get_tweet_url(str(tweet["id"]), author["username"]),
             "raw_data": {
-                "id": str(tweet.id),
+                "id": str(tweet["id"]),
                 "text": full_text,
-                "author_id": str(tweet.author_id),
-                "created_at": tweet.created_at.isoformat() if tweet.created_at else None,
-                "entities": tweet.entities if hasattr(tweet, "entities") else None,
-                "conversation_id": str(tweet.conversation_id) if tweet.conversation_id else None,
+                "author_id": str(tweet.get("author_id", "")),
+                "created_at": created_at,
+                "entities": tweet.get("entities"),
+                "conversation_id": str(tweet["conversation_id"]) if tweet.get("conversation_id") else None,
                 "referenced_tweets": [
                     {"type": ref["type"], "id": str(ref["id"])}
                     for ref in referenced
@@ -266,7 +249,7 @@ class TwitterClient:
         """Fetch recent tweets from specific users' timelines.
 
         Args:
-            usernames: List of Twitter usernames to fetch tweets from
+            usernames: List of X usernames to fetch tweets from
             max_per_user: Maximum tweets per user (default 10)
             hours: Look back period (default 24)
 
@@ -292,54 +275,55 @@ class TwitterClient:
                 # Resolve username to user ID
                 user_response = self._get_user_with_retry(username)
                 if not user_response or not user_response.data:
-                    logger.warning(f"Could not resolve user: @{username}")
+                    logger.warning("Could not resolve user: @%s", username)
                     continue
 
                 user = user_response.data
-                user_id = user.id
+                user_id = user["id"]
 
-                # Fetch user's recent tweets
-                response = self._get_user_tweets_with_retry(
+                # Fetch user's recent tweets (first page only)
+                count = 0
+                for page in self._get_user_tweets_with_retry(
                     user_id=user_id,
                     max_results=max(max_per_user, 5),  # API minimum is 5
-                    start_time=start_time,
+                    start_time=self._format_time(start_time),
                     tweet_fields=tweet_fields,
                     user_fields=user_fields,
                     expansions=expansions,
-                )
-
-                if not response or not response.data:
-                    logger.info(f"No recent tweets from @{username}")
-                    continue
-
-                # Build user lookup from includes
-                users = {}
-                if response.includes and "users" in response.includes:
-                    for u in response.includes["users"]:
-                        users[u.id] = u
-
-                # Build referenced tweets lookup from includes
-                ref_tweets_map = {}
-                if response.includes and "tweets" in response.includes:
-                    for ref_tweet in response.includes["tweets"]:
-                        ref_tweets_map[ref_tweet.id] = ref_tweet
-
-                count = 0
-                for tweet in response.data:
-                    if count >= max_per_user:
+                ):
+                    if not page.data:
                         break
-                    author = users.get(tweet.author_id, user)
-                    all_tweets.append(self._normalize_tweet(tweet, author, ref_tweets_map, users))
-                    count += 1
 
-                logger.info(f"Fetched {count} tweets from @{username}")
+                    # Build user lookup from includes
+                    users = {}
+                    if page.includes and "users" in page.includes:
+                        for u in page.includes["users"]:
+                            users[u["id"]] = u
 
-            except tweepy.TweepyException as e:
-                logger.error(f"Error fetching tweets for @{username}: {e}")
+                    # Build referenced tweets lookup from includes
+                    ref_tweets_map = {}
+                    if page.includes and "tweets" in page.includes:
+                        for ref_tweet in page.includes["tweets"]:
+                            ref_tweets_map[ref_tweet["id"]] = ref_tweet
+
+                    for tweet in page.data:
+                        if count >= max_per_user:
+                            break
+                        author = users.get(tweet.get("author_id"), user)
+                        all_tweets.append(self._normalize_tweet(tweet, author, ref_tweets_map, users))
+                        count += 1
+
+                    break  # only need first page per user
+
+                logger.info("Fetched %d tweets from @%s", count, username)
+
+            except requests.exceptions.HTTPError as e:
+                logger.error("Error fetching tweets for @%s: %s", username, e)
                 continue
 
         logger.info(
-            f"Fetched {len(all_tweets)} total tweets from {len(usernames)} starred authors"
+            "Fetched %d total tweets from %d starred authors",
+            len(all_tweets), len(usernames),
         )
         return all_tweets
 
@@ -347,13 +331,13 @@ class TwitterClient:
         """Resolve username to user object with retry."""
         for attempt in range(max_retries):
             try:
-                return self.client.get_user(username=username)
-            except tweepy.TweepyException as e:
+                return self.client.users.get_by_username(username=username)
+            except requests.exceptions.HTTPError as e:
                 if attempt < max_retries - 1:
                     wait_time = 2 ** (attempt + 1)
                     logger.warning(
-                        f"Error resolving @{username} (attempt {attempt + 1}): {e}. "
-                        f"Retrying in {wait_time}s..."
+                        "Error resolving @%s (attempt %d): %s. Retrying in %ds...",
+                        username, attempt + 1, e, wait_time,
                     )
                     time.sleep(wait_time)
                 else:
@@ -361,18 +345,18 @@ class TwitterClient:
 
     def _get_user_tweets_with_retry(
         self,
-        user_id: int,
+        user_id: str,
         max_results: int,
-        start_time: datetime,
+        start_time: str,
         tweet_fields: list[str],
         user_fields: list[str],
         expansions: list[str],
         max_retries: int = 3,
     ):
-        """Fetch user tweets with retry."""
+        """Fetch user tweets with retry. Yields pages."""
         for attempt in range(max_retries):
             try:
-                return self.client.get_users_tweets(
+                yield from self.client.users.get_posts(
                     id=user_id,
                     max_results=max_results,
                     start_time=start_time,
@@ -380,12 +364,13 @@ class TwitterClient:
                     user_fields=user_fields,
                     expansions=expansions,
                 )
-            except tweepy.TweepyException as e:
+                return
+            except requests.exceptions.HTTPError as e:
                 if attempt < max_retries - 1:
                     wait_time = 2 ** (attempt + 1)
                     logger.warning(
-                        f"Error fetching tweets for user {user_id} (attempt {attempt + 1}): {e}. "
-                        f"Retrying in {wait_time}s..."
+                        "Error fetching tweets for user %s (attempt %d): %s. Retrying in %ds...",
+                        user_id, attempt + 1, e, wait_time,
                     )
                     time.sleep(wait_time)
                 else:
@@ -395,7 +380,7 @@ class TwitterClient:
         """Fetch a single tweet by ID.
 
         Args:
-            tweet_id: Twitter ID of the tweet
+            tweet_id: Tweet ID
 
         Returns:
             Normalized tweet dict, or None if not found
@@ -414,19 +399,19 @@ class TwitterClient:
 
         for attempt in range(3):
             try:
-                response = self.client.get_tweet(
+                response = self.client.posts.get_by_id(
                     id=tweet_id,
                     tweet_fields=tweet_fields,
                     user_fields=user_fields,
                     expansions=expansions,
                 )
                 break
-            except tweepy.TweepyException as e:
+            except requests.exceptions.HTTPError as e:
                 if attempt < 2:
                     wait_time = 2 ** (attempt + 1)
                     logger.warning(
-                        f"Error fetching tweet {tweet_id} (attempt {attempt + 1}): {e}. "
-                        f"Retrying in {wait_time}s..."
+                        "Error fetching tweet %s (attempt %d): %s. Retrying in %ds...",
+                        tweet_id, attempt + 1, e, wait_time,
                     )
                     time.sleep(wait_time)
                 else:
@@ -441,17 +426,17 @@ class TwitterClient:
         users = {}
         if response.includes and "users" in response.includes:
             for user in response.includes["users"]:
-                users[user.id] = user
+                users[user["id"]] = user
 
         # Build referenced tweets lookup from includes
         ref_tweets_map = {}
         if response.includes and "tweets" in response.includes:
             for ref_tweet in response.includes["tweets"]:
-                ref_tweets_map[ref_tweet.id] = ref_tweet
+                ref_tweets_map[ref_tweet["id"]] = ref_tweet
 
-        author = users.get(tweet.author_id)
+        author = users.get(tweet.get("author_id"))
         if not author:
-            logger.warning(f"No author found for tweet {tweet_id}")
+            logger.warning("No author found for tweet %s", tweet_id)
             return None
 
         return self._normalize_tweet(tweet, author, ref_tweets_map, users)
@@ -463,7 +448,7 @@ class TwitterClient:
         until reaching the root tweet (no more replied_to references).
 
         Args:
-            tweet_id: Twitter ID of the last tweet in the thread
+            tweet_id: Tweet ID of the last tweet in the thread
             max_tweets: Safety cap to avoid runaway chains (default 50)
 
         Returns:
@@ -500,11 +485,9 @@ class TwitterClient:
         return tweets
 
     @staticmethod
-    def _extract_article(tweet_data: dict, tweet_obj) -> dict | None:
-        """Extract article info from a tweet's data if present."""
-        if not isinstance(tweet_data, dict):
-            return None
-        article_data = tweet_data.get("article")
+    def _extract_article(tweet: dict) -> dict | None:
+        """Extract article info from a tweet dict if present."""
+        article_data = tweet.get("article")
         if not article_data or not isinstance(article_data, dict):
             return None
 
@@ -514,7 +497,7 @@ class TwitterClient:
 
         article_body = article_data.get("plain_text")
         article_url = None
-        entities = tweet_obj.entities if hasattr(tweet_obj, "entities") else None
+        entities = tweet.get("entities")
         if entities and "urls" in entities:
             for url_entity in entities["urls"]:
                 expanded = url_entity.get("expanded_url") or url_entity.get("unwound_url", "")
@@ -529,11 +512,16 @@ class TwitterClient:
         }
 
     @staticmethod
+    def _format_time(dt: datetime) -> str:
+        """Format datetime as RFC 3339 for X API (no microseconds, Z suffix)."""
+        return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    @staticmethod
     def get_tweet_url(tweet_id: str, username: str) -> str:
         """Generate tweet URL.
 
         Args:
-            tweet_id: Twitter ID of the tweet
+            tweet_id: Tweet ID
             username: Author's username
 
         Returns:

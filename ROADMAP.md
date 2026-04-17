@@ -72,7 +72,7 @@
 
 ## Future Ideas
 
-- [ ] Migrate from tweepy to official X SDK (xdk) - see `docs/xdk-migration-notes.md`
+- [x] Migrate from tweepy to official X SDK (xdk) - see `docs/xdk-migration-notes.md`
 - [ ] Multi-account support (curate multiple Twitter accounts)
 - [ ] Topic clustering (group similar tweets together)
 - [ ] Export to Notion/Obsidian
