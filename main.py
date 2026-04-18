@@ -15,6 +15,7 @@ from src.database import DatabaseClient
 from src.embeddings import EmbeddingManager
 from src.scheduler import DailyCurator, feedback_handler
 from src.blog_fetcher import BlogFetcher
+from src.error_logger import attach_db_error_handler
 
 # Configure logging with colored console output
 class ColorFormatter(logging.Formatter):
@@ -88,6 +89,14 @@ def parse_args() -> argparse.Namespace:
         help="Score threshold for A/B report precision/recall (default 70)",
     )
     parser.add_argument(
+        "--error-report",
+        type=str,
+        default=None,
+        metavar="YYYY-MM",
+        help="Generate error log report for a month (e.g. 2026-03). "
+             "Use 'last' for the previous calendar month.",
+    )
+    parser.add_argument(
         "-n", "--num-tweets",
         type=int,
         default=None,
@@ -136,6 +145,10 @@ def init_components(settings, num_tweets=None, hours=None):
         url=settings.supabase_url,
         key=settings.supabase_key,
     )
+
+    # Persist WARNING+ log records to Supabase `error_log` for monthly review.
+    # Separate sink — console and file handlers are untouched.
+    attach_db_error_handler(db, level=logging.WARNING)
 
     # Initialize embedding manager
     embedding_manager = EmbeddingManager(
@@ -472,6 +485,11 @@ def main() -> int:
             from scripts.ab_test_report import run_ab_report
             db = DatabaseClient(url=settings.supabase_url, key=settings.supabase_key)
             run_ab_report(db, args.ab_report, threshold=args.threshold)
+            return 0
+        elif args.error_report:
+            from scripts.error_report import run_error_report
+            db = DatabaseClient(url=settings.supabase_url, key=settings.supabase_key)
+            run_error_report(db, args.error_report)
             return 0
         elif args.test:
             asyncio.run(run_test(settings))

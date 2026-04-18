@@ -743,6 +743,52 @@ class DatabaseClient:
             logger.error(f"Error removing blocked keyword: {e}")
             raise
 
+    def save_error_log(
+        self,
+        source: str,
+        level: str,
+        error_type: Optional[str],
+        message: str,
+    ) -> None:
+        """Insert a single error log record.
+
+        No internal logging calls: this is invoked from a logging handler,
+        and calling `logger.*` here could loop back through the handler.
+        """
+        record = {
+            "source": source,
+            "level": level,
+            "error_type": error_type,
+            "message": message,
+        }
+        self.client.table("error_log").insert(record).execute()
+
+    def get_error_logs_in_range(
+        self, start: datetime, end: datetime
+    ) -> list[dict]:
+        """Fetch error log rows between [start, end).
+
+        Args:
+            start: Inclusive lower bound (UTC-aware or naive UTC)
+            end: Exclusive upper bound
+
+        Returns:
+            List of rows: {id, logged_at, source, level, error_type, message}
+        """
+        try:
+            result = (
+                self.client.table("error_log")
+                .select("*")
+                .gte("logged_at", start.isoformat())
+                .lt("logged_at", end.isoformat())
+                .order("logged_at", desc=False)
+                .execute()
+            )
+            return result.data or []
+        except Exception as e:
+            logger.error(f"Error fetching error logs: {e}")
+            raise
+
     def toggle_mute(self, username: str) -> str:
         """Toggle mute status for an author.
 

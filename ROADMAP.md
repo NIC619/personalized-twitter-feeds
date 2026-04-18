@@ -69,6 +69,8 @@
 - [ ] Weekly digest of top tweets
 - [ ] Alert if no tweets fetched (API issue)
 - [ ] Track API costs
+- [x] Persistent error log (WARNING+ to `error_log` table via `DatabaseErrorHandler`)
+- [x] Monthly error report CLI (`--error-report YYYY-MM` / `last`) with sparkline trend
 
 ### UX Improvements
 - [x] /stats command in Telegram (paginated author performance table with scores, votes, filter averages)

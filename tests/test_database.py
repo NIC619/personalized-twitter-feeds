@@ -1,5 +1,6 @@
 """Tests for DatabaseClient."""
 
+from datetime import datetime, timezone
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -262,3 +263,46 @@ class TestBlockedKeywords:
 
         eq_call = db.client.table.return_value.delete.return_value.eq
         eq_call.assert_called_once_with("keyword", "client diversity")
+
+
+# --- error_log ---
+
+class TestErrorLog:
+    def test_save_error_log_inserts_record(self, db):
+        db.save_error_log(
+            source="src.embeddings",
+            level="WARNING",
+            error_type="HTTPError",
+            message="supabase 502",
+        )
+
+        insert_call = db.client.table.return_value.insert
+        insert_call.assert_called_once()
+        record = insert_call.call_args[0][0]
+        assert record == {
+            "source": "src.embeddings",
+            "level": "WARNING",
+            "error_type": "HTTPError",
+            "message": "supabase 502",
+        }
+
+    def test_get_error_logs_in_range_uses_iso_bounds(self, db):
+        mock_result = MagicMock()
+        mock_result.data = [{"id": 1, "level": "WARNING"}]
+        chain = (
+            db.client.table.return_value.select.return_value
+            .gte.return_value.lt.return_value.order.return_value
+        )
+        chain.execute.return_value = mock_result
+
+        start = datetime(2026, 3, 1, tzinfo=timezone.utc)
+        end = datetime(2026, 4, 1, tzinfo=timezone.utc)
+        rows = db.get_error_logs_in_range(start, end)
+
+        assert rows == mock_result.data
+        db.client.table.return_value.select.return_value.gte.assert_called_once_with(
+            "logged_at", start.isoformat()
+        )
+        db.client.table.return_value.select.return_value.gte.return_value.lt.assert_called_once_with(
+            "logged_at", end.isoformat()
+        )

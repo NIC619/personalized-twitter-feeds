@@ -242,6 +242,26 @@ CREATE TABLE IF NOT EXISTS blocked_keywords (
 ALTER TABLE public.blocked_keywords ENABLE ROW LEVEL SECURITY;
 CREATE POLICY "anon_all" ON public.blocked_keywords FOR ALL TO anon USING (true) WITH CHECK (true);
 
+-- Table: error_log
+-- Persistent capture of WARNING/ERROR log records for monthly review.
+-- Written by a custom logging handler alongside existing console/file sinks.
+CREATE TABLE IF NOT EXISTS error_log (
+    id BIGSERIAL PRIMARY KEY,
+    logged_at TIMESTAMPTZ DEFAULT NOW(),
+    source TEXT NOT NULL,      -- logger name (e.g. 'src.embeddings')
+    level TEXT NOT NULL,       -- 'WARNING' | 'ERROR' | 'CRITICAL'
+    error_type TEXT,           -- exception class if record has exc_info
+    message TEXT NOT NULL      -- formatted log message (truncated to 2000 chars)
+);
+
+-- Indexes for error_log
+CREATE INDEX IF NOT EXISTS idx_error_log_logged_at ON error_log(logged_at DESC);
+CREATE INDEX IF NOT EXISTS idx_error_log_level ON error_log(level);
+
+-- RLS for error_log
+ALTER TABLE public.error_log ENABLE ROW LEVEL SECURITY;
+CREATE POLICY "anon_all" ON public.error_log FOR ALL TO anon USING (true) WITH CHECK (true);
+
 -- Optional: Function to get feedback statistics
 CREATE OR REPLACE FUNCTION get_feedback_stats()
 RETURNS TABLE (

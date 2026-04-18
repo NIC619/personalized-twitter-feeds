@@ -70,7 +70,8 @@ cp .env.example .env
   ```bash
    python scripts/setup_database.py
   ```
-   Copy the printed SQL and paste into Supabase SQL Editor
+   Copy the printed SQL and paste into Supabase SQL Editor.
+   If you've previously run this script, re-run it now to add the `error_log` table introduced for persistent error tracking. All DDL is idempotent (`IF NOT EXISTS`); wrap any `CREATE POLICY "anon_all"` lines in `DROP POLICY IF EXISTS ...;` if the policy was already created.
 3. Get your credentials from Settings > API:
   - `SUPABASE_URL`: Project URL
   - `SUPABASE_KEY`: anon/public key
@@ -197,6 +198,17 @@ python main.py --once
 python main.py --ab-report exp_001
 ```
 
+### Monthly Error Report
+
+Review WARNING/ERROR log records persisted by the pipeline:
+
+```bash
+python main.py --error-report 2026-03   # specific month
+python main.py --error-report last      # previous calendar month
+```
+
+The report prints totals by level, a daily sparkline, top sources / error types / repeated messages, and the 10 most recent records.
+
 ### CLI Options
 
 ```bash
@@ -208,6 +220,8 @@ python main.py --bot-only          # Run Telegram bot only
 python main.py --test              # Test all components
 python main.py --ab-report exp_001 # A/B test report for an experiment
 python main.py --ab-report exp_001 --threshold 80  # Custom threshold for precision/recall
+python main.py --error-report 2026-03  # Monthly error log report
+python main.py --error-report last     # Error log report for previous month
 ```
 
 ## Project Structure
@@ -225,6 +239,7 @@ twitter-curator/
 │   ├── scheduler.py        # Daily curation orchestration
 │   ├── content.py          # Content ID utilities (blog ID generation, URL detection)
 │   ├── keyword_filter.py   # Pre-LLM blocklist filter (whole-word, case-insensitive)
+│   ├── error_logger.py     # DatabaseErrorHandler: persists WARNING+ logs to Supabase
 │   └── blog_fetcher.py     # Blog post fetching and newsletter parsing
 ├── tests/
 │   ├── conftest.py                # Shared test fixtures
@@ -235,10 +250,12 @@ twitter-curator/
 │   ├── test_telegram_bot.py       # TelegramCurator unit tests
 │   ├── test_embeddings.py         # EmbeddingManager unit tests
 │   ├── test_keyword_filter.py     # Keyword blocklist filter unit tests
+│   ├── test_error_logger.py       # Error logger + monthly report unit tests
 │   └── test_blog_fetcher.py       # BlogFetcher and content utils unit tests
 ├── scripts/
 │   ├── setup_database.py          # Database schema SQL
 │   ├── ab_test_report.py          # A/B test analysis report
+│   ├── error_report.py            # Monthly error log report
 │   ├── test_components.py         # Integration testing (live APIs)
 │   └── count_twitter_timeline.py  # Count tweets from Twitter
 ├── main.py                 # CLI entry point
@@ -330,7 +347,7 @@ Claude filters based on these interests:
 
 ## Logs
 
-Logs are written to `curator.log` and stdout. Check here for errors and curation stats.
+Logs are written to `curator.log` and stdout for day-to-day curation stats. WARNING/ERROR records are additionally persisted to the Supabase `error_log` table via a custom logging handler attached alongside the console/file sinks, so trends can be reviewed later with `python main.py --error-report <YYYY-MM>`. DB writes are best-effort — if Supabase is down, the record falls back to stderr and the pipeline continues.
 
 ## Cost Estimates
 
