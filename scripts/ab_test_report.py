@@ -15,32 +15,45 @@ logger = logging.getLogger(__name__)
 
 
 def run_ab_report(db, experiment_id: str, threshold: int = 70) -> None:
-    """Generate and print an A/B test report.
+    """Generate and print an A/B test report (CLI wrapper)."""
+    print(build_ab_report(db, experiment_id, threshold=threshold))
+
+
+def build_ab_report(db, experiment_id: str, threshold: int = 70) -> str:
+    """Build an A/B test report as a string.
 
     Args:
         db: DatabaseClient instance
         experiment_id: Experiment identifier
         threshold: Score threshold for precision/recall calculation
+
+    Returns:
+        Report text.
     """
-    print(f"\n{'='*60}")
-    print(f"A/B Test Report: {experiment_id}")
-    print(f"{'='*60}\n")
+    lines: list[str] = []
+
+    def _p(s: str = "") -> None:
+        lines.append(s)
+
+    _p(f"\n{'='*60}")
+    _p(f"A/B Test Report: {experiment_id}")
+    _p(f"{'='*60}\n")
 
     results = db.get_ab_test_results(experiment_id)
 
     if not results:
-        print("No data found for this experiment.")
-        print("Make sure tweets have been scored with A/B testing enabled.")
-        return
+        _p("No data found for this experiment.")
+        _p("Make sure tweets have been scored with A/B testing enabled.")
+        return "\n".join(lines)
 
     total_pairs = len(results)
     voted = [r for r in results if r.get("user_vote")]
     upvoted = [r for r in voted if r["user_vote"] == "up"]
     downvoted = [r for r in voted if r["user_vote"] == "down"]
 
-    print(f"Total paired scores: {total_pairs}")
-    print(f"Tweets with feedback: {len(voted)} ({len(upvoted)} up, {len(downvoted)} down)")
-    print()
+    _p(f"Total paired scores: {total_pairs}")
+    _p(f"Tweets with feedback: {len(voted)} ({len(upvoted)} up, {len(downvoted)} down)")
+    _p()
 
     # --- Score distributions ---
     control_scores = [r["control_score"] for r in results]
@@ -48,20 +61,20 @@ def run_ab_report(db, experiment_id: str, threshold: int = 70) -> None:
     control_prompt = results[0]["control_prompt"] if results else "?"
     challenger_prompt = results[0]["challenger_prompt"] if results else "?"
 
-    print(f"Control prompt: {control_prompt}")
-    print(f"  Avg score: {_mean(control_scores):.1f}")
-    print(f"  Score range: {min(control_scores):.0f} - {max(control_scores):.0f}")
-    print()
-    print(f"Challenger prompt: {challenger_prompt}")
-    print(f"  Avg score: {_mean(challenger_scores):.1f}")
-    print(f"  Score range: {min(challenger_scores):.0f} - {max(challenger_scores):.0f}")
-    print()
+    _p(f"Control prompt: {control_prompt}")
+    _p(f"  Avg score: {_mean(control_scores):.1f}")
+    _p(f"  Score range: {min(control_scores):.0f} - {max(control_scores):.0f}")
+    _p()
+    _p(f"Challenger prompt: {challenger_prompt}")
+    _p(f"  Avg score: {_mean(challenger_scores):.1f}")
+    _p(f"  Score range: {min(challenger_scores):.0f} - {max(challenger_scores):.0f}")
+    _p()
 
     # --- Score gap analysis (upvoted vs downvoted) ---
     if voted:
-        print(f"{'='*60}")
-        print("Score Gap Analysis (higher gap = better discrimination)")
-        print(f"{'='*60}\n")
+        _p(f"{'='*60}")
+        _p("Score Gap Analysis (higher gap = better discrimination)")
+        _p(f"{'='*60}\n")
 
         for label, prompt_key, score_key in [
             ("Control", control_prompt, "control_score"),
@@ -74,17 +87,17 @@ def run_ab_report(db, experiment_id: str, threshold: int = 70) -> None:
             avg_down = _mean(down_scores) if down_scores else 0
             gap = avg_up - avg_down
 
-            print(f"{label} ({prompt_key}):")
-            print(f"  Avg score on upvoted tweets:   {avg_up:.1f} (n={len(up_scores)})")
-            print(f"  Avg score on downvoted tweets:  {avg_down:.1f} (n={len(down_scores)})")
-            print(f"  Score gap (up - down):          {gap:+.1f}")
-            print()
+            _p(f"{label} ({prompt_key}):")
+            _p(f"  Avg score on upvoted tweets:   {avg_up:.1f} (n={len(up_scores)})")
+            _p(f"  Avg score on downvoted tweets:  {avg_down:.1f} (n={len(down_scores)})")
+            _p(f"  Score gap (up - down):          {gap:+.1f}")
+            _p()
 
     # --- Precision / Recall at threshold ---
     if voted:
-        print(f"{'='*60}")
-        print(f"Precision / Recall at threshold={threshold}")
-        print(f"{'='*60}\n")
+        _p(f"{'='*60}")
+        _p(f"Precision / Recall at threshold={threshold}")
+        _p(f"{'='*60}\n")
 
         for label, score_key in [("Control", "control_score"), ("Challenger", "challenger_score")]:
             tp = sum(1 for r in voted if r[score_key] >= threshold and r["user_vote"] == "up")
@@ -96,18 +109,18 @@ def run_ab_report(db, experiment_id: str, threshold: int = 70) -> None:
             recall = tp / (tp + fn) if (tp + fn) > 0 else 0
             f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0
 
-            print(f"{label}:")
-            print(f"  TP={tp} FP={fp} FN={fn} TN={tn}")
-            print(f"  Precision: {precision:.2%}")
-            print(f"  Recall:    {recall:.2%}")
-            print(f"  F1:        {f1:.2%}")
-            print()
+            _p(f"{label}:")
+            _p(f"  TP={tp} FP={fp} FN={fn} TN={tn}")
+            _p(f"  Precision: {precision:.2%}")
+            _p(f"  Recall:    {recall:.2%}")
+            _p(f"  F1:        {f1:.2%}")
+            _p()
 
     # --- Wilcoxon signed-rank test ---
     if len(voted) >= 5:
-        print(f"{'='*60}")
-        print("Statistical Test (Wilcoxon signed-rank)")
-        print(f"{'='*60}\n")
+        _p(f"{'='*60}")
+        _p("Statistical Test (Wilcoxon signed-rank)")
+        _p(f"{'='*60}\n")
 
         try:
             from scipy.stats import wilcoxon
@@ -118,31 +131,31 @@ def run_ab_report(db, experiment_id: str, threshold: int = 70) -> None:
 
             if len(non_zero_diffs) >= 5:
                 stat, p_value = wilcoxon(non_zero_diffs)
-                print(f"Paired differences (challenger - control) on voted tweets:")
-                print(f"  Mean difference: {_mean(diffs):+.1f}")
-                print(f"  Wilcoxon statistic: {stat:.1f}")
-                print(f"  p-value: {p_value:.4f}")
+                _p("Paired differences (challenger - control) on voted tweets:")
+                _p(f"  Mean difference: {_mean(diffs):+.1f}")
+                _p(f"  Wilcoxon statistic: {stat:.1f}")
+                _p(f"  p-value: {p_value:.4f}")
                 if p_value < 0.05:
                     direction = "higher" if _mean(diffs) > 0 else "lower"
-                    print(f"  Result: Significant (p<0.05) — challenger scores {direction}")
+                    _p(f"  Result: Significant (p<0.05) — challenger scores {direction}")
                 else:
-                    print(f"  Result: Not significant (p={p_value:.3f})")
+                    _p(f"  Result: Not significant (p={p_value:.3f})")
             else:
-                print(f"Not enough non-zero differences ({len(non_zero_diffs)}) for Wilcoxon test.")
-                print("Need at least 5 voted tweets with different scores between prompts.")
+                _p(f"Not enough non-zero differences ({len(non_zero_diffs)}) for Wilcoxon test.")
+                _p("Need at least 5 voted tweets with different scores between prompts.")
         except ImportError:
-            print("scipy not installed — skipping Wilcoxon test.")
-            print("Install with: pip install scipy")
-        print()
+            _p("scipy not installed — skipping Wilcoxon test.")
+            _p("Install with: pip install scipy")
+        _p()
 
     # --- Recommendation ---
-    print(f"{'='*60}")
-    print("Recommendation")
-    print(f"{'='*60}\n")
+    _p(f"{'='*60}")
+    _p("Recommendation")
+    _p(f"{'='*60}\n")
 
     if len(voted) < 10:
-        print(f"Insufficient feedback ({len(voted)} votes). Need at least 10-20 for a useful signal.")
-        print("Keep running the experiment and voting on tweets.")
+        _p(f"Insufficient feedback ({len(voted)} votes). Need at least 10-20 for a useful signal.")
+        _p("Keep running the experiment and voting on tweets.")
     elif voted:
         # Compare F1 scores
         control_tp = sum(1 for r in voted if r["control_score"] >= threshold and r["user_vote"] == "up")
@@ -160,17 +173,19 @@ def run_ab_report(db, experiment_id: str, threshold: int = 70) -> None:
         ch_f1 = 2 * ch_prec * ch_rec / (ch_prec + ch_rec) if (ch_prec + ch_rec) > 0 else 0
 
         if ch_f1 > c_f1 + 0.05:
-            print(f"Challenger ({challenger_prompt}) outperforms control ({control_prompt}).")
-            print(f"F1: {ch_f1:.2%} vs {c_f1:.2%}")
-            print("Consider promoting the challenger to production.")
+            _p(f"Challenger ({challenger_prompt}) outperforms control ({control_prompt}).")
+            _p(f"F1: {ch_f1:.2%} vs {c_f1:.2%}")
+            _p("Consider promoting the challenger to production.")
         elif c_f1 > ch_f1 + 0.05:
-            print(f"Control ({control_prompt}) outperforms challenger ({challenger_prompt}).")
-            print(f"F1: {c_f1:.2%} vs {ch_f1:.2%}")
-            print("Keep the current production prompt.")
+            _p(f"Control ({control_prompt}) outperforms challenger ({challenger_prompt}).")
+            _p(f"F1: {c_f1:.2%} vs {ch_f1:.2%}")
+            _p("Keep the current production prompt.")
         else:
-            print(f"No clear winner. F1: control={c_f1:.2%}, challenger={ch_f1:.2%}")
-            print("Consider gathering more data or trying a different challenger prompt.")
-    print()
+            _p(f"No clear winner. F1: control={c_f1:.2%}, challenger={ch_f1:.2%}")
+            _p("Consider gathering more data or trying a different challenger prompt.")
+    _p()
+
+    return "\n".join(lines)
 
 
 def _mean(values: list) -> float:

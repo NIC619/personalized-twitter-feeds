@@ -54,6 +54,7 @@ class TelegramCurator:
         add_blocked_keyword_callback: Optional[Callable] = None,
         list_blocked_keywords_callback: Optional[Callable] = None,
         remove_blocked_keyword_callback: Optional[Callable] = None,
+        ab_report_callback: Optional[Callable] = None,
     ):
         """Initialize Telegram bot.
 
@@ -93,6 +94,7 @@ class TelegramCurator:
         self.add_blocked_keyword_callback = add_blocked_keyword_callback
         self.list_blocked_keywords_callback = list_blocked_keywords_callback
         self.remove_blocked_keyword_callback = remove_blocked_keyword_callback
+        self.ab_report_callback = ab_report_callback
         self.application: Optional[Application] = None
         self._pending_feedback: dict[str, dict] = {}  # tweet_id → pending save info
         self._tweet_authors: dict[str, str] = {}  # tweet_id → username
@@ -127,6 +129,7 @@ class TelegramCurator:
             BotCommand("blockword", "Block keyword(s) from pipeline — paste one per line or comma-separated"),
             BotCommand("blockwords", "List blocked keywords — tap to remove"),
             BotCommand("stats", "Show author performance stats"),
+            BotCommand("ab_report", "A/B test report — /ab_report experiment_id [threshold]"),
             BotCommand("help", "Show help message"),
         ]
         await self.application.bot.set_my_commands(commands)
@@ -237,6 +240,9 @@ class TelegramCurator:
         self.application.add_handler(
             CommandHandler("blockwords", self._handle_blockwords)
         )
+        self.application.add_handler(
+            CommandHandler("ab_report", self._handle_ab_report)
+        )
 
         # Callback handler for inline buttons
         self.application.add_handler(
@@ -270,7 +276,8 @@ class TelegramCurator:
             "/starred — list all starred authors\n"
             "/blockword — block keyword(s) from the pipeline (one per line or comma-separated)\n"
             "/blockwords — list blocked keywords, tap to remove\n"
-            "/stats — show author performance stats\n\n"
+            "/stats — show author performance stats\n"
+            "/ab_report experiment_id [threshold] — A/B test report (default threshold=70)\n\n"
             "- I send you filtered tweets daily\n"
             "- Use the buttons to tell me what you like\n"
             "- Your feedback helps improve future curation\n"
@@ -310,6 +317,52 @@ class TelegramCurator:
 
         message = self._format_stats_message(stats, page)
         await update.message.reply_text(message, parse_mode="HTML")
+
+    async def _handle_ab_report(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Handle /ab_report experiment_id [threshold]."""
+        if not self.ab_report_callback:
+            await update.message.reply_text("A/B report not available.")
+            return
+
+        if not context.args:
+            await update.message.reply_text(
+                "Usage: /ab_report experiment_id [threshold]\n"
+                "Example: /ab_report exp_002 50"
+            )
+            return
+
+        experiment_id = context.args[0]
+        threshold = 70
+        if len(context.args) >= 2:
+            try:
+                threshold = int(context.args[1])
+            except ValueError:
+                await update.message.reply_text(
+                    f"Invalid threshold '{context.args[1]}'. Must be an integer."
+                )
+                return
+
+        try:
+            report = await self.ab_report_callback(experiment_id, threshold)
+        except Exception as e:
+            logger.error(f"Error generating A/B report: {e}", exc_info=True)
+            await update.message.reply_text(f"Error generating report: {e}")
+            return
+
+        if not report or not report.strip():
+            await update.message.reply_text("Empty report.")
+            return
+
+        # Telegram message limit is 4096 chars; leave room for code-block fences.
+        chunk_size = 3800
+        text = report.strip()
+        for i in range(0, len(text), chunk_size):
+            chunk = text[i : i + chunk_size]
+            await update.message.reply_text(
+                f"<pre>{html.escape(chunk)}</pre>", parse_mode="HTML"
+            )
 
     @staticmethod
     def _extract_username(arg: str) -> str:

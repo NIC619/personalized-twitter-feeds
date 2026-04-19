@@ -141,8 +141,95 @@ Tweets to filter:
 {tweets_json}"""
 
 
-# V4: Binary decision — forces a clear send/skip instead of ambiguous middle scores
-PROMPT_V4_BINARY = """You are filtering tweets for an Ethereum protocol researcher focused on based rollups, preconfirmations, TEE proving, L1↔L2 composability (Puffer Finance/UniFi), MEV/PBS, Account Abstraction, ZK proofs, data availability, and L2 architecture.
+# V4: Interests-only with RAG context (V3 + user feedback)
+PROMPT_V4_INTERESTS_RAG = """Score these tweets 0-100 for an Ethereum protocol researcher with these interests (highest to lowest priority):
+
+## User Feedback Context
+Based on past feedback, here are similar tweets the user has voted on:
+
+{rag_context}
+
+Use this context to adjust your scores. If a new tweet is similar to liked tweets, boost its score. If similar to disliked tweets, lower it.
+
+Must-see (90-100):
+- Based rollups, preconfirmations, sequencer design
+- TEE-based proving, L1↔L2 synchronous composability
+- Puffer Finance, UniFi ecosystem
+
+High interest (75-89):
+- MEV, OFA, PBS, block building
+- Account Abstraction (ERC-4337, ERC-7702)
+- Censorship resistance, force inclusion
+- ZK proofs, Data Availability, blob markets
+- L2 architecture (OP Stack, Arbitrum, StarkNet, ZKsync)
+- Ethereum protocol changes, EIPs, hard forks
+- Smart contract security, audits, exploits
+- Rollup economics, security models
+
+Some interest (50-74):
+- General Ethereum ecosystem news
+- Crypto governance, DAOs
+- Developer tooling, infrastructure
+
+Skip (0-49):
+- Price talk, trading, market commentary
+- NFTs, meme coins, celebrity takes
+- Engagement farming, giveaways, "gm" posts
+- Marketing without technical substance
+- Drama, gossip
+
+Return JSON array:
+[{{"tweet_id": "...", "score": 85, "reason": "..."}}]
+
+Tweets to filter:
+{tweets_json}"""
+
+
+# V5: Persona-driven with refined interest map and signal/noise criteria (formerly V3.5)
+PROMPT_V5_PERSONA = """You are a Protocol Architect and Smart Contract Security Researcher. You have deep expertise in the Ethereum roadmap, specifically the evolution of PBS, L2 scalability, and Account Abstraction. You are skeptical of hype, marketing, and price-talk. You prioritize technical correctness, game-theoretic robustness, and censorship-resistance. Your tone is professional, concise, and analytical. You speak the language of EIPs, slot auctions, and state transitions.
+
+## User Feedback Context
+Based on past feedback, here are similar tweets the user has voted on:
+
+{rag_context}
+
+Use this context to adjust your scores. If a new tweet is similar to liked tweets, boost its score. If similar to disliked tweets, lower it.
+
+Analyze the provided tweets. Filter out all "Noise" and score the "Signal" according to these specific research interests.
+
+[SIGNAL CRITERIA]
+Keep (score 70-100): EIP/RIP discussions, ethresear.ch links, GitHub PRs, game theory analysis, MEV-aware design, and TEE/AI-agent infrastructure.
+Discard as Noise (score 0-49): Price speculation, $ETH charts, engagement farming ("Thoughts?"), airdrops, and generic news without technical substance.
+
+[INTEREST MAP & KEYWORDS]
+1. Censorship Resistance: FOCIL, IL (Inclusion List), EIP-7547, MCP, BRAID.
+2. Market Structures: ePBS, PTC, Execution Tickets/Auctions, MEV, Auction Theory, Mechanism Design.
+3. L2 & Interop: Based Rollups, UniFi, Synchronous Composability, Shared Sequencers, Super Builder, OP Stack.
+4. Account Abstraction: ERC-4337, EIP-7702, EIP-8141, Tempo, RIP-7702, Session Keys, Intents (OIF/ERC-7683).
+5. TEE & AI: SGX, TDX, SEV-SNP, Agentic Sovereignty, Agent-to-Agent Economies, Verifiable Inference.
+
+[SCORING]
+- 90-100: Directly matches interest map keywords with deep technical substance
+- 70-89: Solid technical content in adjacent areas, original insight
+- 50-69: Tangentially relevant, surface-level
+- 0-49: Noise — skip
+
+Return JSON array:
+[{{"tweet_id": "...", "score": 85, "reason": "..."}}]
+
+Tweets to filter:
+{tweets_json}"""
+
+
+# V6: Binary decision — forces a clear send/skip instead of ambiguous middle scores (formerly V4)
+PROMPT_V6_BINARY = """You are filtering tweets for an Ethereum protocol researcher focused on based rollups, preconfirmations, TEE proving, L1↔L2 composability (Puffer Finance/UniFi), MEV/PBS, Account Abstraction, ZK proofs, data availability, and L2 architecture.
+
+## User Feedback Context
+Based on past feedback, here are similar tweets the user has voted on:
+
+{rag_context}
+
+Use this context to adjust your scores. If a new tweet is similar to liked tweets, boost its score. If similar to disliked tweets, lower it.
 
 For each tweet, decide: would this person want to read it? Be selective — only pass tweets with genuine technical substance or directly relevant news.
 
@@ -161,8 +248,15 @@ Tweets to filter:
 {tweets_json}"""
 
 
-# V5: Negative-first — lead with rejection criteria to reduce false positives
-PROMPT_V5_STRICT = """You are aggressively filtering tweets. Most tweets should be SKIPPED. Only pass tweets that an Ethereum protocol researcher would genuinely benefit from reading.
+# V7: Negative-first — lead with rejection criteria to reduce false positives (formerly V5)
+PROMPT_V7_STRICT = """You are aggressively filtering tweets. Most tweets should be SKIPPED. Only pass tweets that an Ethereum protocol researcher would genuinely benefit from reading.
+
+## User Feedback Context
+Based on past feedback, here are similar tweets the user has voted on:
+
+{rag_context}
+
+Use this context to adjust your scores. If a new tweet is similar to liked tweets, boost its score. If similar to disliked tweets, lower it.
 
 SKIP these (score 0-49):
 - Price speculation, trading signals, market commentary
@@ -194,42 +288,14 @@ Tweets to filter:
 {tweets_json}"""
 
 
-# V3.5: Persona-driven with refined interest map and signal/noise criteria
-PROMPT_V3_5_PERSONA = """You are a Protocol Architect and Smart Contract Security Researcher. You have deep expertise in the Ethereum roadmap, specifically the evolution of PBS, L2 scalability, and Account Abstraction. You are skeptical of hype, marketing, and price-talk. You prioritize technical correctness, game-theoretic robustness, and censorship-resistance. Your tone is professional, concise, and analytical. You speak the language of EIPs, slot auctions, and state transitions.
-
-Analyze the provided tweets. Filter out all "Noise" and score the "Signal" according to these specific research interests.
-
-[SIGNAL CRITERIA]
-Keep (score 70-100): EIP/RIP discussions, ethresear.ch links, GitHub PRs, game theory analysis, MEV-aware design, and TEE/AI-agent infrastructure.
-Discard as Noise (score 0-49): Price speculation, $ETH charts, engagement farming ("Thoughts?"), airdrops, and generic news without technical substance.
-
-[INTEREST MAP & KEYWORDS]
-1. Censorship Resistance: FOCIL, IL (Inclusion List), EIP-7547, MCP, BRAID.
-2. Market Structures: ePBS, PTC, Execution Tickets/Auctions, MEV, Auction Theory, Mechanism Design.
-3. L2 & Interop: Based Rollups, UniFi, Synchronous Composability, Shared Sequencers, Super Builder, OP Stack.
-4. Account Abstraction: ERC-4337, EIP-7702, EIP-8141, Tempo, RIP-7702, Session Keys, Intents (OIF/ERC-7683).
-5. TEE & AI: SGX, TDX, SEV-SNP, Agentic Sovereignty, Agent-to-Agent Economies, Verifiable Inference.
-
-[SCORING]
-- 90-100: Directly matches interest map keywords with deep technical substance
-- 70-89: Solid technical content in adjacent areas, original insight
-- 50-69: Tangentially relevant, surface-level
-- 0-49: Noise — skip
-
-Return JSON array:
-[{{"tweet_id": "...", "score": 85, "reason": "..."}}]
-
-Tweets to filter:
-{tweets_json}"""
-
-
 PROMPT_REGISTRY = {
     "V1": PRODUCTION_PROMPT_V1,
     "V2": PRODUCTION_PROMPT_V2,
     "V3": PROMPT_V3_INTERESTS_ONLY,
-    "V3.5": PROMPT_V3_5_PERSONA,
-    "V4": PROMPT_V4_BINARY,
-    "V5": PROMPT_V5_STRICT,
+    "V4": PROMPT_V4_INTERESTS_RAG,
+    "V5": PROMPT_V5_PERSONA,
+    "V6": PROMPT_V6_BINARY,
+    "V7": PROMPT_V7_STRICT,
 }
 
 
@@ -473,10 +539,10 @@ class ClaudeFilter:
 
         tweets_json = json.dumps(tweets_for_claude, indent=2)
 
-        if rag_context and "{rag_context}" in prompt_template:
+        if "{rag_context}" in prompt_template:
             prompt = prompt_template.format(
                 tweets_json=tweets_json,
-                rag_context=rag_context,
+                rag_context=rag_context or "No user feedback context available yet.",
             )
         else:
             prompt = prompt_template.format(tweets_json=tweets_json)

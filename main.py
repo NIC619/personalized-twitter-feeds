@@ -316,6 +316,11 @@ def init_components(settings, num_tweets=None, hours=None):
     async def on_remove_blocked_keyword(keyword: str) -> None:
         db.remove_blocked_keyword(keyword)
 
+    # A/B report callback (runs blocking report generation in a worker thread)
+    async def on_ab_report(experiment_id: str, threshold: int) -> str:
+        from scripts.ab_test_report import build_ab_report
+        return await asyncio.to_thread(build_ab_report, db, experiment_id, threshold)
+
     # Initialize Telegram bot
     telegram = TelegramCurator(
         bot_token=settings.telegram_bot_token,
@@ -335,6 +340,7 @@ def init_components(settings, num_tweets=None, hours=None):
         add_blocked_keyword_callback=on_add_blocked_keyword,
         list_blocked_keywords_callback=on_list_blocked_keywords,
         remove_blocked_keyword_callback=on_remove_blocked_keyword,
+        ab_report_callback=on_ab_report,
     )
 
     # Initialize curator
