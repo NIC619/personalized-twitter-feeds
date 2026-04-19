@@ -29,6 +29,10 @@ class BlogFetcher:
             },
         )
 
+    def close(self) -> None:
+        """Close the underlying HTTP client."""
+        self._client.close()
+
     def fetch_blog_post(self, url: str) -> dict | None:
         """Fetch a single blog post and return a normalized dict.
 

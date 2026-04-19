@@ -120,7 +120,7 @@ def init_components(settings, num_tweets=None, hours=None):
         hours: Override for hours to look back
 
     Returns:
-        Tuple of (twitter, claude, telegram, db, curator)
+        Tuple of (twitter, claude, telegram, db, curator, blog_fetcher)
     """
     logger.info("Initializing components...")
 
@@ -361,7 +361,7 @@ def init_components(settings, num_tweets=None, hours=None):
     )
 
     logger.info(f"All components initialized (max_tweets={max_tweets}, fetch_hours={fetch_hours})")
-    return twitter, claude, telegram, db, curator
+    return twitter, claude, telegram, db, curator, blog_fetcher
 
 
 async def run_once(curator: DailyCurator, telegram: TelegramCurator) -> None:
@@ -404,14 +404,21 @@ async def run_scheduled(
     curator.schedule_daily(
         hour=settings.schedule_hour,
         minute=0,
+        timezone=settings.schedule_timezone,
     )
 
-    # Run initial curation, then start polling
+    # Run initial curation, then start scheduler + polling concurrently.
+    # If initial curation fails, log and continue so the bot stays reachable.
     logger.info("Running initial curation...")
-    await curator.run_daily_curation()
+    try:
+        await curator.run_daily_curation()
+    except Exception as e:
+        logger.error(f"Initial curation failed: {e}", exc_info=True)
 
-    # Start polling for Telegram updates (blocks until interrupted)
-    await telegram.run_polling()
+    await asyncio.gather(
+        curator.run_scheduled(),
+        telegram.run_polling(),
+    )
 
 
 async def run_bot_only(telegram: TelegramCurator) -> None:
@@ -500,22 +507,34 @@ def main() -> int:
         elif args.test:
             asyncio.run(run_test(settings))
         elif args.once:
-            _, _, telegram, _, curator = init_components(
+            _, _, telegram, _, curator, blog_fetcher = init_components(
                 settings, num_tweets=args.num_tweets, hours=args.hours
             )
-            asyncio.run(run_once(curator, telegram))
+            try:
+                asyncio.run(run_once(curator, telegram))
+            finally:
+                blog_fetcher.close()
         elif args.schedule:
-            _, _, telegram, _, curator = init_components(settings)
-            asyncio.run(run_scheduled(curator, telegram, settings))
+            _, _, telegram, _, curator, blog_fetcher = init_components(settings)
+            try:
+                asyncio.run(run_scheduled(curator, telegram, settings))
+            finally:
+                blog_fetcher.close()
         elif args.bot_only:
-            _, _, telegram, db, _ = init_components(settings)
-            asyncio.run(run_bot_only(telegram))
+            _, _, telegram, db, _, blog_fetcher = init_components(settings)
+            try:
+                asyncio.run(run_bot_only(telegram))
+            finally:
+                blog_fetcher.close()
         else:
             # Default: run once
-            _, _, telegram, _, curator = init_components(
+            _, _, telegram, _, curator, blog_fetcher = init_components(
                 settings, num_tweets=args.num_tweets, hours=args.hours
             )
-            asyncio.run(run_once(curator, telegram))
+            try:
+                asyncio.run(run_once(curator, telegram))
+            finally:
+                blog_fetcher.close()
 
         return 0
 

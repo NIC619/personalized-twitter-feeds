@@ -452,18 +452,39 @@ class DailyCurator:
             new_tweets.append(tweet)
         return new_tweets
 
-    def schedule_daily(self, hour: int = 9, minute: int = 0) -> None:
+    def schedule_daily(
+        self, hour: int = 9, minute: int = 0, timezone: Optional[str] = None,
+    ) -> None:
         """Schedule daily curation run.
 
         Args:
             hour: Hour to run (24h format)
             minute: Minute to run
+            timezone: IANA tz name (e.g. "Asia/Taipei"). If None, uses the
+                host's local time — which on Railway is UTC unless the TZ
+                env var is set.
         """
         time_str = f"{hour:02d}:{minute:02d}"
-        schedule.every().day.at(time_str).do(
-            lambda: asyncio.create_task(self.run_daily_curation())
-        )
-        logger.info(f"Scheduled daily curation at {time_str}")
+
+        def _launch() -> None:
+            task = asyncio.create_task(self.run_daily_curation())
+
+            def _log_exception(t: asyncio.Task) -> None:
+                if t.cancelled():
+                    return
+                exc = t.exception()
+                if exc is not None:
+                    logger.error(
+                        "Scheduled daily curation failed", exc_info=exc,
+                    )
+
+            task.add_done_callback(_log_exception)
+
+        job = schedule.every().day.at(time_str, timezone) if timezone \
+            else schedule.every().day.at(time_str)
+        job.do(_launch)
+        tz_label = f" ({timezone})" if timezone else " (host local time)"
+        logger.info(f"Scheduled daily curation at {time_str}{tz_label}")
 
     async def run_scheduled(self) -> None:
         """Run the scheduler loop."""
