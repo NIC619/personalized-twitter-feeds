@@ -157,9 +157,36 @@ class TestNormalizeTweet:
 
         result = twitter_client._normalize_tweet(tweet, author, ref_map, users)
 
+        # Retweets store the original's content as text (for scoring/embedding)
+        # and preserve the original author via retweeted_from. quoted_tweet is
+        # reserved for quote tweets only.
         assert result["is_retweet"] is True
-        assert result["quoted_tweet"] is not None
-        assert result["quoted_tweet"]["author_username"] == "bob"
+        assert result["text"] == "Original content"
+        assert result["quoted_tweet"] is None
+        assert result["retweeted_from"] is not None
+        assert result["retweeted_from"]["author_username"] == "bob"
+        assert result["retweeted_from"]["author_name"] == "Bob"
+        assert result["retweeted_from"]["tweet_id"] == "999"
+        assert result["raw_data"]["retweeted_from"]["author_username"] == "bob"
+
+    def test_retweeted_tweet_uses_original_note_tweet(self, twitter_client):
+        """Retweets of long posts should pull the original's note_tweet full text."""
+        tweet = _make_tweet(
+            tweet_id=42,
+            text="RT @bob: long preview...",
+            author_id="100",
+            referenced_tweets=[{"type": "retweeted", "id": "999"}],
+        )
+        author = _make_user(user_id="100", username="alice", name="Alice")
+        ref_tweet = _make_tweet(tweet_id=999, text="short preview", author_id="200")
+        ref_tweet["note_tweet"] = {"text": "Full long-form original content."}
+        ref_author = _make_user(user_id="200", username="bob", name="Bob")
+
+        result = twitter_client._normalize_tweet(
+            tweet, author, {"999": ref_tweet}, {"100": author, "200": ref_author}
+        )
+
+        assert result["text"] == "Full long-form original content."
 
     def test_referenced_tweet_not_in_includes(self, twitter_client):
         tweet = _make_tweet(

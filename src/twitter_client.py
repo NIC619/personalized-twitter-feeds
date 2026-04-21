@@ -12,6 +12,16 @@ from xdk.oauth1_auth import OAuth1
 logger = logging.getLogger(__name__)
 
 
+def _full_tweet_text(tweet: dict) -> str:
+    """Return the fullest available text for a tweet (note_tweet preferred)."""
+    note_tweet = tweet.get("note_tweet")
+    if isinstance(note_tweet, dict):
+        nt_text = note_tweet.get("text")
+        if nt_text:
+            return nt_text
+    return tweet.get("text", "")
+
+
 class TwitterClient:
     """X API v2 client using OAuth 1.0a User Context via official XDK."""
 
@@ -176,28 +186,45 @@ class TwitterClient:
         referenced = tweet.get("referenced_tweets") or []
         is_retweet = any(ref["type"] == "retweeted" for ref in referenced)
 
-        # Look up quoted/retweeted tweet from includes
+        # Look up quoted/retweeted tweet from includes.
+        # For pure retweets we treat the original's content as the subject — text is
+        # replaced with the original below, quoted_tweet stays None, and retweeted_from
+        # preserves the original author for display/attribution.
         quoted_tweet = None
+        retweeted_from = None
+        ref_tweet_for_retweet = None
         for ref in referenced:
-            if ref["type"] in ("quoted", "retweeted"):
-                ref_id = str(ref["id"])
-                ref_tweet = referenced_tweets_map.get(ref_id)
-                if ref_tweet:
-                    ref_author = users.get(ref_tweet.get("author_id"))
-                    quoted_tweet = {
-                        "author_username": ref_author["username"] if ref_author else "unknown",
-                        "author_name": ref_author["name"] if ref_author else "Unknown",
-                        "text": ref_tweet.get("text", ""),
+            if ref["type"] not in ("quoted", "retweeted"):
+                continue
+            ref_id = str(ref["id"])
+            ref_tweet = referenced_tweets_map.get(ref_id)
+            if ref_tweet:
+                ref_author = users.get(ref_tweet.get("author_id"))
+                ref_username = ref_author["username"] if ref_author else "unknown"
+                ref_name = ref_author["name"] if ref_author else "Unknown"
+                if ref["type"] == "retweeted":
+                    retweeted_from = {
+                        "author_username": ref_username,
+                        "author_name": ref_name,
                         "tweet_id": str(ref_tweet["id"]),
                     }
-                break
+                    ref_tweet_for_retweet = ref_tweet
+                else:
+                    quoted_tweet = {
+                        "author_username": ref_username,
+                        "author_name": ref_name,
+                        "text": _full_tweet_text(ref_tweet),
+                        "tweet_id": str(ref_tweet["id"]),
+                    }
+            break
 
-        # Prefer note_tweet full text for long posts/articles
-        note_tweet = tweet.get("note_tweet")
-        if note_tweet and isinstance(note_tweet, dict):
-            full_text = note_tweet.get("text", tweet.get("text", ""))
+        # For retweets, the outer tweet's text is a truncated "RT @user: ..." preview.
+        # Use the original's full content so downstream scoring and embeddings see what
+        # the user is actually judging.
+        if is_retweet and ref_tweet_for_retweet is not None:
+            full_text = _full_tweet_text(ref_tweet_for_retweet)
         else:
-            full_text = tweet.get("text", "")
+            full_text = _full_tweet_text(tweet)
 
         # Extract article info if present — check outer tweet first, then referenced tweet
         article = self._extract_article(tweet)
@@ -221,6 +248,7 @@ class TwitterClient:
             "created_at": created_at,
             "is_retweet": is_retweet,
             "quoted_tweet": quoted_tweet,
+            "retweeted_from": retweeted_from,
             "article": article,
             "metrics": {
                 "likes": metrics.get("like_count", 0),
@@ -240,6 +268,7 @@ class TwitterClient:
                     {"type": ref["type"], "id": str(ref["id"])}
                     for ref in referenced
                 ] if referenced else None,
+                "retweeted_from": retweeted_from,
             },
         }
 

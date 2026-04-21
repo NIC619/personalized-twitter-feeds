@@ -1186,10 +1186,11 @@ class TelegramCurator:
         retweets_str = self._format_number(retweets)
         replies_str = self._format_number(replies)
 
+        header = self._retweet_header(tweet)
         message = (
             f"<b>@{tweet['author_username']}</b> | "
             f"<a href=\"{tweet['url']}\">View Tweet</a>\n\n"
-            f"{text}"
+            f"{header}{text}"
         )
 
         quoted = tweet.get("quoted_tweet")
@@ -1880,6 +1881,7 @@ class TelegramCurator:
             f"<b>Why:</b> {reason}\n\n"
             f"<b>@{tweet['author_username']}</b> | "
             f"<a href=\"{tweet['url']}\">View Tweet</a>\n\n"
+            f"{self._retweet_header(tweet)}"
         )
 
         # Show article info for X Articles
@@ -1914,6 +1916,23 @@ class TelegramCurator:
 
         message += f"\n\n❤️ {likes_str}  🔁 {retweets_str}  💬 {replies_str}"
         return message
+
+    def _retweet_header(self, tweet: dict) -> str:
+        """Render a "🔁 via @original_author" header for retweets, else empty.
+
+        Falls back to raw_data.retweeted_from for DB-retrieved tweets where the
+        top-level field isn't reconstructed.
+        """
+        if not tweet.get("is_retweet"):
+            return ""
+        retweeted_from = tweet.get("retweeted_from")
+        if not retweeted_from:
+            raw = tweet.get("raw_data") or {}
+            retweeted_from = raw.get("retweeted_from")
+        if not retweeted_from:
+            return "🔁 <i>retweet</i>\n\n"
+        original_author = self._escape_html(retweeted_from.get("author_username", ""))
+        return f"🔁 via <b>@{original_author}</b>\n\n"
 
     @staticmethod
     def _escape_html(text: str) -> str:
