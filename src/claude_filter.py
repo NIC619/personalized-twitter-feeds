@@ -308,7 +308,7 @@ class ClaudeFilter:
         Args:
             api_key: Anthropic API key
             model: Claude model to use
-            batch_size: Max tweets per API call (default 45)
+            batch_size: Max tweets per API call
         """
         self.client = Anthropic(
             api_key=api_key,

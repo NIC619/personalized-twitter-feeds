@@ -304,7 +304,33 @@ Claude filters based on these interests:
 - Celebrity opinions
 - Engagement farming
 
-## Configuration Options
+## Author's Design Preferences
+
+The choices below reflect how I personally want this tool to behave. They are not technical requirements — if you fork this repo, expect to revisit them.
+
+### Author tiers & filtering
+
+- **Retweets from non-favorite authors are dropped entirely** (`src/scheduler.py`). Favorites' retweets are treated as curation signal worth reading; everyone else's are treated as noise.
+- **Three author tiers with different score thresholds**: favorites pass at 50, defaults at 70, muted at 85 (`FILTER_THRESHOLD` ± offsets). Claude scores everything against the lowest floor so feedback signal isn't lost for muted authors.
+- **Starred authors have a dedicated fetch path** alongside the home timeline, capped per author. Favorites are treated as a distinct content source, not just surfaced by timeline algorithms.
+- **Keyword blocklist runs before Claude scoring; favorites are exempt.** Saves API cost on obvious noise, but trusts favorites' judgment even when they post about blocked topics.
+
+### What counts as relevant
+
+- **The active Claude prompt encodes a specific worldview** (`src/claude_filter.py`) — skewed toward protocol/infrastructure research, skeptical of price talk, NFTs, engagement farming, and celebrity drama. See the "Filtering Criteria" section above. Forking users will almost certainly want to rewrite the prompt.
+- **The prompt biases toward false negatives** — most tweets should be skipped. If you'd rather over-include and prune, lower the threshold or pick a less strict prompt variant.
+
+### Delivery & cadence
+
+- **Single daily digest at 09:00 Asia/Taipei** (`SCHEDULE_HOUR`, `SCHEDULE_TIMEZONE`). Assumes you want to read Twitter once a day, not receive a continuous stream.
+- **24-hour fetch window, max 100 tweets per run.** Trades recency against catch-up after absences.
+- **Tweets grouped by thread (conversation_id) and sorted chronologically within threads** at delivery time. Optimizes for reading threads as a unit rather than flat chronological order.
+
+### Feedback & RAG
+
+- **RAG context is built only from explicitly voted tweets** (top-5 similar) — unvoted tweets don't influence future scoring. Trusts explicit signal only; ignores the implicit "sent but never reacted to" signal.
+
+
 
 
 | Variable            | Default     | Description                             |
