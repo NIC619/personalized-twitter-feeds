@@ -66,6 +66,12 @@ def parse_args() -> argparse.Namespace:
         help="Run in scheduled mode (daily curation)",
     )
     parser.add_argument(
+        "--run-once-on-startup",
+        action="store_true",
+        help="With --schedule, run one curation immediately before entering the "
+             "scheduler loop. Default: wait for the next scheduled tick.",
+    )
+    parser.add_argument(
         "--test",
         action="store_true",
         help="Test components without running full curation",
@@ -387,6 +393,7 @@ async def run_scheduled(
     curator: DailyCurator,
     telegram: TelegramCurator,
     settings,
+    run_once_on_startup: bool = False,
 ) -> None:
     """Run in scheduled mode with Telegram bot.
 
@@ -394,6 +401,8 @@ async def run_scheduled(
         curator: DailyCurator instance
         telegram: TelegramCurator instance
         settings: Application settings
+        run_once_on_startup: If True, run one curation immediately before
+            entering the scheduler loop. Otherwise wait for the next scheduled tick.
     """
     logger.info("Starting scheduled mode...")
 
@@ -407,13 +416,18 @@ async def run_scheduled(
         timezone=settings.schedule_timezone,
     )
 
-    # Run initial curation, then start scheduler + polling concurrently.
-    # If initial curation fails, log and continue so the bot stays reachable.
-    logger.info("Running initial curation...")
-    try:
-        await curator.run_daily_curation()
-    except Exception as e:
-        logger.error(f"Initial curation failed: {e}", exc_info=True)
+    if run_once_on_startup:
+        # If initial curation fails, log and continue so the bot stays reachable.
+        logger.info("Running initial curation...")
+        try:
+            await curator.run_daily_curation()
+        except Exception as e:
+            logger.error(f"Initial curation failed: {e}", exc_info=True)
+    else:
+        logger.info(
+            "Skipping initial curation (pass --run-once-on-startup to enable). "
+            f"Next run at {settings.schedule_hour:02d}:00 {settings.schedule_timezone}."
+        )
 
     await asyncio.gather(
         curator.run_scheduled(),
@@ -517,7 +531,10 @@ def main() -> int:
         elif args.schedule:
             _, _, telegram, _, curator, blog_fetcher = init_components(settings)
             try:
-                asyncio.run(run_scheduled(curator, telegram, settings))
+                asyncio.run(run_scheduled(
+                    curator, telegram, settings,
+                    run_once_on_startup=args.run_once_on_startup,
+                ))
             finally:
                 blog_fetcher.close()
         elif args.bot_only:

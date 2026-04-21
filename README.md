@@ -142,6 +142,12 @@ Run daily curation at configured hour with Telegram bot for feedback:
 python main.py --schedule
 ```
 
+By default the scheduler waits for the next configured tick before running curation — restarts (deploys, crashes) don't re-send a digest. To run one curation immediately on startup (useful during development or a first deploy), add `--run-once-on-startup`:
+
+```bash
+python main.py --schedule --run-once-on-startup
+```
+
 ### Bot Only Mode
 
 Run just the Telegram bot (for receiving feedback on already-sent tweets):
@@ -215,7 +221,8 @@ The report prints totals by level, a daily sparkline, top sources / error types 
 python main.py --once              # Run once with default settings
 python main.py --once -n 20        # Fetch only 20 tweets
 python main.py --once --hours 48   # Look back 48 hours instead of 24
-python main.py --schedule          # Run daily at configured hour
+python main.py --schedule          # Run daily at configured hour (waits for next tick)
+python main.py --schedule --run-once-on-startup  # Also run one curation immediately
 python main.py --bot-only          # Run Telegram bot only
 python main.py --test              # Test all components
 python main.py --ab-report exp_001 # A/B test report for an experiment
