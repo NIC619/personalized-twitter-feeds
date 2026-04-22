@@ -1,6 +1,6 @@
 # Railway Deployment
 
-This project deploys as a single always-on **Background Worker** on Railway. One process runs both the daily curation schedule and the Telegram bot polling loop (via `asyncio.gather` in `main.py:run_scheduled`).
+This project deploys as a single always-on **Web** service on Railway. One process runs the daily curation schedule and serves the Telegram bot **webhook** (via `asyncio.gather` in `main.py:run_scheduled`). Production uses webhooks (Telegram → Railway HTTPS) instead of long-polling because Railway's NAT drops idle polling sockets after a few hours of quiet, leaving the first button tap each day unresponsive.
 
 ## One-time setup
 
@@ -8,9 +8,9 @@ This project deploys as a single always-on **Background Worker** on Railway. One
 2. On [railway.app](https://railway.app), **New Project → Deploy from GitHub repo**. Select this repo.
 3. In the service **Settings**:
    - **Start Command:** `python main.py --schedule`
-   - **Service Type:** Background Worker (no public port needed).
+   - **Networking:** enable a public HTTPS domain (Railway provides one like `app.up.railway.app`). This is the `WEBHOOK_URL` value.
    - Railway auto-detects Python via `requirements.txt` (nixpacks). If you want to pin Python, add a `.python-version` file (e.g. `3.11`).
-4. Add environment variables (see below).
+4. Add environment variables (see below). **`WEBHOOK_URL` is required in production.**
 5. First deploy runs automatically. Subsequent pushes to the tracked branch auto-redeploy.
 
 ## Environment variables
@@ -29,6 +29,9 @@ This project deploys as a single always-on **Background Worker** on Railway. One
 | `SUPABASE_URL` | Supabase project settings |
 | `SUPABASE_KEY` | Supabase project settings (anon key) |
 | `OPENAI_API_KEY` | *Optional.* Required only if `RAG_ENABLED=true`. |
+| `WEBHOOK_URL` | Public HTTPS base URL of this Railway service (e.g. `https://app.up.railway.app`). Required in production. |
+
+`PORT` is injected by Railway automatically — don't set it yourself. Do **not** set `DEVELOPMENT_MODE` in production; leave it unset so the service uses webhooks.
 
 ### Tuning (all optional — defaults in `config/settings.py`)
 - `SCHEDULE_HOUR` (default `9`)
@@ -57,7 +60,7 @@ Recommended: set **both** to the same value to avoid confusion.
 ### Restart / crash behavior
 - Dedup is DB-backed (`scheduler.py:_filter_new_tweets`), so restarts **won't** cause re-sends of already-scored tweets.
 - An initial curation runs once on process start (`main.py:run_scheduled`). If it fails, the exception is logged and the bot still starts — the scheduled 9am run is unaffected.
-- The scheduled daily job runs via a concurrent scheduler loop (`DailyCurator.run_scheduled`) alongside `telegram.run_polling()`. Exceptions inside the scheduled job are caught and logged; they don't kill the bot.
+- The scheduled daily job runs via a concurrent scheduler loop (`DailyCurator.run_scheduled`) alongside the Telegram webhook server (or `telegram.run_polling()` in dev). Exceptions inside the scheduled job are caught and logged; they don't kill the bot.
 - **In-memory Telegram conversation state** (feedback notes, newsletter section picker, block-keyword list selections) is lost on restart. If a restart happens mid-flow, the user just re-issues the command.
 
 ### Updating
@@ -67,6 +70,7 @@ Push to the tracked branch → Railway auto-redeploys. No manual steps. During t
 Expect ~$5/mo on Railway's usage-based pricing for a small always-on Python worker. API costs (Anthropic, OpenAI, Twitter, Supabase) are separate.
 
 ## Local dev vs Railway
-- Local: `.env` file + `python main.py --schedule`.
-- Railway: env vars in the dashboard; same start command.
-- Both read config via `pydantic-settings` in `config/settings.py`, so there's no deployment-specific branching in code.
+- **Local:** set `DEVELOPMENT_MODE=true` in `.env`, then `python main.py --schedule`. The bot uses long-polling; no webhook URL needed.
+- **Railway:** leave `DEVELOPMENT_MODE` unset (or `false`), set `WEBHOOK_URL` to the service's public HTTPS URL; same start command. Uses webhooks.
+- Both read config via `pydantic-settings` in `config/settings.py`. The polling-vs-webhook choice is the only deployment-specific branch.
+- **One delivery mechanism per bot token.** If you run local polling against the same bot that Railway has a webhook registered for, Telegram returns a Conflict error. Use a separate bot token for local dev, or manually `deleteWebhook` before running locally.

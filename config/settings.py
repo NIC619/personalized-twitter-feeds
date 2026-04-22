@@ -41,6 +41,22 @@ class Settings(BaseSettings):
     ab_test_experiment_id: str = Field(default="", description="Experiment ID for the current A/B test")
     ab_test_challenger_prompt: str = Field(default="V1", description="Prompt registry key for the challenger prompt")
 
+    # Environment / deployment
+    development_mode: bool = Field(
+        default=False,
+        description="When true, run with Telegram long-polling (local dev). "
+                    "When false (default, production), run with webhooks.",
+    )
+    webhook_url: Optional[str] = Field(
+        default=None,
+        description="Public HTTPS base URL for the Telegram webhook, e.g. "
+                    "https://app.up.railway.app. Required when development_mode=false.",
+    )
+    port: int = Field(
+        default=8080,
+        description="Port the webhook server binds to. Railway injects this via the PORT env var.",
+    )
+
     # OpenAI Embeddings (Phase 2 RAG)
     rag_enabled: bool = Field(default=True, description="Enable RAG context in Claude prompts (requires OpenAI key)")
     openai_api_key: Optional[str] = Field(default=None, description="OpenAI API key for embeddings")

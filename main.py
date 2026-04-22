@@ -431,20 +431,40 @@ async def run_scheduled(
 
     await asyncio.gather(
         curator.run_scheduled(),
-        telegram.run_polling(),
+        _run_telegram(telegram, settings),
     )
 
 
-async def run_bot_only(telegram: TelegramCurator) -> None:
+async def _run_telegram(telegram: TelegramCurator, settings) -> None:
+    """Run Telegram in polling (dev) or webhook (prod) mode."""
+    if settings.development_mode:
+        logger.info("DEVELOPMENT_MODE=true → using long-polling")
+        await telegram.run_polling()
+    else:
+        if not settings.webhook_url:
+            raise RuntimeError(
+                "webhook_url is required when development_mode=false. "
+                "Set WEBHOOK_URL env var to the deployment's public HTTPS URL, "
+                "or set DEVELOPMENT_MODE=true for local long-polling."
+            )
+        logger.info("Production mode → using webhook")
+        await telegram.run_webhook(
+            webhook_url=settings.webhook_url,
+            port=settings.port,
+        )
+
+
+async def run_bot_only(telegram: TelegramCurator, settings) -> None:
     """Run only the Telegram bot for receiving feedback.
 
     Args:
         telegram: TelegramCurator instance
+        settings: Application settings
     """
     logger.info("Running Telegram bot only...")
 
     await telegram.initialize()
-    await telegram.run_polling()
+    await _run_telegram(telegram, settings)
 
 
 async def run_test(settings) -> None:
@@ -540,7 +560,7 @@ def main() -> int:
         elif args.bot_only:
             _, _, telegram, db, _, blog_fetcher = init_components(settings)
             try:
-                asyncio.run(run_bot_only(telegram))
+                asyncio.run(run_bot_only(telegram, settings))
             finally:
                 blog_fetcher.close()
         else:

@@ -2063,6 +2063,39 @@ class TelegramCurator:
         finally:
             await self.shutdown()
 
+    async def run_webhook(self, webhook_url: str, port: int) -> None:
+        """Start the bot in webhook mode.
+
+        Args:
+            webhook_url: Public HTTPS base URL Telegram will POST updates to
+                (e.g. https://app.up.railway.app). The bot token is appended
+                as the URL path so only Telegram can reach the endpoint.
+            port: Local port to bind the HTTP server on.
+        """
+        if not self.application:
+            await self.initialize()
+
+        # Bot token as url_path acts as a shared secret between Telegram and us.
+        url_path = self.bot_token
+        full_url = f"{webhook_url.rstrip('/')}/{url_path}"
+
+        logger.info(f"Starting Telegram bot webhook on port {port}, url={webhook_url}/<token>")
+        await self.application.start()
+        await self.application.updater.start_webhook(
+            listen="0.0.0.0",
+            port=port,
+            url_path=url_path,
+            webhook_url=full_url,
+        )
+
+        try:
+            while True:
+                await asyncio.sleep(1)
+        except asyncio.CancelledError:
+            pass
+        finally:
+            await self.shutdown()
+
     async def shutdown(self) -> None:
         """Shutdown the bot gracefully."""
         if self.application:
