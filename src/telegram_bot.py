@@ -18,7 +18,7 @@ from telegram.ext import (
     filters,
 )
 
-from src.content import is_blog_content, is_http_url, is_tweet_url
+from src.content import is_blog_content, is_http_url, is_tweet_url, is_twitter_profile_url
 
 logger = logging.getLogger(__name__)
 
@@ -249,6 +249,16 @@ class TelegramCurator:
             CallbackQueryHandler(self._handle_feedback)
         )
 
+        # Default handler: route plain messages to /like (tweets/blogs) or
+        # /star (profiles/usernames) based on content. Registered last so
+        # active ConversationHandlers take precedence.
+        self.application.add_handler(
+            MessageHandler(
+                filters.TEXT & ~filters.COMMAND,
+                self._handle_default_message,
+            )
+        )
+
         logger.info("Handlers set up")
 
     async def _handle_start(
@@ -282,6 +292,8 @@ class TelegramCurator:
             "- Use the buttons to tell me what you like\n"
             "- Your feedback helps improve future curation\n"
             "- /like accepts both tweet URLs and blog post URLs\n"
+            "- Shortcut: send a tweet/blog URL directly to /like it, "
+            "or a profile URL / @username to /star it\n"
             "- Blocked keywords are matched whole-word, case-insensitive, before LLM scoring\n"
             "  (content from starred authors is exempt from the blocklist)"
         )
@@ -469,6 +481,48 @@ class TelegramCurator:
         if arg.isdigit():
             return arg
         return None
+
+    async def _handle_default_message(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Default handler for plain text: route to /like or /star based on content.
+
+        - Tweet URLs, numeric tweet IDs, and non-tweet HTTP(S) URLs → /like
+        - Twitter/X profile URLs, @mentions, and plain usernames → /star
+        """
+        if not update.message or not update.message.text:
+            return
+
+        args = update.message.text.strip().split()
+        if not args:
+            return
+
+        like_args: list[str] = []
+        star_args: list[str] = []
+        unknown: list[str] = []
+
+        for arg in args:
+            if is_http_url(arg):
+                if is_twitter_profile_url(arg):
+                    star_args.append(arg)
+                else:
+                    # Tweet URL or any other URL (blog) → like
+                    like_args.append(arg)
+            elif arg.isdigit():
+                like_args.append(arg)
+            elif re.match(r"^@?[A-Za-z0-9_]+$", arg):
+                star_args.append(arg)
+            else:
+                unknown.append(arg)
+
+        if like_args and self.like_tweet_callback:
+            await self._like_tweets(update, like_args)
+        if star_args and self.favorite_author_callback:
+            await self._star_authors(update, star_args)
+        if unknown:
+            await update.message.reply_text(
+                "Could not interpret: " + " ".join(unknown)
+            )
 
     async def _handle_like(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE

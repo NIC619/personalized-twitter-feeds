@@ -173,6 +173,8 @@ python main.py --bot-only
 
 Inline buttons on delivered content allow thumbs up/down voting with reason categories, starring/muting authors, and undoing recent votes.
 
+**Shortcut**: you can omit the command and just send a message — tweet URLs, blog URLs, and numeric tweet IDs are treated as `/like`, while profile URLs, `@mentions`, and plain usernames are treated as `/star`. Mixed tokens in one message are dispatched accordingly.
+
 ### Count Timeline Tweets
 
 Check how many tweets are in your Twitter timeline (fetches directly from Twitter):

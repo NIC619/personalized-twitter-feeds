@@ -30,6 +30,16 @@ def is_tweet_url(url: str) -> bool:
     )
 
 
+def is_twitter_profile_url(url: str) -> bool:
+    """Check if a URL is a Twitter/X profile URL (not a tweet URL)."""
+    return bool(
+        re.match(
+            r"https?://(?:www\.)?(?:twitter|x)\.com/[A-Za-z0-9_]+/?$",
+            url,
+        )
+    )
+
+
 def is_http_url(text: str) -> bool:
     """Check if text looks like an HTTP(S) URL."""
     return bool(re.match(r"https?://\S+", text))
