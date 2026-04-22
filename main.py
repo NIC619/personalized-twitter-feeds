@@ -186,19 +186,21 @@ def init_components(settings, num_tweets=None, hours=None):
     async def on_list_starred() -> list[str]:
         return db.get_favorite_authors()
 
-    # Create like tweet callback
+    # Create like tweet callback.
+    # Runs the blocking Twitter HTTP call in a worker thread so a slow/hung
+    # request can't freeze the Telegram bot's event loop.
     async def on_like_tweet(tweet_id: str) -> dict | None:
         tweet = db.get_tweet_by_id(tweet_id)
         if tweet:
             return tweet
-        tweet = twitter.fetch_tweet(tweet_id)
+        tweet = await asyncio.to_thread(twitter.fetch_tweet, tweet_id)
         if tweet:
             db.save_tweets([tweet])
         return tweet
 
     # Create thread callback
     async def on_fetch_thread(tweet_id: str) -> list[dict] | None:
-        tweets = twitter.fetch_thread(tweet_id)
+        tweets = await asyncio.to_thread(twitter.fetch_thread, tweet_id)
         if tweets:
             db.save_tweets(tweets)
         return tweets
@@ -231,13 +233,15 @@ def init_components(settings, num_tweets=None, hours=None):
 
     # Create blog post like callback
     async def on_like_blog(url: str) -> dict | None:
-        post = blog_fetcher.fetch_blog_post(url)
+        post = await asyncio.to_thread(blog_fetcher.fetch_blog_post, url)
         if not post:
             return None
         # Build RAG context and score with Claude
         rag_context = _build_rag_context([post])
         control_key = "V2" if rag_context else "V1"
-        scored = claude.filter_tweets([post], threshold=0, rag_context=rag_context)
+        scored = await asyncio.to_thread(
+            claude.filter_tweets, [post], threshold=0, rag_context=rag_context
+        )
         if scored:
             post = scored[0]
         # Save to DB first (A/B test scores have FK to tweets table)
@@ -250,7 +254,8 @@ def init_components(settings, num_tweets=None, hours=None):
                     "score": post.get("filter_score", 0),
                     "reason": post.get("filter_reason", ""),
                 }]
-                challenger_scores = claude.score_tweets_with_prompt(
+                challenger_scores = await asyncio.to_thread(
+                    claude.score_tweets_with_prompt,
                     [post], ab_test_config["challenger_prompt"],
                     rag_context=rag_context,
                 )
@@ -265,13 +270,17 @@ def init_components(settings, num_tweets=None, hours=None):
 
     # Create newsletter callback
     async def on_newsletter(url: str, ignored_sections: list[str] | None = None) -> list[dict]:
-        posts = blog_fetcher.parse_newsletter(url, ignored_sections=ignored_sections)
+        posts = await asyncio.to_thread(
+            blog_fetcher.parse_newsletter, url, ignored_sections=ignored_sections
+        )
         if not posts:
             return []
         # Build RAG context and score all posts with Claude
         rag_context = _build_rag_context(posts)
         control_key = "V2" if rag_context else "V1"
-        scored = claude.filter_tweets(posts, threshold=0, rag_context=rag_context)
+        scored = await asyncio.to_thread(
+            claude.filter_tweets, posts, threshold=0, rag_context=rag_context
+        )
         if scored:
             posts = scored
         # Save to DB first (A/B test scores have FK to tweets table)
@@ -287,7 +296,8 @@ def init_components(settings, num_tweets=None, hours=None):
                     }
                     for p in posts
                 ]
-                challenger_scores = claude.score_tweets_with_prompt(
+                challenger_scores = await asyncio.to_thread(
+                    claude.score_tweets_with_prompt,
                     posts, ab_test_config["challenger_prompt"],
                     rag_context=rag_context,
                 )
@@ -310,7 +320,7 @@ def init_components(settings, num_tweets=None, hours=None):
         return db.save_newsletter_preferences(domain, ignored_sections, all_sections)
 
     async def on_extract_sections(url: str) -> list[str]:
-        return blog_fetcher.extract_sections(url)
+        return await asyncio.to_thread(blog_fetcher.extract_sections, url)
 
     # Blocked keyword callbacks
     async def on_add_blocked_keyword(keyword: str) -> dict:

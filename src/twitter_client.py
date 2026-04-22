@@ -53,6 +53,16 @@ class TwitterClient:
             bearer_token=bearer_token,
             auth=oauth1,
         )
+        # xdk does not pass a timeout to requests, so a dead connection can hang
+        # indefinitely and block the caller (and any asyncio event loop it's on).
+        # Inject a default (connect, read) timeout via session.request.
+        _orig_request = self.client.session.request
+
+        def _request_with_timeout(method, url, **kwargs):
+            kwargs.setdefault("timeout", (10, 60))
+            return _orig_request(method, url, **kwargs)
+
+        self.client.session.request = _request_with_timeout
         # Resolve authenticated user ID (required for timeline endpoint)
         me = self.client.users.get_me()
         self.user_id = me.data["id"]
