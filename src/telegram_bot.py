@@ -1186,7 +1186,7 @@ class TelegramCurator:
         retweets_str = self._format_number(retweets)
         replies_str = self._format_number(replies)
 
-        header = self._retweet_header(tweet)
+        header = self._retweet_header(tweet) + self._quote_header(tweet)
         message = (
             f"<b>@{tweet['author_username']}</b> | "
             f"<a href=\"{tweet['url']}\">View Tweet</a>\n\n"
@@ -1881,7 +1881,7 @@ class TelegramCurator:
             f"<b>Why:</b> {reason}\n\n"
             f"<b>@{tweet['author_username']}</b> | "
             f"<a href=\"{tweet['url']}\">View Tweet</a>\n\n"
-            f"{self._retweet_header(tweet)}"
+            f"{self._retweet_header(tweet)}{self._quote_header(tweet)}"
         )
 
         # Show article info for X Articles
@@ -1933,6 +1933,14 @@ class TelegramCurator:
             return "🔁 <i>retweet</i>\n\n"
         original_author = self._escape_html(retweeted_from.get("author_username", ""))
         return f"🔁 via <b>@{original_author}</b>\n\n"
+
+    def _quote_header(self, tweet: dict) -> str:
+        """Render a "💬 quoting @quoted_author" header for quote tweets, else empty."""
+        quoted = tweet.get("quoted_tweet")
+        if not quoted:
+            return ""
+        quoted_author = self._escape_html(quoted.get("author_username", ""))
+        return f"💬 quoting <b>@{quoted_author}</b>\n\n"
 
     @staticmethod
     def _escape_html(text: str) -> str:
