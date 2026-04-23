@@ -161,7 +161,11 @@ class TwitterClient:
                     expansions=expansions,
                 )
                 return
-            except requests.exceptions.HTTPError as e:
+            except (
+                requests.exceptions.HTTPError,
+                requests.exceptions.Timeout,
+                requests.exceptions.ConnectionError,
+            ) as e:
                 if attempt < max_retries - 1:
                     wait_time = 2 ** (attempt + 1)
                     logger.warning(
