@@ -968,11 +968,12 @@ class TelegramCurator:
             text=f"Found {len(posts)} articles. Sending...",
         )
 
+        total = len(posts)
         sent_count = 0
-        for post in posts:
+        for idx, post in enumerate(posts, start=1):
             content_id = post["tweet_id"]
             self._tweet_authors[content_id] = post["author_username"]
-            message = self._format_blog_scored_message(post)
+            message = self._format_blog_scored_message(post, position=(idx, total))
             keyboard = self._make_tweet_buttons(
                 content_id, post["author_username"],
                 fav_label="⭐ Source", mute_label="🔇 Mute",
@@ -1014,12 +1015,13 @@ class TelegramCurator:
             f"Found {len(posts)} articles. Sending..."
         )
 
+        total = len(posts)
         sent_count = 0
-        for post in posts:
+        for idx, post in enumerate(posts, start=1):
             content_id = post["tweet_id"]
             self._tweet_authors[content_id] = post["author_username"]
 
-            message = self._format_blog_scored_message(post)
+            message = self._format_blog_scored_message(post, position=(idx, total))
             keyboard = self._make_tweet_buttons(
                 content_id,
                 post["author_username"],
@@ -1174,7 +1176,11 @@ class TelegramCurator:
 
         return message
 
-    def _format_blog_scored_message(self, post: dict) -> str:
+    def _format_blog_scored_message(
+        self,
+        post: dict,
+        position: Optional[tuple[int, int]] = None,
+    ) -> str:
         """Format a blog post with score for newsletter digest."""
         score = post.get("filter_score", 0)
         reason = self._escape_html(post.get("filter_reason", ""))
@@ -1184,7 +1190,9 @@ class TelegramCurator:
         source = post["author_username"]
         author_name = post.get("author_name", source)
 
+        prefix = f"<b>[{position[0]}/{position[1]}]</b>\n" if position else ""
         message = (
+            f"{prefix}"
             f"<b>Score:</b> {score}/100\n"
             f"<b>Why:</b> {reason}\n\n"
             f"<b>{self._escape_html(author_name)}</b> | "
@@ -1832,6 +1840,7 @@ class TelegramCurator:
     async def send_tweet(
         self,
         tweet: dict,
+        position: Optional[tuple[int, int]] = None,
     ) -> Optional[int]:
         """Send a formatted tweet message with feedback buttons.
 
@@ -1853,7 +1862,7 @@ class TelegramCurator:
             raise RuntimeError("Application not initialized")
 
         # Format message
-        message = self._format_tweet_message(tweet)
+        message = self._format_tweet_message(tweet, position=position)
 
         # Store author mapping for undo functionality
         self._tweet_authors[tweet["tweet_id"]] = tweet["author_username"]
@@ -1904,11 +1913,16 @@ class TelegramCurator:
             ],
         ])
 
-    def _format_tweet_message(self, tweet: dict) -> str:
+    def _format_tweet_message(
+        self,
+        tweet: dict,
+        position: Optional[tuple[int, int]] = None,
+    ) -> str:
         """Format tweet for Telegram message.
 
         Args:
             tweet: Tweet dictionary
+            position: Optional (index, total) for digest numbering, 1-indexed.
 
         Returns:
             Formatted message string (HTML)
@@ -1930,7 +1944,9 @@ class TelegramCurator:
         retweets_str = self._format_number(retweets)
         replies_str = self._format_number(replies)
 
+        prefix = f"<b>[{position[0]}/{position[1]}]</b>\n" if position else ""
         message = (
+            f"{prefix}"
             f"<b>Score:</b> {score}/100\n"
             f"<b>Why:</b> {reason}\n\n"
             f"<b>@{tweet['author_username']}</b> | "
@@ -2077,9 +2093,11 @@ class TelegramCurator:
                 await asyncio.sleep(delay_seconds)
 
             for tweet in group:
-                message_id = await self.send_tweet(tweet)
-                results.append((tweet, message_id))
                 flat_index += 1
+                message_id = await self.send_tweet(
+                    tweet, position=(flat_index, total_tweets),
+                )
+                results.append((tweet, message_id))
 
                 # Rate limit between tweets
                 if flat_index < total_tweets:
