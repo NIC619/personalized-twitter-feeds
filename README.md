@@ -105,6 +105,7 @@ MAX_TWEETS=100
 FILTER_THRESHOLD=70
 SCHEDULE_HOUR=9
 SCHEDULE_TIMEZONE=Asia/Taipei
+SCHEDULE_SKIP_WEEKDAYS=          # e.g. "sunday" or "saturday,sunday"
 ```
 
 ## Usage
@@ -349,6 +350,7 @@ The choices below reflect how I personally want this tool to behave. They are no
 | `FILTER_THRESHOLD`  | 70          | Minimum score to send to Telegram       |
 | `SCHEDULE_HOUR`     | 9           | Hour to run daily curation (24h format) |
 | `SCHEDULE_TIMEZONE` | Asia/Taipei | Timezone for scheduling                 |
+| `SCHEDULE_SKIP_WEEKDAYS` | (empty) | Comma-separated weekday names to skip in scheduled mode (e.g. `sunday`). Evaluated in `SCHEDULE_TIMEZONE`. |
 | `RAG_ENABLED`       | true        | Enable RAG context in Claude prompts    |
 | `AB_TEST_ENABLED`   | false       | Enable A/B testing of filter prompts    |
 | `AB_TEST_EXPERIMENT_ID` | -       | Experiment ID for current A/B test      |

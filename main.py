@@ -424,6 +424,9 @@ async def run_scheduled(
         hour=settings.schedule_hour,
         minute=0,
         timezone=settings.schedule_timezone,
+        skip_weekdays=[
+            d.strip() for d in settings.schedule_skip_weekdays.split(",") if d.strip()
+        ],
     )
 
     if run_once_on_startup:

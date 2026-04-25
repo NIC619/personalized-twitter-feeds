@@ -35,6 +35,11 @@ class Settings(BaseSettings):
     starred_author_max_tweets: int = Field(default=10, description="Max tweets to fetch per starred author's timeline")
     schedule_hour: int = Field(default=9, description="Hour to run daily curation")
     schedule_timezone: str = Field(default="Asia/Taipei", description="Timezone for scheduling")
+    schedule_skip_weekdays: str = Field(
+        default="",
+        description="Comma-separated weekday names to skip (e.g. 'sunday' or "
+                    "'saturday,sunday'). Case-insensitive.",
+    )
 
     # A/B Testing
     ab_test_enabled: bool = Field(default=False, description="Enable A/B testing of Claude filter prompts")

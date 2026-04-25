@@ -36,6 +36,7 @@ This project deploys as a single always-on **Web** service on Railway. One proce
 ### Tuning (all optional — defaults in `config/settings.py`)
 - `SCHEDULE_HOUR` (default `9`)
 - `SCHEDULE_TIMEZONE` (default `Asia/Taipei`) — IANA tz name; passed to the `schedule` library via `pytz`.
+- `SCHEDULE_SKIP_WEEKDAYS` (default empty) — comma-separated weekday names to skip (e.g. `sunday` or `saturday,sunday`). Weekday is evaluated in `SCHEDULE_TIMEZONE`.
 - `FETCH_HOURS`, `MAX_TWEETS`, `FILTER_THRESHOLD`
 - `FAVORITE_THRESHOLD_OFFSET`, `MUTED_THRESHOLD_OFFSET`, `STARRED_AUTHOR_MAX_TWEETS`
 - `RAG_ENABLED`, `EMBEDDING_MODEL`, `RAG_SIMILARITY_LIMIT`

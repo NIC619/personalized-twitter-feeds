@@ -453,7 +453,11 @@ class DailyCurator:
         return new_tweets
 
     def schedule_daily(
-        self, hour: int = 9, minute: int = 0, timezone: Optional[str] = None,
+        self,
+        hour: int = 9,
+        minute: int = 0,
+        timezone: Optional[str] = None,
+        skip_weekdays: Optional[list[str]] = None,
     ) -> None:
         """Schedule daily curation run.
 
@@ -463,10 +467,29 @@ class DailyCurator:
             timezone: IANA tz name (e.g. "Asia/Taipei"). If None, uses the
                 host's local time — which on Railway is UTC unless the TZ
                 env var is set.
+            skip_weekdays: Lowercased weekday names to skip
+                (e.g. ["sunday"]). Decision is made in the timezone arg.
         """
         time_str = f"{hour:02d}:{minute:02d}"
+        skip_set = {d.strip().lower() for d in (skip_weekdays or []) if d.strip()}
+        weekday_names = [
+            "monday", "tuesday", "wednesday", "thursday",
+            "friday", "saturday", "sunday",
+        ]
 
         def _launch() -> None:
+            if skip_set:
+                if timezone:
+                    from zoneinfo import ZoneInfo
+                    today = datetime.now(ZoneInfo(timezone)).weekday()
+                else:
+                    today = datetime.now().weekday()
+                if weekday_names[today] in skip_set:
+                    logger.info(
+                        f"Skipping scheduled run today ({weekday_names[today]} "
+                        f"is in SCHEDULE_SKIP_WEEKDAYS)"
+                    )
+                    return
             task = asyncio.create_task(self.run_daily_curation())
 
             def _log_exception(t: asyncio.Task) -> None:
@@ -484,7 +507,8 @@ class DailyCurator:
             else schedule.every().day.at(time_str)
         job.do(_launch)
         tz_label = f" ({timezone})" if timezone else " (host local time)"
-        logger.info(f"Scheduled daily curation at {time_str}{tz_label}")
+        skip_label = f", skipping {sorted(skip_set)}" if skip_set else ""
+        logger.info(f"Scheduled daily curation at {time_str}{tz_label}{skip_label}")
 
     async def run_scheduled(self) -> None:
         """Run the scheduler loop."""
