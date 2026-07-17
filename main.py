@@ -9,7 +9,7 @@ from functools import partial
 
 from config.settings import get_settings
 from src.twitter_client import TwitterClient
-from src.claude_filter import ClaudeFilter
+from src.claude_filter import ClaudeFilter, resolve_control_key, validate_prompt_key
 from src.telegram_bot import TelegramCurator
 from src.database import DatabaseClient
 from src.embeddings import EmbeddingManager
@@ -205,11 +205,21 @@ def init_components(settings, num_tweets=None, hours=None):
             db.save_tweets(tweets)
         return tweets
 
+    # Validate prompt keys up front so a typo fails the deploy loudly
+    # instead of silently collecting no A/B data.
+    validate_prompt_key(settings.control_prompt, "CONTROL_PROMPT", allow_auto=True)
+    if settings.ab_test_enabled:
+        validate_prompt_key(
+            settings.ab_test_challenger_prompt, "AB_TEST_CHALLENGER_PROMPT"
+        )
+
     # Build A/B test config (needed by blog callbacks below and curator)
     ab_test_config = {
         "enabled": settings.ab_test_enabled,
         "experiment_id": settings.ab_test_experiment_id,
         "challenger_prompt": settings.ab_test_challenger_prompt,
+        "control_prompt": settings.control_prompt,
+        "rag_enabled": settings.rag_enabled,
     }
 
     # Initialize blog fetcher
@@ -238,9 +248,10 @@ def init_components(settings, num_tweets=None, hours=None):
             return None
         # Build RAG context and score with Claude
         rag_context = _build_rag_context([post])
-        control_key = "V2" if rag_context else "V1"
+        control_key = resolve_control_key(settings.control_prompt, bool(rag_context))
         scored = await asyncio.to_thread(
-            claude.filter_tweets, [post], threshold=0, rag_context=rag_context
+            claude.filter_tweets, [post], threshold=0, rag_context=rag_context,
+            prompt_key=settings.control_prompt,
         )
         if scored:
             post = scored[0]
@@ -277,9 +288,10 @@ def init_components(settings, num_tweets=None, hours=None):
             return []
         # Build RAG context and score all posts with Claude
         rag_context = _build_rag_context(posts)
-        control_key = "V2" if rag_context else "V1"
+        control_key = resolve_control_key(settings.control_prompt, bool(rag_context))
         scored = await asyncio.to_thread(
-            claude.filter_tweets, posts, threshold=0, rag_context=rag_context
+            claude.filter_tweets, posts, threshold=0, rag_context=rag_context,
+            prompt_key=settings.control_prompt,
         )
         if scored:
             posts = scored
@@ -379,6 +391,7 @@ def init_components(settings, num_tweets=None, hours=None):
         embedding_manager=embedding_manager,
         ab_test_config=ab_test_config,
         rag_enabled=settings.rag_enabled,
+        control_prompt=settings.control_prompt,
     )
 
     logger.info(f"All components initialized (max_tweets={max_tweets}, fetch_hours={fetch_hours})")

@@ -244,3 +244,77 @@ class TestFilterTweets:
 
         assert len(result) == 1
         assert result[0]["tweet_id"] == "987654321"
+
+
+# --- resolve_control_key / validate_prompt_key ---
+
+from src.claude_filter import (
+    CONTROL_AUTO,
+    resolve_control_key,
+    validate_prompt_key,
+)
+
+
+class TestResolveControlKey:
+    def test_auto_without_rag(self):
+        assert resolve_control_key(CONTROL_AUTO, has_rag_context=False) == "V1"
+
+    def test_auto_with_rag(self):
+        assert resolve_control_key(CONTROL_AUTO, has_rag_context=True) == "V2"
+
+    def test_pinned_key_ignores_rag(self):
+        assert resolve_control_key("V5", has_rag_context=False) == "V5"
+        assert resolve_control_key("V5", has_rag_context=True) == "V5"
+
+
+class TestValidatePromptKey:
+    def test_valid_key_passes(self):
+        validate_prompt_key("V4", "AB_TEST_CHALLENGER_PROMPT")
+
+    def test_auto_allowed_for_control(self):
+        validate_prompt_key(CONTROL_AUTO, "CONTROL_PROMPT", allow_auto=True)
+
+    def test_auto_rejected_when_not_allowed(self):
+        with pytest.raises(ValueError, match="AB_TEST_CHALLENGER_PROMPT"):
+            validate_prompt_key(CONTROL_AUTO, "AB_TEST_CHALLENGER_PROMPT")
+
+    def test_unknown_key_raises_with_setting_name(self):
+        with pytest.raises(ValueError, match="CONTROL_PROMPT.*'V99'"):
+            validate_prompt_key("V99", "CONTROL_PROMPT", allow_auto=True)
+
+
+class TestFilterTweetsPromptKey:
+    def _mock_response(self, claude_filter):
+        scores_json = json.dumps([
+            {"tweet_id": "123456789", "score": 85, "reason": "Good"},
+        ])
+        mock_response = MagicMock()
+        mock_response.content = [MagicMock(text=scores_json)]
+        claude_filter.client.messages.create.return_value = mock_response
+
+    def test_pinned_prompt_key_used(self, claude_filter, sample_tweet):
+        self._mock_response(claude_filter)
+
+        claude_filter.filter_tweets([sample_tweet], threshold=70, prompt_key="V5")
+
+        prompt_text = claude_filter.client.messages.create.call_args[1]["messages"][0]["content"]
+        # V5 persona opener
+        assert "Protocol Architect" in prompt_text
+
+    def test_pinned_rag_prompt_without_rag_gets_fallback(self, claude_filter, sample_tweet):
+        self._mock_response(claude_filter)
+
+        claude_filter.filter_tweets([sample_tweet], threshold=70, prompt_key="V5")
+
+        prompt_text = claude_filter.client.messages.create.call_args[1]["messages"][0]["content"]
+        assert "No user feedback context available yet." in prompt_text
+
+    def test_unknown_prompt_key_raises(self, claude_filter, sample_tweet):
+        self._mock_response(claude_filter)
+
+        with pytest.raises(ValueError, match="Unknown prompt key"):
+            claude_filter.filter_tweets([sample_tweet], threshold=70, prompt_key="V99")
+
+    def test_score_tweets_with_prompt_unknown_key_raises(self, claude_filter, sample_tweet):
+        with pytest.raises(ValueError, match="Unknown prompt key"):
+            claude_filter.score_tweets_with_prompt([sample_tweet], "V99")

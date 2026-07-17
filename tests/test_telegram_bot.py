@@ -541,3 +541,54 @@ class TestFormatAbInfoMessage:
         msg = TelegramCurator._format_ab_info_message({"enabled": False}, [])
         assert "disabled" in msg
         assert "No A/B test scores recorded yet." in msg
+
+
+class TestFormatAbInfoRagAndControl:
+    def test_pinned_control_shown(self):
+        config = {
+            "enabled": True,
+            "experiment_id": "exp_004",
+            "challenger_prompt": "V6",
+            "control_prompt": "V5",
+            "rag_enabled": True,
+        }
+        msg = TelegramCurator._format_ab_info_message(config, [])
+        assert "Control: V5" in msg
+        assert "pinned via CONTROL_PROMPT" in msg
+
+    def test_rag_enabled_shown(self):
+        config = {"enabled": False, "rag_enabled": True}
+        msg = TelegramCurator._format_ab_info_message(config, [])
+        assert "RAG: enabled" in msg
+        assert "⚠️" not in msg
+
+    def test_rag_disabled_warns_for_rag_challenger(self):
+        config = {
+            "enabled": True,
+            "experiment_id": "exp_004",
+            "challenger_prompt": "V5",
+            "rag_enabled": False,
+        }
+        msg = TelegramCurator._format_ab_info_message(config, [])
+        assert "RAG: disabled" in msg
+        assert "⚠️ V5 expects RAG context" in msg
+
+    def test_rag_disabled_warns_for_pinned_rag_control(self):
+        config = {
+            "enabled": False,
+            "control_prompt": "V2",
+            "rag_enabled": False,
+        }
+        msg = TelegramCurator._format_ab_info_message(config, [])
+        assert "⚠️ V2 expects RAG context" in msg
+
+    def test_rag_disabled_no_warning_for_non_rag_prompts(self):
+        config = {
+            "enabled": True,
+            "experiment_id": "exp_004",
+            "challenger_prompt": "V3",
+            "control_prompt": "V1",
+            "rag_enabled": False,
+        }
+        msg = TelegramCurator._format_ab_info_message(config, [])
+        assert "⚠️" not in msg

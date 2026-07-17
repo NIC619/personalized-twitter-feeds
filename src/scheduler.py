@@ -8,7 +8,7 @@ from typing import Optional
 import schedule
 
 from src.twitter_client import TwitterClient
-from src.claude_filter import ClaudeFilter
+from src.claude_filter import ClaudeFilter, CONTROL_AUTO, resolve_control_key
 from src.telegram_bot import TelegramCurator
 from src.database import DatabaseClient
 from src.embeddings import EmbeddingManager
@@ -35,6 +35,7 @@ class DailyCurator:
         embedding_manager: Optional[EmbeddingManager] = None,
         ab_test_config: Optional[dict] = None,
         rag_enabled: bool = True,
+        control_prompt: str = CONTROL_AUTO,
     ):
         """Initialize daily curator with all components.
 
@@ -52,6 +53,8 @@ class DailyCurator:
             embedding_manager: Optional EmbeddingManager for RAG
             ab_test_config: Optional dict with keys: enabled, experiment_id, challenger_prompt
             rag_enabled: Whether to use RAG context in Claude prompts
+            control_prompt: Registry key for the production/control prompt,
+                or CONTROL_AUTO for V1 (V2 when RAG context is available)
         """
         self.twitter = twitter
         self.claude = claude
@@ -68,6 +71,7 @@ class DailyCurator:
         self.filter_threshold = self.favorite_author_threshold
         self.ab_test_config = ab_test_config or {}
         self.rag_enabled = rag_enabled
+        self.control_prompt = control_prompt
         logger.info(
             f"DailyCurator initialized (thresholds: favorite={self.favorite_author_threshold}, "
             f"default={self.default_threshold}, muted={self.muted_author_threshold})"
@@ -220,6 +224,7 @@ class DailyCurator:
                 tweets_for_filtering,
                 threshold=self.filter_threshold,
                 rag_context=rag_context,
+                prompt_key=self.control_prompt,
             )
 
             # Step 2a: A/B test shadow scoring (score now, save after Step 3)
@@ -228,7 +233,9 @@ class DailyCurator:
                 try:
                     experiment_id = self.ab_test_config["experiment_id"]
                     challenger_key = self.ab_test_config["challenger_prompt"]
-                    control_key = "V2" if rag_context else "V1"
+                    control_key = resolve_control_key(
+                        self.control_prompt, bool(rag_context)
+                    )
 
                     logger.info(
                         f"A/B test '{experiment_id}': control={control_key} vs challenger={challenger_key} "

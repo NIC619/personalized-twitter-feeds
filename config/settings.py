@@ -41,6 +41,15 @@ class Settings(BaseSettings):
                     "'saturday,sunday'). Case-insensitive.",
     )
 
+    # Prompt selection
+    control_prompt: str = Field(
+        default="auto",
+        description="Prompt registry key for the production/control prompt. "
+                    "'auto' = V1, or V2 when RAG context is available. "
+                    "Set to a registry key (e.g. 'V5') to promote an A/B winner "
+                    "without code changes.",
+    )
+
     # A/B Testing
     ab_test_enabled: bool = Field(default=False, description="Enable A/B testing of Claude filter prompts")
     ab_test_experiment_id: str = Field(default="", description="Experiment ID for the current A/B test")

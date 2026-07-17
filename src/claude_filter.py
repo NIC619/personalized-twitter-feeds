@@ -309,6 +309,48 @@ PROMPT_DESCRIPTIONS = {
     "V7": "Negative-first strict — leads with rejection criteria, RAG",
 }
 
+# Sentinel for CONTROL_PROMPT: pick V1, or V2 when RAG context is available
+CONTROL_AUTO = "auto"
+
+
+def resolve_control_key(control_prompt: str, has_rag_context: bool) -> str:
+    """Resolve the configured control prompt to a concrete registry key.
+
+    Args:
+        control_prompt: A PROMPT_REGISTRY key, or CONTROL_AUTO for the
+            historical V1/V2-by-RAG behavior
+        has_rag_context: Whether RAG context is available for this scoring run
+
+    Returns:
+        A PROMPT_REGISTRY key.
+    """
+    if control_prompt == CONTROL_AUTO:
+        return "V2" if has_rag_context else "V1"
+    return control_prompt
+
+
+def validate_prompt_key(key: str, setting_name: str, allow_auto: bool = False) -> None:
+    """Fail fast on an unknown prompt registry key.
+
+    Args:
+        key: The configured prompt key
+        setting_name: Env var name, used in the error message
+        allow_auto: Whether CONTROL_AUTO is an acceptable value
+
+    Raises:
+        ValueError: If the key is not in PROMPT_REGISTRY (or CONTROL_AUTO
+            when allowed).
+    """
+    if allow_auto and key == CONTROL_AUTO:
+        return
+    if key not in PROMPT_REGISTRY:
+        valid = ", ".join(PROMPT_REGISTRY)
+        extra = f", or '{CONTROL_AUTO}'" if allow_auto else ""
+        raise ValueError(
+            f"{setting_name}='{key}' is not a known prompt key. "
+            f"Valid keys: {valid}{extra}"
+        )
+
 
 class ClaudeFilter:
     """Claude-based tweet filter."""
@@ -334,6 +376,7 @@ class ClaudeFilter:
         tweets: list[dict],
         threshold: int = 70,
         rag_context: Optional[str] = None,
+        prompt_key: str = CONTROL_AUTO,
     ) -> list[dict]:
         """Filter tweets using Claude.
 
@@ -341,6 +384,8 @@ class ClaudeFilter:
             tweets: List of tweet dictionaries
             threshold: Minimum score to pass filter (default 70)
             rag_context: Optional RAG context string with similar voted tweets
+            prompt_key: PROMPT_REGISTRY key to score with, or CONTROL_AUTO
+                for V1 (V2 when rag_context is provided)
 
         Returns:
             List of filtered tweets with scores and reasons
@@ -363,10 +408,10 @@ class ClaudeFilter:
                     f"Scoring batch {batch_num}/{total_batches} "
                     f"({len(batch)} items)..."
                 )
-                scores = self._score_batch(batch, rag_context)
+                scores = self._score_batch(batch, rag_context, prompt_key)
                 all_scores.extend(scores)
         else:
-            all_scores = self._score_batch(tweets, rag_context)
+            all_scores = self._score_batch(tweets, rag_context, prompt_key)
 
         # Map scores back to original tweets
         score_map = {s["tweet_id"]: s for s in all_scores}
@@ -412,59 +457,22 @@ class ClaudeFilter:
         self,
         tweets: list[dict],
         rag_context: Optional[str] = None,
+        prompt_key: str = CONTROL_AUTO,
     ) -> list[dict]:
-        """Score a single batch of tweets with Claude.
+        """Score a single batch of tweets with the production/control prompt.
 
         Returns:
             List of score dicts with tweet_id, score, reason
         """
-        tweets_for_claude = []
-        for tweet in tweets:
-            entry = {
-                "tweet_id": tweet["tweet_id"],
-                "author": tweet["author_username"],
-                "text": tweet["text"],
-                "likes": tweet.get("metrics", {}).get("likes", 0),
-                "retweets": tweet.get("metrics", {}).get("retweets", 0),
-            }
-            if tweet.get("quoted_tweet"):
-                entry["quoted_tweet"] = {
-                    "author": tweet["quoted_tweet"]["author_username"],
-                    "text": tweet["quoted_tweet"]["text"],
-                }
-            if tweet.get("article"):
-                entry["article"] = {
-                    "title": tweet["article"]["title"],
-                    "body": tweet["article"].get("body", ""),
-                }
-            tweets_for_claude.append(entry)
+        key = resolve_control_key(prompt_key, bool(rag_context))
+        prompt_template = PROMPT_REGISTRY.get(key)
+        if not prompt_template:
+            raise ValueError(f"Unknown prompt key: {key}")
 
-        tweets_json = json.dumps(tweets_for_claude, indent=2)
-
-        if rag_context:
-            prompt = PRODUCTION_PROMPT_V2.format(
-                tweets_json=tweets_json,
-                rag_context=rag_context,
-            )
-            logger.info("Using RAG-enhanced prompt (V2)")
-        else:
-            prompt = PRODUCTION_PROMPT_V1.format(tweets_json=tweets_json)
-            logger.info("Using standard prompt (V1, no RAG context)")
-
-        try:
-            response = self.client.messages.create(
-                model=self.model,
-                max_tokens=4096,
-                temperature=0.3,
-                messages=[{"role": "user", "content": prompt}],
-            )
-
-            response_text = response.content[0].text
-            return self._parse_response(response_text)
-
-        except Exception as e:
-            logger.error(f"Error filtering tweets with Claude: {e}")
-            raise
+        logger.info(
+            f"Using prompt '{key}' (RAG {'on' if rag_context else 'off'})"
+        )
+        return self._score_batch_with_prompt(tweets, prompt_template, rag_context)
 
     def score_tweets_with_prompt(
         self,
@@ -489,8 +497,10 @@ class ClaudeFilter:
 
         prompt_template = PROMPT_REGISTRY.get(prompt_key)
         if not prompt_template:
-            logger.error(f"Unknown prompt key: {prompt_key}")
-            return []
+            raise ValueError(
+                f"Unknown prompt key: {prompt_key} "
+                f"(valid: {', '.join(PROMPT_REGISTRY)})"
+            )
 
         # Batch items if there are more than batch_size
         if len(tweets) > self.batch_size:
