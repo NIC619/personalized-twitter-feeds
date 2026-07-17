@@ -8,7 +8,7 @@ from typing import Optional
 import schedule
 
 from src.twitter_client import TwitterClient
-from src.claude_filter import ClaudeFilter, CONTROL_AUTO, resolve_control_key
+from src.claude_filter import ClaudeFilter, DEFAULT_CONTROL_PROMPT
 from src.telegram_bot import TelegramCurator
 from src.database import DatabaseClient
 from src.embeddings import EmbeddingManager
@@ -35,7 +35,7 @@ class DailyCurator:
         embedding_manager: Optional[EmbeddingManager] = None,
         ab_test_config: Optional[dict] = None,
         rag_enabled: bool = True,
-        control_prompt: str = CONTROL_AUTO,
+        control_prompt: str = DEFAULT_CONTROL_PROMPT,
     ):
         """Initialize daily curator with all components.
 
@@ -53,8 +53,7 @@ class DailyCurator:
             embedding_manager: Optional EmbeddingManager for RAG
             ab_test_config: Optional dict with keys: enabled, experiment_id, challenger_prompt
             rag_enabled: Whether to use RAG context in Claude prompts
-            control_prompt: Registry key for the production/control prompt,
-                or CONTROL_AUTO for V1 (V2 when RAG context is available)
+            control_prompt: PROMPT_REGISTRY key for the production/control prompt
         """
         self.twitter = twitter
         self.claude = claude
@@ -233,9 +232,7 @@ class DailyCurator:
                 try:
                     experiment_id = self.ab_test_config["experiment_id"]
                     challenger_key = self.ab_test_config["challenger_prompt"]
-                    control_key = resolve_control_key(
-                        self.control_prompt, bool(rag_context)
-                    )
+                    control_key = self.control_prompt
 
                     logger.info(
                         f"A/B test '{experiment_id}': control={control_key} vs challenger={challenger_key} "

@@ -32,13 +32,18 @@ available yet."* — the prompt still runs, but you're not testing its feedback 
 ## Config (env vars, set in Railway Variables + local `.env`)
 
 ```env
-CONTROL_PROMPT=auto            # Production prompt. 'auto' = V1 (V2 when RAG available).
-                               # Pin a key (e.g. V5) to promote an A/B winner — no code change.
+CONTROL_PROMPT=V2              # Production prompt (registry key, default V2). Set to an
+                               # A/B winner (e.g. V5) to promote it — no code change.
 AB_TEST_ENABLED=true
 AB_TEST_EXPERIMENT_ID=exp_004  # FRESH id per experiment — results are grouped by this
 AB_TEST_CHALLENGER_PROMPT=V5   # Registry key for the shadow prompt
 RAG_ENABLED=true
 ```
+
+Historical note: before exp_004 the control was hardcoded to switch per run —
+V2 when RAG context was available, V1 otherwise — which is why exp_001–003
+show `V1/V2` as the control. Since then the control is exactly
+`CONTROL_PROMPT`; a RAG prompt without context just gets the fallback line.
 
 Prompt keys are validated at startup — a typo fails the deploy loudly instead of
 silently collecting no data.

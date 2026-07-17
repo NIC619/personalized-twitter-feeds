@@ -183,7 +183,7 @@ class TestFilterTweets:
         assert "User Feedback Context" in prompt_text
         assert "EIP blob market" in prompt_text
 
-    def test_no_rag_context_uses_v1_prompt(self, claude_filter, sample_tweet):
+    def test_no_rag_context_uses_fallback_text(self, claude_filter, sample_tweet):
         scores_json = json.dumps([
             {"tweet_id": "123456789", "score": 85, "reason": "Good"},
         ])
@@ -192,6 +192,22 @@ class TestFilterTweets:
         claude_filter.client.messages.create.return_value = mock_response
 
         result = claude_filter.filter_tweets([sample_tweet], threshold=70)
+
+        # Default control prompt (V2) has a RAG placeholder; without context
+        # it gets the fallback text
+        call_args = claude_filter.client.messages.create.call_args
+        prompt_text = call_args[1]["messages"][0]["content"]
+        assert "No user feedback context available yet." in prompt_text
+
+    def test_v1_prompt_key_has_no_rag_section(self, claude_filter, sample_tweet):
+        scores_json = json.dumps([
+            {"tweet_id": "123456789", "score": 85, "reason": "Good"},
+        ])
+        mock_response = MagicMock()
+        mock_response.content = [MagicMock(text=scores_json)]
+        claude_filter.client.messages.create.return_value = mock_response
+
+        claude_filter.filter_tweets([sample_tweet], threshold=70, prompt_key="V1")
 
         call_args = claude_filter.client.messages.create.call_args
         prompt_text = call_args[1]["messages"][0]["content"]
@@ -246,41 +262,22 @@ class TestFilterTweets:
         assert result[0]["tweet_id"] == "987654321"
 
 
-# --- resolve_control_key / validate_prompt_key ---
+# --- validate_prompt_key ---
 
-from src.claude_filter import (
-    CONTROL_AUTO,
-    resolve_control_key,
-    validate_prompt_key,
-)
-
-
-class TestResolveControlKey:
-    def test_auto_without_rag(self):
-        assert resolve_control_key(CONTROL_AUTO, has_rag_context=False) == "V1"
-
-    def test_auto_with_rag(self):
-        assert resolve_control_key(CONTROL_AUTO, has_rag_context=True) == "V2"
-
-    def test_pinned_key_ignores_rag(self):
-        assert resolve_control_key("V5", has_rag_context=False) == "V5"
-        assert resolve_control_key("V5", has_rag_context=True) == "V5"
+from src.claude_filter import validate_prompt_key
 
 
 class TestValidatePromptKey:
     def test_valid_key_passes(self):
         validate_prompt_key("V4", "AB_TEST_CHALLENGER_PROMPT")
 
-    def test_auto_allowed_for_control(self):
-        validate_prompt_key(CONTROL_AUTO, "CONTROL_PROMPT", allow_auto=True)
-
-    def test_auto_rejected_when_not_allowed(self):
-        with pytest.raises(ValueError, match="AB_TEST_CHALLENGER_PROMPT"):
-            validate_prompt_key(CONTROL_AUTO, "AB_TEST_CHALLENGER_PROMPT")
-
     def test_unknown_key_raises_with_setting_name(self):
         with pytest.raises(ValueError, match="CONTROL_PROMPT.*'V99'"):
-            validate_prompt_key("V99", "CONTROL_PROMPT", allow_auto=True)
+            validate_prompt_key("V99", "CONTROL_PROMPT")
+
+    def test_auto_is_no_longer_a_valid_key(self):
+        with pytest.raises(ValueError, match="CONTROL_PROMPT.*'auto'"):
+            validate_prompt_key("auto", "CONTROL_PROMPT")
 
 
 class TestFilterTweetsPromptKey:

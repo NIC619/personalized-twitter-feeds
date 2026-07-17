@@ -554,7 +554,7 @@ class TestFormatAbInfoRagAndControl:
         }
         msg = TelegramCurator._format_ab_info_message(config, [])
         assert "Control: V5" in msg
-        assert "pinned via CONTROL_PROMPT" in msg
+        assert "set via CONTROL_PROMPT" in msg
 
     def test_rag_enabled_shown(self):
         config = {"enabled": False, "rag_enabled": True}

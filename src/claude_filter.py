@@ -309,46 +309,24 @@ PROMPT_DESCRIPTIONS = {
     "V7": "Negative-first strict — leads with rejection criteria, RAG",
 }
 
-# Sentinel for CONTROL_PROMPT: pick V1, or V2 when RAG context is available
-CONTROL_AUTO = "auto"
+# Default production/control prompt (see CONTROL_PROMPT env var)
+DEFAULT_CONTROL_PROMPT = "V2"
 
 
-def resolve_control_key(control_prompt: str, has_rag_context: bool) -> str:
-    """Resolve the configured control prompt to a concrete registry key.
-
-    Args:
-        control_prompt: A PROMPT_REGISTRY key, or CONTROL_AUTO for the
-            historical V1/V2-by-RAG behavior
-        has_rag_context: Whether RAG context is available for this scoring run
-
-    Returns:
-        A PROMPT_REGISTRY key.
-    """
-    if control_prompt == CONTROL_AUTO:
-        return "V2" if has_rag_context else "V1"
-    return control_prompt
-
-
-def validate_prompt_key(key: str, setting_name: str, allow_auto: bool = False) -> None:
+def validate_prompt_key(key: str, setting_name: str) -> None:
     """Fail fast on an unknown prompt registry key.
 
     Args:
         key: The configured prompt key
         setting_name: Env var name, used in the error message
-        allow_auto: Whether CONTROL_AUTO is an acceptable value
 
     Raises:
-        ValueError: If the key is not in PROMPT_REGISTRY (or CONTROL_AUTO
-            when allowed).
+        ValueError: If the key is not in PROMPT_REGISTRY.
     """
-    if allow_auto and key == CONTROL_AUTO:
-        return
     if key not in PROMPT_REGISTRY:
-        valid = ", ".join(PROMPT_REGISTRY)
-        extra = f", or '{CONTROL_AUTO}'" if allow_auto else ""
         raise ValueError(
             f"{setting_name}='{key}' is not a known prompt key. "
-            f"Valid keys: {valid}{extra}"
+            f"Valid keys: {', '.join(PROMPT_REGISTRY)}"
         )
 
 
@@ -376,7 +354,7 @@ class ClaudeFilter:
         tweets: list[dict],
         threshold: int = 70,
         rag_context: Optional[str] = None,
-        prompt_key: str = CONTROL_AUTO,
+        prompt_key: str = DEFAULT_CONTROL_PROMPT,
     ) -> list[dict]:
         """Filter tweets using Claude.
 
@@ -384,8 +362,7 @@ class ClaudeFilter:
             tweets: List of tweet dictionaries
             threshold: Minimum score to pass filter (default 70)
             rag_context: Optional RAG context string with similar voted tweets
-            prompt_key: PROMPT_REGISTRY key to score with, or CONTROL_AUTO
-                for V1 (V2 when rag_context is provided)
+            prompt_key: PROMPT_REGISTRY key to score with
 
         Returns:
             List of filtered tweets with scores and reasons
@@ -457,20 +434,19 @@ class ClaudeFilter:
         self,
         tweets: list[dict],
         rag_context: Optional[str] = None,
-        prompt_key: str = CONTROL_AUTO,
+        prompt_key: str = DEFAULT_CONTROL_PROMPT,
     ) -> list[dict]:
         """Score a single batch of tweets with the production/control prompt.
 
         Returns:
             List of score dicts with tweet_id, score, reason
         """
-        key = resolve_control_key(prompt_key, bool(rag_context))
-        prompt_template = PROMPT_REGISTRY.get(key)
+        prompt_template = PROMPT_REGISTRY.get(prompt_key)
         if not prompt_template:
-            raise ValueError(f"Unknown prompt key: {key}")
+            raise ValueError(f"Unknown prompt key: {prompt_key}")
 
         logger.info(
-            f"Using prompt '{key}' (RAG {'on' if rag_context else 'off'})"
+            f"Using prompt '{prompt_key}' (RAG {'on' if rag_context else 'off'})"
         )
         return self._score_batch_with_prompt(tweets, prompt_template, rag_context)
 

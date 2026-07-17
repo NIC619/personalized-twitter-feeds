@@ -421,7 +421,11 @@ class TelegramCurator:
         config: dict, experiments: list[dict]
     ) -> str:
         """Format the /ab_info message (HTML) from config and experiment summaries."""
-        from src.claude_filter import CONTROL_AUTO, PROMPT_DESCRIPTIONS, PROMPT_REGISTRY
+        from src.claude_filter import (
+            DEFAULT_CONTROL_PROMPT,
+            PROMPT_DESCRIPTIONS,
+            PROMPT_REGISTRY,
+        )
 
         def _describe(key: str) -> str:
             descs = [
@@ -434,21 +438,14 @@ class TelegramCurator:
             return "{rag_context}" in PROMPT_REGISTRY.get(key, "")
 
         rag_enabled = config.get("rag_enabled", True)
-        control = config.get("control_prompt", CONTROL_AUTO)
+        control = config.get("control_prompt", DEFAULT_CONTROL_PROMPT)
 
         lines = ["<b>Current A/B test config</b>"]
-        if control == CONTROL_AUTO:
-            control_line = (
-                "Control: V1 — "
-                + html.escape(PROMPT_DESCRIPTIONS["V1"])
-                + " (V2 when RAG context is available)"
-            )
-        else:
-            control_line = (
-                f"Control: {html.escape(control)} — "
-                + html.escape(_describe(control))
-                + " (pinned via CONTROL_PROMPT)"
-            )
+        control_line = (
+            f"Control: {html.escape(control)} — "
+            + html.escape(_describe(control))
+            + " (set via CONTROL_PROMPT)"
+        )
         if config.get("enabled"):
             experiment_id = config.get("experiment_id") or "(unset)"
             challenger = config.get("challenger_prompt", "?")
@@ -464,17 +461,15 @@ class TelegramCurator:
 
         lines.append(f"RAG: {'enabled' if rag_enabled else 'disabled'}")
         if not rag_enabled:
-            rag_prompts = [
-                k for k in (
-                    [config.get("challenger_prompt")] if config.get("enabled") else []
-                ) + ([control] if control != CONTROL_AUTO else [])
-                if k and _needs_rag(k)
-            ]
+            rag_prompts = [control] + (
+                [config.get("challenger_prompt")] if config.get("enabled") else []
+            )
             for key in rag_prompts:
-                lines.append(
-                    f"⚠️ {html.escape(key)} expects RAG context, but RAG is disabled — "
-                    "it will run with 'No user feedback context available yet.'"
-                )
+                if key and _needs_rag(key):
+                    lines.append(
+                        f"⚠️ {html.escape(key)} expects RAG context, but RAG is disabled — "
+                        "it will run with 'No user feedback context available yet.'"
+                    )
 
         lines.append("")
         lines.append("<b>All experiments</b>")

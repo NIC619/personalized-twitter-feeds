@@ -43,10 +43,9 @@ class Settings(BaseSettings):
 
     # Prompt selection
     control_prompt: str = Field(
-        default="auto",
-        description="Prompt registry key for the production/control prompt. "
-                    "'auto' = V1, or V2 when RAG context is available. "
-                    "Set to a registry key (e.g. 'V5') to promote an A/B winner "
+        default="V2",
+        description="PROMPT_REGISTRY key for the production/control prompt. "
+                    "Set to another key (e.g. 'V5') to promote an A/B winner "
                     "without code changes.",
     )
 
