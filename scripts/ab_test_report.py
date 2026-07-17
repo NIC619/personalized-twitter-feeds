@@ -61,11 +61,11 @@ def build_ab_report(db, experiment_id: str, threshold: int = 70) -> str:
     control_prompt = results[0]["control_prompt"] if results else "?"
     challenger_prompt = results[0]["challenger_prompt"] if results else "?"
 
-    _p(f"Control prompt: {control_prompt}")
+    _p(f"Control prompt: {control_prompt} — {_describe_prompt(control_prompt)}")
     _p(f"  Avg score: {_mean(control_scores):.1f}")
     _p(f"  Score range: {min(control_scores):.0f} - {max(control_scores):.0f}")
     _p()
-    _p(f"Challenger prompt: {challenger_prompt}")
+    _p(f"Challenger prompt: {challenger_prompt} — {_describe_prompt(challenger_prompt)}")
     _p(f"  Avg score: {_mean(challenger_scores):.1f}")
     _p(f"  Score range: {min(challenger_scores):.0f} - {max(challenger_scores):.0f}")
     _p()
@@ -191,6 +191,16 @@ def build_ab_report(db, experiment_id: str, threshold: int = 70) -> str:
 def _mean(values: list) -> float:
     """Calculate mean of a list of numbers."""
     return sum(values) / len(values) if values else 0.0
+
+
+def _describe_prompt(prompt_key: str) -> str:
+    """Look up the one-line description of a prompt registry key."""
+    from src.claude_filter import PROMPT_DESCRIPTIONS
+
+    # Control key may be composite ("V1/V2") when RAG availability varied
+    parts = [k.strip() for k in prompt_key.split("/")]
+    descs = [PROMPT_DESCRIPTIONS.get(p, "unknown prompt") for p in parts]
+    return "; ".join(descs)
 
 
 if __name__ == "__main__":

@@ -337,6 +337,9 @@ def init_components(settings, num_tweets=None, hours=None):
         from scripts.ab_test_report import build_ab_report
         return await asyncio.to_thread(build_ab_report, db, experiment_id, threshold)
 
+    async def on_list_ab_experiments() -> list[dict]:
+        return await asyncio.to_thread(db.list_ab_experiments)
+
     # Initialize Telegram bot
     telegram = TelegramCurator(
         bot_token=settings.telegram_bot_token,
@@ -357,6 +360,8 @@ def init_components(settings, num_tweets=None, hours=None):
         list_blocked_keywords_callback=on_list_blocked_keywords,
         remove_blocked_keyword_callback=on_remove_blocked_keyword,
         ab_report_callback=on_ab_report,
+        list_ab_experiments_callback=on_list_ab_experiments,
+        ab_test_config=ab_test_config,
     )
 
     # Initialize curator

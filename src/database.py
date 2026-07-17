@@ -631,6 +631,65 @@ class DatabaseClient:
             logger.error(f"Error getting A/B test results: {e}")
             raise
 
+    def list_ab_experiments(self) -> list[dict]:
+        """List all A/B experiments with prompt versions, pair counts and date range.
+
+        Returns:
+            List of dicts sorted by most recent activity first:
+            [{experiment_id, control_prompt, challenger_prompt, pairs,
+              first_scored, last_scored}]
+        """
+        experiments: dict[str, dict] = {}
+        page_size = 1000
+        offset = 0
+        try:
+            while True:
+                result = (
+                    self.client.table("ab_test_scores")
+                    .select("experiment_id,prompt_version,is_control,created_at")
+                    .order("created_at")
+                    .range(offset, offset + page_size - 1)
+                    .execute()
+                )
+                rows = result.data or []
+                for row in rows:
+                    exp = experiments.setdefault(row["experiment_id"], {
+                        "experiment_id": row["experiment_id"],
+                        "control_prompts": set(),
+                        "challenger_prompts": set(),
+                        "pairs": 0,
+                        "first_scored": row["created_at"],
+                        "last_scored": row["created_at"],
+                    })
+                    if row.get("is_control"):
+                        exp["control_prompts"].add(row["prompt_version"])
+                        exp["pairs"] += 1
+                    else:
+                        exp["challenger_prompts"].add(row["prompt_version"])
+                    if row["created_at"] < exp["first_scored"]:
+                        exp["first_scored"] = row["created_at"]
+                    if row["created_at"] > exp["last_scored"]:
+                        exp["last_scored"] = row["created_at"]
+                if len(rows) < page_size:
+                    break
+                offset += page_size
+        except Exception as e:
+            logger.error(f"Error listing A/B experiments: {e}")
+            raise
+
+        summaries = []
+        for exp in experiments.values():
+            summaries.append({
+                "experiment_id": exp["experiment_id"],
+                "control_prompt": "/".join(sorted(exp["control_prompts"])) or "?",
+                "challenger_prompt": "/".join(sorted(exp["challenger_prompts"])) or "?",
+                "pairs": exp["pairs"],
+                "first_scored": exp["first_scored"],
+                "last_scored": exp["last_scored"],
+            })
+        summaries.sort(key=lambda s: s["last_scored"], reverse=True)
+        return summaries
+
     def get_newsletter_preferences(self, domain: str) -> dict | None:
         """Get newsletter section preferences for a domain.
 

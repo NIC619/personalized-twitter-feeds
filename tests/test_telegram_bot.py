@@ -459,3 +459,85 @@ class TestFormatThreadMessage:
 
         assert "1 tweets" in msg
         assert "[1/1]" in msg
+
+
+# --- _parse_ab_report_args ---
+
+class TestParseAbReportArgs:
+    def test_no_args_uses_default_experiment(self):
+        exp, threshold = TelegramCurator._parse_ab_report_args([], "exp_003")
+        assert exp == "exp_003"
+        assert threshold == 70
+
+    def test_explicit_experiment(self):
+        exp, threshold = TelegramCurator._parse_ab_report_args(["exp_001"], "exp_003")
+        assert exp == "exp_001"
+        assert threshold == 70
+
+    def test_experiment_and_threshold(self):
+        exp, threshold = TelegramCurator._parse_ab_report_args(
+            ["exp_001", "50"], "exp_003"
+        )
+        assert exp == "exp_001"
+        assert threshold == 50
+
+    def test_bare_threshold_uses_default_experiment(self):
+        exp, threshold = TelegramCurator._parse_ab_report_args(["60"], "exp_003")
+        assert exp == "exp_003"
+        assert threshold == 60
+
+    def test_no_args_no_default_raises(self):
+        with pytest.raises(ValueError, match="No experiment configured"):
+            TelegramCurator._parse_ab_report_args([], "")
+
+    def test_bad_threshold_raises(self):
+        with pytest.raises(ValueError, match="Invalid threshold"):
+            TelegramCurator._parse_ab_report_args(["exp_001", "abc"], "exp_003")
+
+
+# --- _format_ab_info_message ---
+
+class TestFormatAbInfoMessage:
+    CONFIG = {
+        "enabled": True,
+        "experiment_id": "exp_003",
+        "challenger_prompt": "V4",
+    }
+    EXPERIMENTS = [
+        {
+            "experiment_id": "exp_003",
+            "control_prompt": "V1/V2",
+            "challenger_prompt": "V4",
+            "pairs": 42,
+            "first_scored": "2026-06-01T08:00:00+00:00",
+            "last_scored": "2026-07-15T08:00:00+00:00",
+        },
+        {
+            "experiment_id": "exp_002",
+            "control_prompt": "V1",
+            "challenger_prompt": "V3",
+            "pairs": 30,
+            "first_scored": "2026-04-01T08:00:00+00:00",
+            "last_scored": "2026-05-20T08:00:00+00:00",
+        },
+    ]
+
+    def test_current_config_shown(self):
+        msg = TelegramCurator._format_ab_info_message(self.CONFIG, self.EXPERIMENTS)
+        assert "exp_003" in msg
+        assert "Challenger: V4" in msg
+
+    def test_experiments_listed_with_pairs_and_dates(self):
+        msg = TelegramCurator._format_ab_info_message(self.CONFIG, self.EXPERIMENTS)
+        assert "exp_002" in msg
+        assert "42 pairs" in msg
+        assert "2026-06-01 → 2026-07-15" in msg
+
+    def test_prompt_descriptions_included(self):
+        msg = TelegramCurator._format_ab_info_message(self.CONFIG, self.EXPERIMENTS)
+        assert "V4: Interests-only + RAG context" in msg
+
+    def test_disabled_config(self):
+        msg = TelegramCurator._format_ab_info_message({"enabled": False}, [])
+        assert "disabled" in msg
+        assert "No A/B test scores recorded yet." in msg

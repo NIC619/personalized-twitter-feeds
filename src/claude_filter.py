@@ -298,6 +298,17 @@ PROMPT_REGISTRY = {
     "V7": PROMPT_V7_STRICT,
 }
 
+# One-line summaries shown in /ab_info and A/B reports
+PROMPT_DESCRIPTIONS = {
+    "V1": "Production baseline — full bio/background persona, no RAG",
+    "V2": "Production prompt + RAG context from past votes",
+    "V3": "Interests-only — prioritized topic list, no bio",
+    "V4": "Interests-only + RAG context (V3 + user feedback)",
+    "V5": "Persona-driven — protocol architect voice, refined interest map, RAG",
+    "V6": "Binary decision — forces clear send/skip, avoids 50-69 scores, RAG",
+    "V7": "Negative-first strict — leads with rejection criteria, RAG",
+}
+
 
 class ClaudeFilter:
     """Claude-based tweet filter."""

@@ -55,6 +55,8 @@ class TelegramCurator:
         list_blocked_keywords_callback: Optional[Callable] = None,
         remove_blocked_keyword_callback: Optional[Callable] = None,
         ab_report_callback: Optional[Callable] = None,
+        list_ab_experiments_callback: Optional[Callable] = None,
+        ab_test_config: Optional[dict] = None,
     ):
         """Initialize Telegram bot.
 
@@ -76,6 +78,9 @@ class TelegramCurator:
             add_blocked_keyword_callback: Async callback function(keyword) → saved keyword
             list_blocked_keywords_callback: Async callback function() → list of keywords
             remove_blocked_keyword_callback: Async callback function(keyword) → None
+            ab_report_callback: Async callback function(experiment_id, threshold) → report string
+            list_ab_experiments_callback: Async callback function() → list of experiment summary dicts
+            ab_test_config: Dict with keys: enabled, experiment_id, challenger_prompt
         """
         self.bot_token = bot_token
         self.chat_id = chat_id
@@ -95,6 +100,8 @@ class TelegramCurator:
         self.list_blocked_keywords_callback = list_blocked_keywords_callback
         self.remove_blocked_keyword_callback = remove_blocked_keyword_callback
         self.ab_report_callback = ab_report_callback
+        self.list_ab_experiments_callback = list_ab_experiments_callback
+        self.ab_test_config = ab_test_config or {}
         self.application: Optional[Application] = None
         self._pending_feedback: dict[str, dict] = {}  # tweet_id → pending save info
         self._tweet_authors: dict[str, str] = {}  # tweet_id → username
@@ -129,7 +136,8 @@ class TelegramCurator:
             BotCommand("blockword", "Block keyword(s) from pipeline — paste one per line or comma-separated"),
             BotCommand("blockwords", "List blocked keywords — tap to remove"),
             BotCommand("stats", "Show author performance stats"),
-            BotCommand("ab_report", "A/B test report — /ab_report experiment_id [threshold]"),
+            BotCommand("ab_report", "A/B test report — /ab_report [experiment_id] [threshold]"),
+            BotCommand("ab_info", "Show current A/B test config and all experiments"),
             BotCommand("help", "Show help message"),
         ]
         await self.application.bot.set_my_commands(commands)
@@ -243,6 +251,9 @@ class TelegramCurator:
         self.application.add_handler(
             CommandHandler("ab_report", self._handle_ab_report)
         )
+        self.application.add_handler(
+            CommandHandler("ab_info", self._handle_ab_info)
+        )
 
         # Callback handler for inline buttons
         self.application.add_handler(
@@ -287,7 +298,9 @@ class TelegramCurator:
             "/blockword — block keyword(s) from the pipeline (one per line or comma-separated)\n"
             "/blockwords — list blocked keywords, tap to remove\n"
             "/stats — show author performance stats\n"
-            "/ab_report experiment_id [threshold] — A/B test report (default threshold=70)\n\n"
+            "/ab_report [experiment_id] [threshold] — A/B test report "
+            "(defaults: current experiment, threshold=70)\n"
+            "/ab_info — show current A/B test config and all past experiments\n\n"
             "- I send you filtered tweets daily\n"
             "- Use the buttons to tell me what you like\n"
             "- Your feedback helps improve future curation\n"
@@ -330,31 +343,58 @@ class TelegramCurator:
         message = self._format_stats_message(stats, page)
         await update.message.reply_text(message, parse_mode="HTML")
 
+    @staticmethod
+    def _parse_ab_report_args(
+        args: list[str], default_experiment_id: str = ""
+    ) -> tuple[str, int]:
+        """Parse /ab_report arguments into (experiment_id, threshold).
+
+        Accepts: no args (configured experiment, threshold 70), a bare
+        threshold (configured experiment), an experiment id, or both.
+
+        Raises:
+            ValueError: With a user-facing message on bad input.
+        """
+        threshold = 70
+        if not args:
+            experiment_id = default_experiment_id
+        elif args[0].lstrip("-").isdigit():
+            # Bare threshold — use the configured experiment
+            experiment_id = default_experiment_id
+            threshold = int(args[0])
+        else:
+            experiment_id = args[0]
+            if len(args) >= 2:
+                try:
+                    threshold = int(args[1])
+                except ValueError:
+                    raise ValueError(
+                        f"Invalid threshold '{args[1]}'. Must be an integer."
+                    )
+
+        if not experiment_id:
+            raise ValueError(
+                "No experiment configured (AB_TEST_EXPERIMENT_ID is unset).\n"
+                "Usage: /ab_report [experiment_id] [threshold]\n"
+                "Use /ab_info to list past experiments."
+            )
+        return experiment_id, threshold
+
     async def _handle_ab_report(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
-        """Handle /ab_report experiment_id [threshold]."""
+        """Handle /ab_report [experiment_id] [threshold]."""
         if not self.ab_report_callback:
             await update.message.reply_text("A/B report not available.")
             return
 
-        if not context.args:
-            await update.message.reply_text(
-                "Usage: /ab_report experiment_id [threshold]\n"
-                "Example: /ab_report exp_002 50"
+        try:
+            experiment_id, threshold = self._parse_ab_report_args(
+                context.args or [], self.ab_test_config.get("experiment_id", "")
             )
+        except ValueError as e:
+            await update.message.reply_text(str(e))
             return
-
-        experiment_id = context.args[0]
-        threshold = 70
-        if len(context.args) >= 2:
-            try:
-                threshold = int(context.args[1])
-            except ValueError:
-                await update.message.reply_text(
-                    f"Invalid threshold '{context.args[1]}'. Must be an integer."
-                )
-                return
 
         try:
             report = await self.ab_report_callback(experiment_id, threshold)
@@ -375,6 +415,81 @@ class TelegramCurator:
             await update.message.reply_text(
                 f"<pre>{html.escape(chunk)}</pre>", parse_mode="HTML"
             )
+
+    @staticmethod
+    def _format_ab_info_message(
+        config: dict, experiments: list[dict]
+    ) -> str:
+        """Format the /ab_info message (HTML) from config and experiment summaries."""
+        from src.claude_filter import PROMPT_DESCRIPTIONS
+
+        def _describe(key: str) -> str:
+            descs = [
+                PROMPT_DESCRIPTIONS.get(k.strip(), "unknown prompt")
+                for k in key.split("/")
+            ]
+            return "; ".join(descs)
+
+        lines = ["<b>Current A/B test config</b>"]
+        if config.get("enabled"):
+            experiment_id = config.get("experiment_id") or "(unset)"
+            challenger = config.get("challenger_prompt", "?")
+            lines.append(f"Experiment: <code>{html.escape(experiment_id)}</code>")
+            lines.append(
+                "Control: V1 — "
+                + html.escape(PROMPT_DESCRIPTIONS["V1"])
+                + " (V2 when RAG context is available)"
+            )
+            lines.append(
+                f"Challenger: {html.escape(challenger)} — "
+                + html.escape(_describe(challenger))
+            )
+        else:
+            lines.append("A/B testing is disabled (AB_TEST_ENABLED=false).")
+
+        lines.append("")
+        lines.append("<b>All experiments</b>")
+        if not experiments:
+            lines.append("No A/B test scores recorded yet.")
+        else:
+            for exp in experiments:
+                first = (exp.get("first_scored") or "")[:10]
+                last = (exp.get("last_scored") or "")[:10]
+                control = exp.get("control_prompt", "?")
+                challenger = exp.get("challenger_prompt", "?")
+                lines.append(
+                    f"• <code>{html.escape(exp['experiment_id'])}</code>: "
+                    f"{html.escape(control)} vs {html.escape(challenger)}, "
+                    f"{exp.get('pairs', 0)} pairs, {first} → {last}"
+                )
+                lines.append(
+                    f"   challenger: {html.escape(_describe(challenger))}"
+                )
+
+        lines.append("")
+        lines.append("<b>Prompt registry</b>")
+        for key, desc in PROMPT_DESCRIPTIONS.items():
+            lines.append(f"{key}: {html.escape(desc)}")
+
+        lines.append("")
+        lines.append("Run /ab_report [experiment_id] [threshold] for a full report.")
+        return "\n".join(lines)
+
+    async def _handle_ab_info(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Handle /ab_info — show current A/B config and all experiments."""
+        experiments: list[dict] = []
+        if self.list_ab_experiments_callback:
+            try:
+                experiments = await self.list_ab_experiments_callback()
+            except Exception as e:
+                logger.error(f"Error listing A/B experiments: {e}", exc_info=True)
+                await update.message.reply_text(f"Error listing experiments: {e}")
+                return
+
+        message = self._format_ab_info_message(self.ab_test_config, experiments)
+        await update.message.reply_text(message, parse_mode="HTML")
 
     @staticmethod
     def _extract_username(arg: str) -> str:
