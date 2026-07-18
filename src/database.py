@@ -646,8 +646,8 @@ class DatabaseClient:
             while True:
                 result = (
                     self.client.table("ab_test_scores")
-                    .select("experiment_id,prompt_version,is_control,created_at")
-                    .order("created_at")
+                    .select("experiment_id,prompt_version,is_control,scored_at")
+                    .order("scored_at")
                     .range(offset, offset + page_size - 1)
                     .execute()
                 )
@@ -658,18 +658,18 @@ class DatabaseClient:
                         "control_prompts": set(),
                         "challenger_prompts": set(),
                         "pairs": 0,
-                        "first_scored": row["created_at"],
-                        "last_scored": row["created_at"],
+                        "first_scored": row["scored_at"],
+                        "last_scored": row["scored_at"],
                     })
                     if row.get("is_control"):
                         exp["control_prompts"].add(row["prompt_version"])
                         exp["pairs"] += 1
                     else:
                         exp["challenger_prompts"].add(row["prompt_version"])
-                    if row["created_at"] < exp["first_scored"]:
-                        exp["first_scored"] = row["created_at"]
-                    if row["created_at"] > exp["last_scored"]:
-                        exp["last_scored"] = row["created_at"]
+                    if row["scored_at"] < exp["first_scored"]:
+                        exp["first_scored"] = row["scored_at"]
+                    if row["scored_at"] > exp["last_scored"]:
+                        exp["last_scored"] = row["scored_at"]
                 if len(rows) < page_size:
                     break
                 offset += page_size
