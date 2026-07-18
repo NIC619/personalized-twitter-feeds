@@ -615,18 +615,37 @@ class DatabaseClient:
     def get_ab_test_results(self, experiment_id: str) -> list[dict]:
         """Get paired A/B test results with feedback via RPC.
 
+        Paginated: PostgREST caps responses at 1000 rows, so a single call
+        would silently truncate large experiments.
+
         Args:
             experiment_id: Experiment identifier
 
         Returns:
             List of paired score records with feedback
         """
+        all_rows: list[dict] = []
+        page_size = 1000
+        offset = 0
         try:
-            result = self.client.rpc(
-                "get_ab_test_analysis",
-                {"p_experiment_id": experiment_id},
-            ).execute()
-            return result.data if result.data else []
+            while True:
+                result = (
+                    self.client.rpc(
+                        "get_ab_test_analysis",
+                        {"p_experiment_id": experiment_id},
+                    )
+                    # Stable order — the SQL function has no ORDER BY, and
+                    # pagination without one can skip/duplicate rows
+                    .order("tweet_id")
+                    .range(offset, offset + page_size - 1)
+                    .execute()
+                )
+                rows = result.data or []
+                all_rows.extend(rows)
+                if len(rows) < page_size:
+                    break
+                offset += page_size
+            return all_rows
         except Exception as e:
             logger.error(f"Error getting A/B test results: {e}")
             raise
