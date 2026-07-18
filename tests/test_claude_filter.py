@@ -295,8 +295,8 @@ class TestFilterTweetsPromptKey:
         claude_filter.filter_tweets([sample_tweet], threshold=70, prompt_key="V5")
 
         prompt_text = claude_filter.client.messages.create.call_args[1]["messages"][0]["content"]
-        # V5 persona opener
-        assert "Protocol Architect" in prompt_text
+        # V5 refreshed topic map
+        assert "FOCIL" in prompt_text
 
     def test_pinned_rag_prompt_without_rag_gets_fallback(self, claude_filter, sample_tweet):
         self._mock_response(claude_filter)
@@ -315,3 +315,22 @@ class TestFilterTweetsPromptKey:
     def test_score_tweets_with_prompt_unknown_key_raises(self, claude_filter, sample_tweet):
         with pytest.raises(ValueError, match="Unknown prompt key"):
             claude_filter.score_tweets_with_prompt([sample_tweet], "V99")
+
+
+class TestFallbackParseReasonFirst:
+    def test_reason_before_score_order(self, claude_filter):
+        raw = 'garbage {"tweet_id": "1", "reason": "EIP deep-dive", "score": 88} garbage'
+        result = claude_filter._fallback_parse(raw)
+        assert result == [{"tweet_id": "1", "score": 88, "reason": "EIP deep-dive"}]
+
+    def test_mixed_orders_both_recovered(self, claude_filter):
+        raw = (
+            '{"tweet_id": "1", "score": 90, "reason": "Based rollup"} '
+            '{"tweet_id": "2", "reason": "Price talk", "score": 10}'
+        )
+        result = claude_filter._fallback_parse(raw)
+        assert len(result) == 2
+        by_id = {r["tweet_id"]: r for r in result}
+        assert by_id["1"]["score"] == 90
+        assert by_id["2"]["score"] == 10
+        assert by_id["2"]["reason"] == "Price talk"

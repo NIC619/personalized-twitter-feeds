@@ -19,10 +19,17 @@ Source of truth: `PROMPT_REGISTRY` + `PROMPT_DESCRIPTIONS` in `src/claude_filter
 | V1 | Bio + rubric | no | Full background paragraph + detailed scoring tiers (original production) |
 | V2 | Bio + rubric | yes | V1 + similar voted tweets injected as context |
 | V3 | Interests-only | no | No bio — just a prioritized topic list with score ranges |
-| V4 | Interests-only | yes | V3 + RAG feedback context |
-| V5 | Persona-driven | yes | Protocol-architect voice, refined interest map (FOCIL, ePBS, TEE/AI…), signal/noise criteria |
-| V6 | Binary decision | yes | Forces 70+ or 0-49, eliminates ambiguous middle scores |
-| V7 | Negative-first | yes | Leads with skip criteria, "when in doubt, skip" |
+| V4 | Interests-only | yes | V3 + RAG feedback context. **exp_003 winner** |
+| V5 | Refreshed interests | yes | V4 + current topic map (FOCIL, ePBS, execution tickets, intents, TEE/AI agents) |
+| V6 | Binary decision | yes | V4's interest list, but forces 70+ or 0-49 — bans the 50-69 dead zone |
+| V7 | Reason-first | yes | V4, but the model writes its reason *before* the score in each JSON object |
+
+V5–V7 each change exactly **one variable** relative to V4, targeting exp_003's
+diagnosis: precision was already 100%, recall only ~55% — good content was
+being under-scored into 50-69, not noise getting through. (The original
+V5 persona / V6 bio-binary / V7 strict prompts were replaced untested on
+2026-07-18; the strict prompt optimized precision, which the feedback loop
+can't even measure since it only sees sent tweets.)
 
 "RAG: yes" means the prompt has a `{rag_context}` placeholder. If RAG is disabled
 (or has no data yet), the placeholder is filled with *"No user feedback context

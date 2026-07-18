@@ -185,8 +185,9 @@ Tweets to filter:
 {tweets_json}"""
 
 
-# V5: Persona-driven with refined interest map and signal/noise criteria (formerly V3.5)
-PROMPT_V5_PERSONA = """You are a Protocol Architect and Smart Contract Security Researcher. You have deep expertise in the Ethereum roadmap, specifically the evolution of PBS, L2 scalability, and Account Abstraction. You are skeptical of hype, marketing, and price-talk. You prioritize technical correctness, game-theoretic robustness, and censorship-resistance. Your tone is professional, concise, and analytical. You speak the language of EIPs, slot auctions, and state transitions.
+# V5: V4's structure with the refreshed keyword-rich interest map (salvaged
+# from the retired persona prompt — persona framing lost to plain lists twice)
+PROMPT_V5_INTERESTS_REFRESHED = """Score these tweets 0-100 for an Ethereum protocol researcher with these interests (highest to lowest priority):
 
 ## User Feedback Context
 Based on past feedback, here are similar tweets the user has voted on:
@@ -195,24 +196,34 @@ Based on past feedback, here are similar tweets the user has voted on:
 
 Use this context to adjust your scores. If a new tweet is similar to liked tweets, boost its score. If similar to disliked tweets, lower it.
 
-Analyze the provided tweets. Filter out all "Noise" and score the "Signal" according to these specific research interests.
+Must-see (90-100):
+- Based rollups, preconfirmations, sequencer design, shared sequencers
+- TEE-based proving (SGX, TDX, SEV-SNP), L1↔L2 synchronous composability
+- Puffer Finance, UniFi ecosystem
 
-[SIGNAL CRITERIA]
-Keep (score 70-100): EIP/RIP discussions, ethresear.ch links, GitHub PRs, game theory analysis, MEV-aware design, and TEE/AI-agent infrastructure.
-Discard as Noise (score 0-49): Price speculation, $ETH charts, engagement farming ("Thoughts?"), airdrops, and generic news without technical substance.
+High interest (75-89):
+- Censorship resistance: FOCIL, inclusion lists (EIP-7547), BRAID, MCP
+- Market structure: ePBS, PTC, execution tickets/auctions, MEV, OFA, PBS, auction theory, mechanism design
+- Account Abstraction: ERC-4337, EIP-7702, RIP-7702, EIP-8141, session keys, Tempo
+- Intents: ERC-7683, OIF, intent-based architectures
+- TEE & AI: agent-to-agent economies, agentic sovereignty, verifiable inference
+- ZK proofs, Data Availability, blob markets
+- L2 architecture (OP Stack, Arbitrum, StarkNet, ZKsync)
+- Ethereum protocol changes, EIPs, hard forks
+- Smart contract security, audits, exploits
+- Rollup economics, security models
 
-[INTEREST MAP & KEYWORDS]
-1. Censorship Resistance: FOCIL, IL (Inclusion List), EIP-7547, MCP, BRAID.
-2. Market Structures: ePBS, PTC, Execution Tickets/Auctions, MEV, Auction Theory, Mechanism Design.
-3. L2 & Interop: Based Rollups, UniFi, Synchronous Composability, Shared Sequencers, Super Builder, OP Stack.
-4. Account Abstraction: ERC-4337, EIP-7702, EIP-8141, Tempo, RIP-7702, Session Keys, Intents (OIF/ERC-7683).
-5. TEE & AI: SGX, TDX, SEV-SNP, Agentic Sovereignty, Agent-to-Agent Economies, Verifiable Inference.
+Some interest (50-74):
+- General Ethereum ecosystem news
+- Crypto governance, DAOs
+- Developer tooling, infrastructure
 
-[SCORING]
-- 90-100: Directly matches interest map keywords with deep technical substance
-- 70-89: Solid technical content in adjacent areas, original insight
-- 50-69: Tangentially relevant, surface-level
-- 0-49: Noise — skip
+Skip (0-49):
+- Price talk, trading, market commentary
+- NFTs, meme coins, celebrity takes
+- Engagement farming, giveaways, "gm" posts
+- Marketing without technical substance
+- Drama, gossip
 
 Return JSON array:
 [{{"tweet_id": "...", "score": 85, "reason": "..."}}]
@@ -221,8 +232,10 @@ Tweets to filter:
 {tweets_json}"""
 
 
-# V6: Binary decision — forces a clear send/skip instead of ambiguous middle scores (formerly V4)
-PROMPT_V6_BINARY = """You are filtering tweets for an Ethereum protocol researcher focused on based rollups, preconfirmations, TEE proving, L1↔L2 composability (Puffer Finance/UniFi), MEV/PBS, Account Abstraction, ZK proofs, data availability, and L2 architecture.
+# V6: Binary decision on V4's interest list — attacks the 50-69 dead zone.
+# exp_003 showed 100% precision but <60% recall: good content was being
+# under-scored into the middle band, not noise getting through.
+PROMPT_V6_BINARY = """You are filtering tweets for an Ethereum protocol researcher. For each tweet, commit to a clear decision: would they genuinely want to read it? Score 70-100 for YES, 0-49 for NO. Avoid 50-69 — no fence-sitting.
 
 ## User Feedback Context
 Based on past feedback, here are similar tweets the user has voted on:
@@ -231,15 +244,31 @@ Based on past feedback, here are similar tweets the user has voted on:
 
 Use this context to adjust your scores. If a new tweet is similar to liked tweets, boost its score. If similar to disliked tweets, lower it.
 
-For each tweet, decide: would this person want to read it? Be selective — only pass tweets with genuine technical substance or directly relevant news.
+YES — must-see (90-100):
+- Based rollups, preconfirmations, sequencer design
+- TEE-based proving, L1↔L2 synchronous composability
+- Puffer Finance, UniFi ecosystem
 
-Score 70-100 for YES (worth reading), 0-49 for NO (skip).
-Avoid scores in 50-69 — commit to a clear decision.
+YES — worth reading (70-89):
+- MEV, OFA, PBS, block building
+- Account Abstraction (ERC-4337, ERC-7702)
+- Censorship resistance, force inclusion
+- ZK proofs, Data Availability, blob markets
+- L2 architecture (OP Stack, Arbitrum, StarkNet, ZKsync)
+- Ethereum protocol changes, EIPs, hard forks
+- Smart contract security, audits, exploits
+- Rollup economics, security models
+- Any genuinely substantive technical content adjacent to the above
 
-Scoring guide:
-- 90-100: Directly about their active work or breakthrough research in their core areas
-- 70-89: Solid technical content in adjacent areas they'd learn from
-- 0-49: Everything else (surface-level news, marketing, price talk, drama, engagement farming)
+NO — skip (0-49):
+- Price talk, trading, market commentary
+- NFTs, meme coins, celebrity takes
+- Engagement farming, giveaways, "gm" posts
+- Marketing without technical substance
+- Drama, gossip
+- Surface-level news with no technical detail
+
+If a tweet has real technical substance in an interest area, that's a YES (70+) — don't under-score good content into the 50-69 dead zone.
 
 Return JSON array:
 [{{"tweet_id": "...", "score": 85, "reason": "..."}}]
@@ -248,8 +277,11 @@ Tweets to filter:
 {tweets_json}"""
 
 
-# V7: Negative-first — lead with rejection criteria to reduce false positives (formerly V5)
-PROMPT_V7_STRICT = """You are aggressively filtering tweets. Most tweets should be SKIPPED. Only pass tweets that an Ethereum protocol researcher would genuinely benefit from reading.
+# V7: Reason-first — the reason is written before the score in each JSON
+# object, so the score is conditioned on articulated reasoning (V4 base).
+# Replaces the strict negative-first prompt, which optimized precision that
+# exp_003 measured at 100% already.
+PROMPT_V7_REASON_FIRST = """Score these tweets 0-100 for an Ethereum protocol researcher with these interests (highest to lowest priority):
 
 ## User Feedback Context
 Based on past feedback, here are similar tweets the user has voted on:
@@ -258,31 +290,37 @@ Based on past feedback, here are similar tweets the user has voted on:
 
 Use this context to adjust your scores. If a new tweet is similar to liked tweets, boost its score. If similar to disliked tweets, lower it.
 
-SKIP these (score 0-49):
-- Price speculation, trading signals, market commentary
-- NFT drops, meme coins, celebrity/influencer takes
-- Engagement farming, giveaways, "gm" posts, motivational threads
-- Product marketing without technical depth
-- Drama, gossip, hot takes without substance
-- Surface-level news that just restates announcements
-- Opinions without technical analysis
-- Anything you'd see on a generic crypto news feed
+Must-see (90-100):
+- Based rollups, preconfirmations, sequencer design
+- TEE-based proving, L1↔L2 synchronous composability
+- Puffer Finance, UniFi ecosystem
 
-PASS these (score 70-100):
-- Based rollups, preconfirmations, sequencer design, TEE proving
-- L1↔L2 composability, Puffer Finance / UniFi updates
-- MEV, OFA, PBS, block building research
-- Account Abstraction (ERC-4337, ERC-7702) developments
-- ZK proofs, Data Availability, blob market analysis
-- L2 architecture deep-dives with original insight
-- Ethereum protocol changes, EIPs with technical detail
-- Smart contract security findings, exploit analysis
-- Rollup economics and security model discussions
+High interest (75-89):
+- MEV, OFA, PBS, block building
+- Account Abstraction (ERC-4337, ERC-7702)
+- Censorship resistance, force inclusion
+- ZK proofs, Data Availability, blob markets
+- L2 architecture (OP Stack, Arbitrum, StarkNet, ZKsync)
+- Ethereum protocol changes, EIPs, hard forks
+- Smart contract security, audits, exploits
+- Rollup economics, security models
 
-When in doubt, SKIP. A false negative (missing a good tweet) is better than a false positive (sending noise).
+Some interest (50-74):
+- General Ethereum ecosystem news
+- Crypto governance, DAOs
+- Developer tooling, infrastructure
 
-Return JSON array:
-[{{"tweet_id": "...", "score": 85, "reason": "..."}}]
+Skip (0-49):
+- Price talk, trading, market commentary
+- NFTs, meme coins, celebrity takes
+- Engagement farming, giveaways, "gm" posts
+- Marketing without technical substance
+- Drama, gossip
+
+For each tweet, FIRST write one sentence weighing its relevance — name the interest area it matches, or why it misses — THEN pick the score that follows from that reasoning.
+
+Return JSON array with reason before score:
+[{{"tweet_id": "...", "reason": "...", "score": 85}}]
 
 Tweets to filter:
 {tweets_json}"""
@@ -293,9 +331,9 @@ PROMPT_REGISTRY = {
     "V2": PRODUCTION_PROMPT_V2,
     "V3": PROMPT_V3_INTERESTS_ONLY,
     "V4": PROMPT_V4_INTERESTS_RAG,
-    "V5": PROMPT_V5_PERSONA,
+    "V5": PROMPT_V5_INTERESTS_REFRESHED,
     "V6": PROMPT_V6_BINARY,
-    "V7": PROMPT_V7_STRICT,
+    "V7": PROMPT_V7_REASON_FIRST,
 }
 
 # One-line summaries shown in /ab_info and A/B reports
@@ -304,9 +342,9 @@ PROMPT_DESCRIPTIONS = {
     "V2": "Production prompt + RAG context from past votes",
     "V3": "Interests-only — prioritized topic list, no bio",
     "V4": "Interests-only + RAG context (V3 + user feedback)",
-    "V5": "Persona-driven — protocol architect voice, refined interest map, RAG",
-    "V6": "Binary decision — forces clear send/skip, avoids 50-69 scores, RAG",
-    "V7": "Negative-first strict — leads with rejection criteria, RAG",
+    "V5": "V4 + refreshed topic map (FOCIL, ePBS, intents, TEE/AI agents)",
+    "V6": "Binary send/skip on V4's interest list — bans the 50-69 dead zone",
+    "V7": "Reason-first — justify relevance before scoring (V4 base)",
 }
 
 # Default production/control prompt (see CONTROL_PROMPT env var)
@@ -611,16 +649,24 @@ class ClaudeFilter:
         Returns:
             List of score dictionaries (may be empty)
         """
-        # Try to find any JSON-like structures (handles escaped quotes in reason)
-        pattern = r'\{"tweet_id":\s*"([^"]+)",\s*"score":\s*(\d+),\s*"reason":\s*"((?:[^"\\]|\\.)*)"\}'
-        matches = re.findall(pattern, response_text)
+        # Try to find any JSON-like structures (handles escaped quotes in
+        # reason). Both key orders occur: score-first (most prompts) and
+        # reason-first (V7).
+        score_first = r'\{"tweet_id":\s*"([^"]+)",\s*"score":\s*(\d+),\s*"reason":\s*"((?:[^"\\]|\\.)*)"\}'
+        reason_first = r'\{"tweet_id":\s*"([^"]+)",\s*"reason":\s*"((?:[^"\\]|\\.)*)",\s*"score":\s*(\d+)\}'
 
         results = []
-        for match in matches:
+        for match in re.findall(score_first, response_text):
             results.append({
                 "tweet_id": match[0],
                 "score": int(match[1]),
                 "reason": match[2],
+            })
+        for match in re.findall(reason_first, response_text):
+            results.append({
+                "tweet_id": match[0],
+                "score": int(match[2]),
+                "reason": match[1],
             })
 
         if results:
