@@ -709,6 +709,59 @@ class DatabaseClient:
         summaries.sort(key=lambda s: s["last_scored"], reverse=True)
         return summaries
 
+    @staticmethod
+    def _experiments_to_trim(
+        summaries: list[dict], current_experiment_id: str, keep: int
+    ) -> list[str]:
+        """Pick experiment IDs to delete, keeping the current one plus the
+        most recently active others up to `keep` total.
+
+        Args:
+            summaries: Output of list_ab_experiments (most recent first)
+            current_experiment_id: Always kept
+            keep: Total number of experiments to keep
+
+        Returns:
+            Experiment IDs to delete.
+        """
+        keep_ids = {current_experiment_id}
+        for s in summaries:
+            if len(keep_ids) >= keep:
+                break
+            keep_ids.add(s["experiment_id"])
+        return [
+            s["experiment_id"] for s in summaries
+            if s["experiment_id"] not in keep_ids
+        ]
+
+    def trim_ab_experiments(
+        self, current_experiment_id: str, keep: int = 2
+    ) -> list[str]:
+        """Delete A/B scores from experiments older than the `keep` most
+        recent ones (the current experiment always counts as kept).
+
+        Args:
+            current_experiment_id: The active experiment — never deleted
+            keep: Total experiments to keep (default: current + previous)
+
+        Returns:
+            List of deleted experiment IDs (empty if nothing to trim).
+        """
+        summaries = self.list_ab_experiments()
+        to_delete = self._experiments_to_trim(
+            summaries, current_experiment_id, keep
+        )
+        for exp_id in to_delete:
+            try:
+                self.client.table("ab_test_scores").delete(
+                    returning="minimal"
+                ).eq("experiment_id", exp_id).execute()
+                logger.info(f"Trimmed A/B scores for old experiment '{exp_id}'")
+            except Exception as e:
+                logger.error(f"Error trimming A/B experiment '{exp_id}': {e}")
+                raise
+        return to_delete
+
     def get_newsletter_preferences(self, domain: str) -> dict | None:
         """Get newsletter section preferences for a domain.
 

@@ -342,6 +342,20 @@ class DailyCurator:
                     logger.warning(f"A/B test score saving failed (non-fatal): {e}")
                     stats["ab_test_error"] = str(e)
 
+                # Step 3b: Trim scores from experiments older than
+                # current + previous (keeps the table from growing unbounded)
+                try:
+                    trimmed = self.db.trim_ab_experiments(
+                        ab_test_data["experiment_id"], keep=2
+                    )
+                    if trimmed:
+                        stats["ab_test_trimmed"] = trimmed
+                        logger.info(
+                            f"Trimmed old A/B experiments: {', '.join(trimmed)}"
+                        )
+                except Exception as e:
+                    logger.warning(f"A/B experiment trim failed (non-fatal): {e}")
+
             # Step 4: Group by thread and send filtered tweets to Telegram
             if filtered_tweets:
                 logger.info("Step 4: Sending filtered tweets to Telegram...")

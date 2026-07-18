@@ -74,13 +74,23 @@ silently collecting no data.
 
 ## Experiment History
 
-| ID | Control | Challenger | Outcome |
-|----|---------|------------|---------|
-| exp_001 | V1 | V3 (interests-only) | — |
-| exp_002 | V1/V2 | V3 | — |
-| exp_003 | V1/V2 | V4 (interests + RAG) | — |
+**Record outcomes here when a round concludes** — raw scores for experiments
+older than current + previous are auto-deleted (see Retention below), so this
+table is the only place old results survive.
 
-(Fill in outcomes as rounds conclude; `/ab_info` lists the raw data anytime.)
+| ID | Period | Control | Challenger | Votes | Outcome |
+|----|--------|---------|------------|-------|---------|
+| exp_001 | 2026-03-01 → 03-17 | V1 | V3 (interests-only) | 76 | No clear winner — F1 82.64% vs 82.88%; challenger scored significantly *lower* (Wilcoxon p<0.05) |
+| exp_002 | 2026-03-18 → 04-20 | V1/V2 | V3 | 185 | No clear winner — F1 62.55% vs 66.93% (p=0.189) |
+| exp_003 | 2026-04-20 → 07-18 | V1/V2 | V4 (interests + RAG) | 331 | **V4 wins** — F1 70.97% vs 61.47%, same precision, recall 55% vs 44% (p<0.001) |
+
+## Retention
+
+`ab_test_scores` grows ~90 rows/day, so after each daily curation run the
+scheduler deletes scores from experiments other than the **current one
+(`AB_TEST_EXPERIMENT_ID`) and the most recently active other one** — i.e.
+you can always still run `/ab_report <previous>` for one round back.
+Anything older is gone; record its outcome in the history table above first.
 
 ## Adding New Prompts
 
