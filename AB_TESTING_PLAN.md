@@ -20,14 +20,15 @@ Source of truth: `PROMPT_REGISTRY` + `PROMPT_DESCRIPTIONS` in `src/claude_filter
 | V2 | Bio + rubric | yes | V1 + similar voted tweets injected as context |
 | V3 | Interests-only | no | No bio — just a prioritized topic list with score ranges |
 | V4 | Interests-only | yes | V3 + RAG feedback context. **exp_003 winner** |
-| V5 | Refreshed interests | yes | V4 + current topic map (FOCIL, ePBS, execution tickets, intents, TEE/AI agents) |
-| V6 | Binary decision | yes | V4's interest list, but forces 70+ or 0-49 — bans the 50-69 dead zone |
-| V7 | Reason-first | yes | V4, but the model writes its reason *before* the score in each JSON object |
+| V5 | Binary decision | yes | V4's interest list, but forces 70+ or 0-49 — bans the 50-69 dead zone |
+| V6 | Reason-first | yes | V4, but the model writes its reason *before* the score in each JSON object |
+| V7 | Refreshed interests | yes | V4 + current topic map (FOCIL, ePBS, execution tickets, intents, TEE/AI agents) |
 
 V5–V7 each change exactly **one variable** relative to V4, targeting exp_003's
 diagnosis: precision was already 100%, recall only ~55% — good content was
-being under-scored into 50-69, not noise getting through. (The original
-V5 persona / V6 bio-binary / V7 strict prompts were replaced untested on
+being under-scored into 50-69, not noise getting through. They are numbered
+in the planned test order: V5 next, then V6, then V7. (The original V5
+persona / V6 bio-binary / V7 strict prompts were replaced untested on
 2026-07-18; the strict prompt optimized precision, which the feedback loop
 can't even measure since it only sees sent tweets.)
 

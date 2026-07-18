@@ -185,57 +185,10 @@ Tweets to filter:
 {tweets_json}"""
 
 
-# V5: V4's structure with the refreshed keyword-rich interest map (salvaged
-# from the retired persona prompt — persona framing lost to plain lists twice)
-PROMPT_V5_INTERESTS_REFRESHED = """Score these tweets 0-100 for an Ethereum protocol researcher with these interests (highest to lowest priority):
-
-## User Feedback Context
-Based on past feedback, here are similar tweets the user has voted on:
-
-{rag_context}
-
-Use this context to adjust your scores. If a new tweet is similar to liked tweets, boost its score. If similar to disliked tweets, lower it.
-
-Must-see (90-100):
-- Based rollups, preconfirmations, sequencer design, shared sequencers
-- TEE-based proving (SGX, TDX, SEV-SNP), L1↔L2 synchronous composability
-- Puffer Finance, UniFi ecosystem
-
-High interest (75-89):
-- Censorship resistance: FOCIL, inclusion lists (EIP-7547), BRAID, MCP
-- Market structure: ePBS, PTC, execution tickets/auctions, MEV, OFA, PBS, auction theory, mechanism design
-- Account Abstraction: ERC-4337, EIP-7702, RIP-7702, EIP-8141, session keys, Tempo
-- Intents: ERC-7683, OIF, intent-based architectures
-- TEE & AI: agent-to-agent economies, agentic sovereignty, verifiable inference
-- ZK proofs, Data Availability, blob markets
-- L2 architecture (OP Stack, Arbitrum, StarkNet, ZKsync)
-- Ethereum protocol changes, EIPs, hard forks
-- Smart contract security, audits, exploits
-- Rollup economics, security models
-
-Some interest (50-74):
-- General Ethereum ecosystem news
-- Crypto governance, DAOs
-- Developer tooling, infrastructure
-
-Skip (0-49):
-- Price talk, trading, market commentary
-- NFTs, meme coins, celebrity takes
-- Engagement farming, giveaways, "gm" posts
-- Marketing without technical substance
-- Drama, gossip
-
-Return JSON array:
-[{{"tweet_id": "...", "score": 85, "reason": "..."}}]
-
-Tweets to filter:
-{tweets_json}"""
-
-
-# V6: Binary decision on V4's interest list — attacks the 50-69 dead zone.
+# V5: Binary decision on V4's interest list — attacks the 50-69 dead zone.
 # exp_003 showed 100% precision but <60% recall: good content was being
 # under-scored into the middle band, not noise getting through.
-PROMPT_V6_BINARY = """You are filtering tweets for an Ethereum protocol researcher. For each tweet, commit to a clear decision: would they genuinely want to read it? Score 70-100 for YES, 0-49 for NO. Avoid 50-69 — no fence-sitting.
+PROMPT_V5_BINARY = """You are filtering tweets for an Ethereum protocol researcher. For each tweet, commit to a clear decision: would they genuinely want to read it? Score 70-100 for YES, 0-49 for NO. Avoid 50-69 — no fence-sitting.
 
 ## User Feedback Context
 Based on past feedback, here are similar tweets the user has voted on:
@@ -277,11 +230,9 @@ Tweets to filter:
 {tweets_json}"""
 
 
-# V7: Reason-first — the reason is written before the score in each JSON
+# V6: Reason-first — the reason is written before the score in each JSON
 # object, so the score is conditioned on articulated reasoning (V4 base).
-# Replaces the strict negative-first prompt, which optimized precision that
-# exp_003 measured at 100% already.
-PROMPT_V7_REASON_FIRST = """Score these tweets 0-100 for an Ethereum protocol researcher with these interests (highest to lowest priority):
+PROMPT_V6_REASON_FIRST = """Score these tweets 0-100 for an Ethereum protocol researcher with these interests (highest to lowest priority):
 
 ## User Feedback Context
 Based on past feedback, here are similar tweets the user has voted on:
@@ -326,14 +277,61 @@ Tweets to filter:
 {tweets_json}"""
 
 
+# V7: V4's structure with the refreshed keyword-rich interest map (salvaged
+# from the retired persona prompt — persona framing lost to plain lists twice)
+PROMPT_V7_INTERESTS_REFRESHED = """Score these tweets 0-100 for an Ethereum protocol researcher with these interests (highest to lowest priority):
+
+## User Feedback Context
+Based on past feedback, here are similar tweets the user has voted on:
+
+{rag_context}
+
+Use this context to adjust your scores. If a new tweet is similar to liked tweets, boost its score. If similar to disliked tweets, lower it.
+
+Must-see (90-100):
+- Based rollups, preconfirmations, sequencer design, shared sequencers
+- TEE-based proving (SGX, TDX, SEV-SNP), L1↔L2 synchronous composability
+- Puffer Finance, UniFi ecosystem
+
+High interest (75-89):
+- Censorship resistance: FOCIL, inclusion lists (EIP-7547), BRAID, MCP
+- Market structure: ePBS, PTC, execution tickets/auctions, MEV, OFA, PBS, auction theory, mechanism design
+- Account Abstraction: ERC-4337, EIP-7702, RIP-7702, EIP-8141, session keys, Tempo
+- Intents: ERC-7683, OIF, intent-based architectures
+- TEE & AI: agent-to-agent economies, agentic sovereignty, verifiable inference
+- ZK proofs, Data Availability, blob markets
+- L2 architecture (OP Stack, Arbitrum, StarkNet, ZKsync)
+- Ethereum protocol changes, EIPs, hard forks
+- Smart contract security, audits, exploits
+- Rollup economics, security models
+
+Some interest (50-74):
+- General Ethereum ecosystem news
+- Crypto governance, DAOs
+- Developer tooling, infrastructure
+
+Skip (0-49):
+- Price talk, trading, market commentary
+- NFTs, meme coins, celebrity takes
+- Engagement farming, giveaways, "gm" posts
+- Marketing without technical substance
+- Drama, gossip
+
+Return JSON array:
+[{{"tweet_id": "...", "score": 85, "reason": "..."}}]
+
+Tweets to filter:
+{tweets_json}"""
+
+
 PROMPT_REGISTRY = {
     "V1": PRODUCTION_PROMPT_V1,
     "V2": PRODUCTION_PROMPT_V2,
     "V3": PROMPT_V3_INTERESTS_ONLY,
     "V4": PROMPT_V4_INTERESTS_RAG,
-    "V5": PROMPT_V5_INTERESTS_REFRESHED,
-    "V6": PROMPT_V6_BINARY,
-    "V7": PROMPT_V7_REASON_FIRST,
+    "V5": PROMPT_V5_BINARY,
+    "V6": PROMPT_V6_REASON_FIRST,
+    "V7": PROMPT_V7_INTERESTS_REFRESHED,
 }
 
 # One-line summaries shown in /ab_info and A/B reports
@@ -342,9 +340,9 @@ PROMPT_DESCRIPTIONS = {
     "V2": "Production prompt + RAG context from past votes",
     "V3": "Interests-only — prioritized topic list, no bio",
     "V4": "Interests-only + RAG context (V3 + user feedback)",
-    "V5": "V4 + refreshed topic map (FOCIL, ePBS, intents, TEE/AI agents)",
-    "V6": "Binary send/skip on V4's interest list — bans the 50-69 dead zone",
-    "V7": "Reason-first — justify relevance before scoring (V4 base)",
+    "V5": "Binary send/skip on V4's interest list — bans the 50-69 dead zone",
+    "V6": "Reason-first — justify relevance before scoring (V4 base)",
+    "V7": "V4 + refreshed topic map (FOCIL, ePBS, intents, TEE/AI agents)",
 }
 
 # Default production/control prompt (see CONTROL_PROMPT env var)

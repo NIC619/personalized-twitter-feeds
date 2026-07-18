@@ -295,8 +295,8 @@ class TestFilterTweetsPromptKey:
         claude_filter.filter_tweets([sample_tweet], threshold=70, prompt_key="V5")
 
         prompt_text = claude_filter.client.messages.create.call_args[1]["messages"][0]["content"]
-        # V5 refreshed topic map
-        assert "FOCIL" in prompt_text
+        # V5 binary decision prompt
+        assert "no fence-sitting" in prompt_text
 
     def test_pinned_rag_prompt_without_rag_gets_fallback(self, claude_filter, sample_tweet):
         self._mock_response(claude_filter)
