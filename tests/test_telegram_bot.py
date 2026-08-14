@@ -61,7 +61,7 @@ class TestFormatTweetMessage:
     def test_basic_formatting(self, bot, sample_tweet):
         msg = bot._format_tweet_message(sample_tweet)
 
-        assert "<b>Score:</b> 0/100" in msg  # no filter_score set
+        assert "<b>Score:</b>" not in msg
         assert "@vitalikbuterin" in msg
         assert "View Tweet" in msg
         assert "New EIP proposal" in msg
@@ -143,7 +143,7 @@ class TestFormatTweetMessage:
         msg = bot._format_tweet_message(tweet)
         assert "┃ Line one\n┃ Line two\n┃ Line three" in msg
 
-    def test_score_and_reason(self, bot):
+    def test_score_and_reason_omitted(self, bot):
         tweet = {
             "tweet_id": "1",
             "author_username": "test",
@@ -154,8 +154,8 @@ class TestFormatTweetMessage:
             "filter_reason": "Relevant EIP discussion",
         }
         msg = bot._format_tweet_message(tweet)
-        assert "88/100" in msg
-        assert "Relevant EIP discussion" in msg
+        assert "88/100" not in msg
+        assert "Relevant EIP discussion" not in msg
 
 
 # --- _format_stats_message ---

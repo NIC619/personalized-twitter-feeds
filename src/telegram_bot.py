@@ -1321,8 +1321,6 @@ class TelegramCurator:
         position: Optional[tuple[int, int]] = None,
     ) -> str:
         """Format a blog post with score for newsletter digest."""
-        score = post.get("filter_score", 0)
-        reason = self._escape_html(post.get("filter_reason", ""))
         article = post.get("article", {})
         title = self._escape_html(article.get("title", post["text"][:100]))
         url = post["url"]
@@ -1332,8 +1330,6 @@ class TelegramCurator:
         prefix = f"<b>[{position[0]}/{position[1]}]</b>\n" if position else ""
         message = (
             f"{prefix}"
-            f"<b>Score:</b> {score}/100\n"
-            f"<b>Why:</b> {reason}\n\n"
             f"<b>{self._escape_html(author_name)}</b> | "
             f"<a href=\"{url}\">{source}</a>\n\n"
             f"<b>{title}</b>\n"
@@ -2066,13 +2062,10 @@ class TelegramCurator:
         Returns:
             Formatted message string (HTML)
         """
-        score = tweet.get("filter_score", 0)
-        reason = tweet.get("filter_reason", "")
         metrics = tweet.get("metrics", {})
 
         # Escape HTML special characters in text
         text = self._escape_html(tweet["text"])
-        reason = self._escape_html(reason)
 
         likes = metrics.get("likes", 0)
         retweets = metrics.get("retweets", 0)
@@ -2086,8 +2079,6 @@ class TelegramCurator:
         prefix = f"<b>[{position[0]}/{position[1]}]</b>\n" if position else ""
         message = (
             f"{prefix}"
-            f"<b>Score:</b> {score}/100\n"
-            f"<b>Why:</b> {reason}\n\n"
             f"<b>@{tweet['author_username']}</b> | "
             f"<a href=\"{tweet['url']}\">View Tweet</a>\n\n"
             f"{self._retweet_header(tweet)}{self._quote_header(tweet)}"
