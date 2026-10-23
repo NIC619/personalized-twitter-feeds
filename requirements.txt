@@ -1,12 +1,12 @@
 xdk==0.9.0
-anthropic>=0.40.0
+anthropic>=0.40.0,<1.0
 python-telegram-bot[webhooks]>=21.0
 supabase>=2.10.0
 python-dotenv>=1.0.0
 schedule>=1.2.2
 pytz>=2024.1
 pydantic-settings>=2.0.0
-openai>=1.0.0
+openai>=1.0.0,<3.0
 scipy>=1.11.0
 beautifulsoup4>=4.12.0
 httpx>=0.27.0
