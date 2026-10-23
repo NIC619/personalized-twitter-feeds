@@ -467,12 +467,12 @@ class TestParseAbReportArgs:
     def test_no_args_uses_default_experiment(self):
         exp, threshold = TelegramCurator._parse_ab_report_args([], "exp_003")
         assert exp == "exp_003"
-        assert threshold == 70
+        assert threshold is None
 
     def test_explicit_experiment(self):
         exp, threshold = TelegramCurator._parse_ab_report_args(["exp_001"], "exp_003")
         assert exp == "exp_001"
-        assert threshold == 70
+        assert threshold is None
 
     def test_experiment_and_threshold(self):
         exp, threshold = TelegramCurator._parse_ab_report_args(

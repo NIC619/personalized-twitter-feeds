@@ -99,6 +99,12 @@ def build_ab_report(db, experiment_id: str, threshold: int = 70) -> str:
         _p(f"Precision / Recall at threshold={threshold}")
         _p(f"{'='*60}\n")
 
+        if not downvoted:
+            _p("⚠️ No downvotes in this experiment — precision is always 100%,")
+            _p("so F1 only measures recall, which rewards whichever prompt scores")
+            _p("higher. Compare send rates to see the volume cost.")
+            _p()
+
         for label, score_key in [("Control", "control_score"), ("Challenger", "challenger_score")]:
             tp = sum(1 for r in voted if r[score_key] >= threshold and r["user_vote"] == "up")
             fp = sum(1 for r in voted if r[score_key] >= threshold and r["user_vote"] == "down")
@@ -114,6 +120,7 @@ def build_ab_report(db, experiment_id: str, threshold: int = 70) -> str:
             _p(f"  Precision: {precision:.2%}")
             _p(f"  Recall:    {recall:.2%}")
             _p(f"  F1:        {f1:.2%}")
+            _p(f"  Send rate: {_send_rate(results, score_key, threshold):.2%} of all {total_pairs} scored")
             _p()
 
     # --- Wilcoxon signed-rank test ---
@@ -172,7 +179,17 @@ def build_ab_report(db, experiment_id: str, threshold: int = 70) -> str:
         ch_rec = chall_tp / (chall_tp + chall_fn) if (chall_tp + chall_fn) > 0 else 0
         ch_f1 = 2 * ch_prec * ch_rec / (ch_prec + ch_rec) if (ch_prec + ch_rec) > 0 else 0
 
-        if ch_f1 > c_f1 + 0.05:
+        if not downvoted:
+            _p("Can't pick a winner without downvotes — a prompt that sends more")
+            _p("always has higher recall here.")
+            _p(f"Recall:    control={c_rec:.2%}, challenger={ch_rec:.2%}")
+            _p(
+                f"Send rate: control={_send_rate(results, 'control_score', threshold):.2%}, "
+                f"challenger={_send_rate(results, 'challenger_score', threshold):.2%}"
+            )
+            _p("Decide whether the recall difference is worth the volume, and vote 👎")
+            _p("on misses so precision becomes measurable.")
+        elif ch_f1 > c_f1 + 0.05:
             _p(f"Challenger ({challenger_prompt}) outperforms control ({control_prompt}).")
             _p(f"F1: {ch_f1:.2%} vs {c_f1:.2%}")
             _p("Consider promoting the challenger to production.")
@@ -191,6 +208,11 @@ def build_ab_report(db, experiment_id: str, threshold: int = 70) -> str:
 def _mean(values: list) -> float:
     """Calculate mean of a list of numbers."""
     return sum(values) / len(values) if values else 0.0
+
+
+def _send_rate(results: list[dict], score_key: str, threshold: int) -> float:
+    """Fraction of all scored items at or above threshold (base threshold, no author offsets)."""
+    return sum(1 for r in results if r[score_key] >= threshold) / len(results) if results else 0.0
 
 
 def _describe_prompt(prompt_key: str) -> str:
@@ -212,9 +234,10 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description="A/B test report")
     parser.add_argument("experiment_id", help="Experiment ID to analyze")
-    parser.add_argument("--threshold", type=int, default=70, help="Score threshold")
+    parser.add_argument("--threshold", type=int, default=None, help="Score threshold (default: FILTER_THRESHOLD)")
     args = parser.parse_args()
 
     settings = get_settings()
     db = DatabaseClient(url=settings.supabase_url, key=settings.supabase_key)
-    run_ab_report(db, args.experiment_id, threshold=args.threshold)
+    threshold = args.threshold if args.threshold is not None else settings.filter_threshold
+    run_ab_report(db, args.experiment_id, threshold=threshold)

@@ -91,8 +91,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--threshold",
         type=int,
-        default=70,
-        help="Score threshold for A/B report precision/recall (default 70)",
+        default=None,
+        help="Score threshold for A/B report precision/recall (default: FILTER_THRESHOLD)",
     )
     parser.add_argument(
         "--error-report",
@@ -345,8 +345,10 @@ def init_components(settings, num_tweets=None, hours=None):
         db.remove_blocked_keyword(keyword)
 
     # A/B report callback (runs blocking report generation in a worker thread)
-    async def on_ab_report(experiment_id: str, threshold: int) -> str:
+    async def on_ab_report(experiment_id: str, threshold: int | None) -> str:
         from scripts.ab_test_report import build_ab_report
+        if threshold is None:
+            threshold = settings.filter_threshold
         return await asyncio.to_thread(build_ab_report, db, experiment_id, threshold)
 
     async def on_list_ab_experiments() -> list[dict]:
@@ -562,7 +564,8 @@ def main() -> int:
         if args.ab_report:
             from scripts.ab_test_report import run_ab_report
             db = DatabaseClient(url=settings.supabase_url, key=settings.supabase_key)
-            run_ab_report(db, args.ab_report, threshold=args.threshold)
+            threshold = args.threshold if args.threshold is not None else settings.filter_threshold
+            run_ab_report(db, args.ab_report, threshold=threshold)
             return 0
         elif args.error_report:
             from scripts.error_report import run_error_report

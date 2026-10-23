@@ -299,7 +299,7 @@ class TelegramCurator:
             "/blockwords — list blocked keywords, tap to remove\n"
             "/stats — show author performance stats\n"
             "/ab_report [experiment_id] [threshold] — A/B test report "
-            "(defaults: current experiment, threshold=70)\n"
+            "(defaults: current experiment, production filter threshold)\n"
             "/ab_info — show current A/B test config and all past experiments\n\n"
             "- I send you filtered tweets daily\n"
             "- Use the buttons to tell me what you like\n"
@@ -346,16 +346,16 @@ class TelegramCurator:
     @staticmethod
     def _parse_ab_report_args(
         args: list[str], default_experiment_id: str = ""
-    ) -> tuple[str, int]:
+    ) -> tuple[str, Optional[int]]:
         """Parse /ab_report arguments into (experiment_id, threshold).
 
-        Accepts: no args (configured experiment, threshold 70), a bare
+        Accepts: no args (configured experiment, default threshold), a bare
         threshold (configured experiment), an experiment id, or both.
 
         Raises:
             ValueError: With a user-facing message on bad input.
         """
-        threshold = 70
+        threshold = None  # Caller falls back to the production filter threshold
         if not args:
             experiment_id = default_experiment_id
         elif args[0].lstrip("-").isdigit():

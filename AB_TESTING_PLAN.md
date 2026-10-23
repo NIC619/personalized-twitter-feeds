@@ -24,6 +24,8 @@ Source of truth: `PROMPT_REGISTRY` + `PROMPT_DESCRIPTIONS` in `src/claude_filter
 | V6 | Reason-first | yes | V4, but the model writes its reason *before* the score in each JSON object |
 | V7 | Refreshed interests | yes | V4 + current topic map (FOCIL, ePBS, execution tickets, intents, TEE/AI agents) |
 
+After exp_004, V4 stays the control, so V6 and V7 still each change one variable against it.
+
 V5–V7 each change exactly **one variable** relative to V4, targeting exp_003's
 diagnosis: precision was already 100%, recall only ~55% — good content was
 being under-scored into 50-69, not noise getting through. They are numbered
@@ -76,7 +78,11 @@ silently collecting no data.
 ## Reading the Report
 
 - **Score gap**: Average score on upvoted vs downvoted items per prompt. Bigger gap = better discrimination.
-- **Precision/Recall/F1**: At the configured threshold (default 70). Higher F1 = better overall.
+- **Precision/Recall/F1**: At the given threshold (default: production `FILTER_THRESHOLD`). Higher F1 = better overall —
+  but only when there are downvotes. With none, precision is always 100% and F1 just tracks recall,
+  so the report withholds a verdict.
+- **Send rate**: Share of *all* scored items at or above the threshold (base threshold, ignoring
+  starred/muted offsets) — the volume cost of a prompt's recall.
 - **Wilcoxon signed-rank test**: Statistical significance of the difference between prompts (needs scipy and ≥5 voted items with differing scores).
 - **Recommendation**: Based on F1 comparison with a 5% margin; needs 10+ votes to say anything.
 
@@ -91,6 +97,7 @@ table is the only place old results survive.
 | exp_001 | 2026-03-01 → 03-17 | V1 | V3 (interests-only) | 76 | No clear winner — F1 82.64% vs 82.88%; challenger scored significantly *lower* (Wilcoxon p<0.05) |
 | exp_002 | 2026-03-18 → 04-20 | V1/V2 | V3 | 185 | No clear winner — F1 62.55% vs 66.93% (p=0.189) |
 | exp_003 | 2026-04-20 → 07-18 | V1/V2 | V4 (interests + RAG) | 331 | **V4 wins** — F1 70.97% vs 61.47%, same precision, recall 55% vs 44% (p<0.001) |
+| exp_004 | 2026-07-18 → 10-23 | V4 | V5 (binary) | 314 (0 👎) | **V4 kept** — at production threshold 50: recall 78% vs 71%, send rate 14.2% vs 11.1%. V5 only won at threshold 70 by moving 50-69 scores to 70+; upvoted avg 64.7 vs 65.0 (p=0.148). No downvotes, so precision unmeasurable |
 
 ## Retention
 

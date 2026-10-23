@@ -294,7 +294,7 @@ Must-see (90-100):
 - Puffer Finance, UniFi ecosystem
 
 High interest (75-89):
-- Censorship resistance: FOCIL, inclusion lists (EIP-7547), BRAID, MCP
+- Censorship resistance: FOCIL (EIP-7805), inclusion lists, BRAID, multiple concurrent proposers
 - Market structure: ePBS, PTC, execution tickets/auctions, MEV, OFA, PBS, auction theory, mechanism design
 - Account Abstraction: ERC-4337, EIP-7702, RIP-7702, EIP-8141, session keys, Tempo
 - Intents: ERC-7683, OIF, intent-based architectures
