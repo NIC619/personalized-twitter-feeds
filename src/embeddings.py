@@ -2,15 +2,19 @@
 
 import logging
 import math
+from concurrent.futures import ThreadPoolExecutor
 from typing import Optional
 
 from openai import OpenAI
 
 logger = logging.getLogger(__name__)
 
+# OpenAI accepts up to 2048 inputs per embeddings call; stay well under.
+EMBED_BATCH = 500
+
 
 class EmbeddingManager:
-    """Embedding manager for tweet similarity using OpenAI embeddings."""
+    """Embedding manager for item similarity using OpenAI embeddings."""
 
     def __init__(
         self,
@@ -36,61 +40,80 @@ class EmbeddingManager:
         """Generate embedding for a single text."""
         if not self._client:
             return []
-        response = self._client.embeddings.create(
-            model=self.model,
-            input=text,
-        )
+        response = self._client.embeddings.create(model=self.model, input=text)
         return response.data[0].embedding
 
     def embed_tweet_batch(self, tweets: list[dict]) -> dict[str, list[float]]:
-        """Batch embed multiple tweets. OpenAI supports batch in a single call."""
+        """Embed many items, returning item_id -> vector."""
         if not self._client or not tweets:
             return {}
 
-        texts = [t["text"] for t in tweets]
-        tweet_ids = [t["tweet_id"] for t in tweets]
-
-        response = self._client.embeddings.create(
-            model=self.model,
-            input=texts,
-        )
-
-        result = {}
-        for i, embedding_obj in enumerate(response.data):
-            result[tweet_ids[i]] = embedding_obj.embedding
+        result: dict[str, list[float]] = {}
+        for i in range(0, len(tweets), EMBED_BATCH):
+            chunk = tweets[i : i + EMBED_BATCH]
+            texts = [self._embed_text(t) for t in chunk]
+            response = self._client.embeddings.create(model=self.model, input=texts)
+            for t, emb in zip(chunk, response.data):
+                result[t["tweet_id"]] = emb.embedding
         return result
 
-    def find_similar_voted_tweets(
+    @staticmethod
+    def _embed_text(tweet: dict) -> str:
+        """Text used for embedding: tweet text plus quoted/article text if present."""
+        parts = [tweet.get("text") or ""]
+        quoted = tweet.get("quoted_tweet")
+        if quoted and quoted.get("text"):
+            parts.append(quoted["text"])
+        article = tweet.get("article")
+        if article and article.get("title"):
+            parts.append(article["title"])
+        text = "\n".join(p for p in parts if p).strip()
+        return text or "(empty)"
+
+    def find_neighbors(
         self,
         tweets: list[dict],
-        limit: int = 5,
-    ) -> list[dict]:
-        """Find similar voted tweets for a batch of new tweets.
+        k: int = 3,
+        exclude_self: bool = True,
+        workers: int = 8,
+        embeddings: Optional[dict[str, list[float]]] = None,
+    ) -> dict[str, list[dict]]:
+        """Find the k most similar voted items for *each* input item.
 
-        Embeds new tweets, queries pgvector for similar tweets that have feedback.
+        Args:
+            embeddings: Optional precomputed item_id -> vector map (e.g. read
+                back from the database). When given, no OpenAI call is made.
 
         Returns:
-            List of dicts with: tweet_id, text, author_username, vote, similarity
+            Map item_id -> list of dicts with tweet_id, text, author_username,
+            vote, similarity (descending). Items with no matches are absent.
         """
-        if not self.enabled or not self.db or not tweets:
-            return []
+        if not self.db or not tweets or k <= 0:
+            return {}
 
-        embeddings = self.embed_tweet_batch(tweets)
+        if embeddings is None:
+            if not self.enabled:
+                return {}
+            embeddings = self.embed_tweet_batch(tweets)
         if not embeddings:
-            return []
+            return {}
 
-        all_similar = []
-        seen_ids = set()
-        for tweet_id, embedding in embeddings.items():
-            matches = self.db.find_similar_tweets(embedding, limit=limit)
-            for match in matches:
-                if match["tweet_id"] not in seen_ids:
-                    seen_ids.add(match["tweet_id"])
-                    all_similar.append(match)
+        # Ask for one extra so excluding the item itself still yields k.
+        fetch = k + 1 if exclude_self else k
 
-        # Sort by similarity descending and cap at limit
-        all_similar.sort(key=lambda x: x["similarity"], reverse=True)
-        return all_similar[:limit]
+        def _lookup(item):
+            tweet_id, embedding = item
+            matches = self.db.find_similar_tweets(embedding, limit=fetch)
+            if exclude_self:
+                matches = [m for m in matches if m.get("tweet_id") != tweet_id]
+            return tweet_id, matches[:k]
+
+        neighbors: dict[str, list[dict]] = {}
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            for tweet_id, matches in pool.map(_lookup, embeddings.items()):
+                if matches:
+                    neighbors[tweet_id] = matches
+        return neighbors
 
     def cosine_similarity(self, vec1: list[float], vec2: list[float]) -> float:
         """Calculate cosine similarity between two vectors."""

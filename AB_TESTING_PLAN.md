@@ -1,3 +1,10 @@
+> **Retired 2026-10-30.** The shadow A/B framework (prompt registry V1–V7,
+> `ab_test_scores`, `/ab_report`, `/ab_info`) was removed in favour of offline
+> evaluation against recorded votes: `scripts/eval_prompt.py`. Four experiments
+> over eight months moved F1 by a few points; the only clear win (V4) came from
+> adding feedback examples, not wording. This file is kept for the experiment
+> history below. The `ab_test_scores` table can be dropped.
+
 # A/B Testing: Claude Filter Prompts
 
 ## How It Works

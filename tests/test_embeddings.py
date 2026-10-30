@@ -120,46 +120,51 @@ class TestEmbedTweetBatch:
         )
 
 
-class TestFindSimilarVotedTweets:
+class TestFindNeighbors:
     def test_returns_empty_when_disabled(self, manager):
-        assert manager.find_similar_voted_tweets([{"tweet_id": "1", "text": "hi"}]) == []
+        assert manager.find_neighbors([{"tweet_id": "1", "text": "hi"}]) == {}
 
     def test_returns_empty_for_empty_input(self, mock_openai_manager):
-        assert mock_openai_manager.find_similar_voted_tweets([]) == []
+        mock_openai_manager.db = MagicMock()
+        assert mock_openai_manager.find_neighbors([]) == {}
 
-    def test_queries_db_and_deduplicates(self, mock_openai_manager):
+    def test_per_item_neighbors_exclude_self(self, mock_openai_manager):
         mock_openai_manager.db = MagicMock()
 
-        # Mock embed_tweet_batch
-        emb1 = MagicMock()
-        emb1.embedding = [0.1]
-        emb2 = MagicMock()
-        emb2.embedding = [0.2]
-        mock_response = MagicMock()
-        mock_response.data = [emb1, emb2]
+        emb1 = MagicMock(); emb1.embedding = [0.1]
+        emb2 = MagicMock(); emb2.embedding = [0.2]
+        mock_response = MagicMock(); mock_response.data = [emb1, emb2]
         mock_openai_manager._client.embeddings.create.return_value = mock_response
 
-        # DB returns overlapping results for the two queries
-        mock_openai_manager.db.find_similar_tweets.side_effect = [
-            [
-                {"tweet_id": "x", "text": "liked", "author_username": "a", "vote": "up", "similarity": 0.9},
-                {"tweet_id": "y", "text": "disliked", "author_username": "b", "vote": "down", "similarity": 0.8},
-            ],
-            [
-                {"tweet_id": "x", "text": "liked", "author_username": "a", "vote": "up", "similarity": 0.85},
-                {"tweet_id": "z", "text": "another", "author_username": "c", "vote": "up", "similarity": 0.7},
-            ],
-        ]
+        def fake_lookup(embedding, limit):
+            if embedding == [0.1]:
+                return [
+                    {"tweet_id": "1", "text": "itself", "author_username": "a", "vote": "up", "similarity": 1.0},
+                    {"tweet_id": "x", "text": "liked", "author_username": "a", "vote": "up", "similarity": 0.9},
+                    {"tweet_id": "y", "text": "disliked", "author_username": "b", "vote": "down", "similarity": 0.8},
+                ]
+            return []
+
+        mock_openai_manager.db.find_similar_tweets.side_effect = fake_lookup
 
         tweets = [
             {"tweet_id": "1", "text": "new tweet 1"},
             {"tweet_id": "2", "text": "new tweet 2"},
         ]
-        result = mock_openai_manager.find_similar_voted_tweets(tweets, limit=5)
+        result = mock_openai_manager.find_neighbors(tweets, k=2, workers=1)
 
-        # Should deduplicate tweet "x" and sort by similarity
-        assert len(result) == 3
-        assert result[0]["tweet_id"] == "x"
-        assert result[0]["similarity"] == 0.9
-        assert result[1]["tweet_id"] == "y"
-        assert result[2]["tweet_id"] == "z"
+        # Item 1 gets its own neighbours (self excluded), item 2 has none
+        assert set(result) == {"1"}
+        assert [n["tweet_id"] for n in result["1"]] == ["x", "y"]
+        # Asked for k+1 so excluding self still yields k
+        mock_openai_manager.db.find_similar_tweets.assert_any_call([0.1], limit=3)
+
+    def test_embed_text_includes_quote_and_article(self):
+        text = EmbeddingManager._embed_text({
+            "text": "look at this",
+            "quoted_tweet": {"text": "deep dive on preconfs"},
+            "article": {"title": "Based rollups explained"},
+        })
+        assert "look at this" in text
+        assert "deep dive on preconfs" in text
+        assert "Based rollups explained" in text

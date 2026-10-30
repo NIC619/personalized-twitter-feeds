@@ -310,67 +310,37 @@ class TestErrorLog:
 
 # --- A/B experiment trimming ---
 
-def _summary(exp_id, last_scored):
-    return {
-        "experiment_id": exp_id,
-        "control_prompt": "V2",
-        "challenger_prompt": "V4",
-        "pairs": 10,
-        "first_scored": "2026-01-01T00:00:00",
-        "last_scored": last_scored,
-    }
 
+class TestGetScoredIds:
+    def test_empty_input(self, db):
+        assert db.get_scored_ids([]) == set()
+        db.client.table.assert_not_called()
 
-class TestExperimentsToTrim:
-    # list_ab_experiments returns most-recent-first
-    SUMMARIES = [
-        _summary("exp_003", "2026-07-18T00:00:00"),
-        _summary("exp_002", "2026-04-20T00:00:00"),
-        _summary("exp_001", "2026-03-17T00:00:00"),
-    ]
+    def test_returns_only_scored_ids(self, db):
+        chain = db.client.table.return_value.select.return_value.in_.return_value.not_.is_.return_value
+        chain.execute.return_value = MagicMock(data=[{"tweet_id": "1"}, {"tweet_id": "3"}])
 
-    def test_keeps_current_and_previous(self):
-        result = DatabaseClient._experiments_to_trim(self.SUMMARIES, "exp_003", keep=2)
-        assert result == ["exp_001"]
+        result = db.get_scored_ids(["1", "2", "3"])
 
-    def test_current_not_in_summaries_yet(self):
-        # Fresh experiment with no scores saved yet still counts as kept
-        result = DatabaseClient._experiments_to_trim(self.SUMMARIES, "exp_004", keep=2)
-        assert result == ["exp_002", "exp_001"]
-
-    def test_nothing_to_trim(self):
-        result = DatabaseClient._experiments_to_trim(self.SUMMARIES[:2], "exp_003", keep=2)
-        assert result == []
-
-    def test_keep_three(self):
-        result = DatabaseClient._experiments_to_trim(self.SUMMARIES, "exp_003", keep=3)
-        assert result == []
-
-    def test_empty_summaries(self):
-        assert DatabaseClient._experiments_to_trim([], "exp_001", keep=2) == []
-
-
-class TestTrimAbExperiments:
-    def test_deletes_only_old_experiments(self, db):
-        db.list_ab_experiments = MagicMock(
-            return_value=TestExperimentsToTrim.SUMMARIES
+        assert result == {"1", "3"}
+        db.client.table.return_value.select.return_value.in_.assert_called_once_with(
+            "tweet_id", ["1", "2", "3"]
         )
 
-        deleted = db.trim_ab_experiments("exp_003", keep=2)
+    def test_chunks_large_input(self, db):
+        chain = db.client.table.return_value.select.return_value.in_.return_value.not_.is_.return_value
+        chain.execute.return_value = MagicMock(data=[])
 
-        assert deleted == ["exp_001"]
-        delete_mock = db.client.table.return_value.delete
-        delete_mock.assert_called_once_with(returning="minimal")
-        delete_mock.return_value.eq.assert_called_once_with(
-            "experiment_id", "exp_001"
+        db.get_scored_ids([str(i) for i in range(450)], chunk_size=200)
+
+        assert db.client.table.return_value.select.return_value.in_.call_count == 3
+
+    def test_deduplicates_input_ids(self, db):
+        chain = db.client.table.return_value.select.return_value.in_.return_value.not_.is_.return_value
+        chain.execute.return_value = MagicMock(data=[])
+
+        db.get_scored_ids(["1", "1", "2"])
+
+        db.client.table.return_value.select.return_value.in_.assert_called_once_with(
+            "tweet_id", ["1", "2"]
         )
-
-    def test_no_delete_when_nothing_to_trim(self, db):
-        db.list_ab_experiments = MagicMock(
-            return_value=TestExperimentsToTrim.SUMMARIES[:2]
-        )
-
-        deleted = db.trim_ab_experiments("exp_003", keep=2)
-
-        assert deleted == []
-        db.client.table.return_value.delete.assert_not_called()

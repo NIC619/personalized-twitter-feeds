@@ -41,18 +41,12 @@ class Settings(BaseSettings):
                     "'saturday,sunday'). Case-insensitive.",
     )
 
-    # Prompt selection
-    control_prompt: str = Field(
-        default="V2",
-        description="PROMPT_REGISTRY key for the production/control prompt. "
-                    "Set to another key (e.g. 'V5') to promote an A/B winner "
-                    "without code changes.",
+    # Exploration: random below-threshold items sent each run (marked 🎲)
+    # so recall below the threshold can be measured from votes.
+    exploration_per_run: int = Field(
+        default=2,
+        description="Number of random below-threshold items to send per run for recall measurement",
     )
-
-    # A/B Testing
-    ab_test_enabled: bool = Field(default=False, description="Enable A/B testing of Claude filter prompts")
-    ab_test_experiment_id: str = Field(default="", description="Experiment ID for the current A/B test")
-    ab_test_challenger_prompt: str = Field(default="V1", description="Prompt registry key for the challenger prompt")
 
     # Environment / deployment
     development_mode: bool = Field(
@@ -74,7 +68,8 @@ class Settings(BaseSettings):
     rag_enabled: bool = Field(default=True, description="Enable RAG context in Claude prompts (requires OpenAI key)")
     openai_api_key: Optional[str] = Field(default=None, description="OpenAI API key for embeddings")
     embedding_model: str = Field(default="text-embedding-3-small", description="OpenAI embedding model")
-    rag_similarity_limit: int = Field(default=5, description="Max similar tweets to inject as RAG context")
+    rag_similarity_limit: int = Field(default=3, description="Nearest voted neighbours attached to each item for scoring")
+    claude_model: str = Field(default="claude-sonnet-4-6", description="Claude model used for scoring")
 
     model_config = {
         "env_file": ".env",

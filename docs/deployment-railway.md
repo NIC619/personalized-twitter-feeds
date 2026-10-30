@@ -39,8 +39,9 @@ This project deploys as a single always-on **Web** service on Railway. One proce
 - `SCHEDULE_SKIP_WEEKDAYS` (default empty) — comma-separated weekday names to skip (e.g. `sunday` or `saturday,sunday`). Weekday is evaluated in `SCHEDULE_TIMEZONE`.
 - `FETCH_HOURS`, `MAX_TWEETS`, `FILTER_THRESHOLD`
 - `FAVORITE_THRESHOLD_OFFSET`, `MUTED_THRESHOLD_OFFSET`, `STARRED_AUTHOR_MAX_TWEETS`
-- `RAG_ENABLED`, `EMBEDDING_MODEL`, `RAG_SIMILARITY_LIMIT`
-- `AB_TEST_ENABLED`, `AB_TEST_EXPERIMENT_ID`, `AB_TEST_CHALLENGER_PROMPT`
+- `RAG_ENABLED`, `EMBEDDING_MODEL`, `RAG_SIMILARITY_LIMIT` (neighbours per item)
+- `EXPLORATION_PER_RUN`, `CLAUDE_MODEL`
+- Removed (ignored if still set): `CONTROL_PROMPT`, `AB_TEST_ENABLED`, `AB_TEST_EXPERIMENT_ID`, `AB_TEST_CHALLENGER_PROMPT`
 
 ### Timezone: `SCHEDULE_TIMEZONE` vs Railway's `TZ`
 

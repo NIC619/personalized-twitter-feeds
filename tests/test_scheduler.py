@@ -14,6 +14,7 @@ def components():
     claude = MagicMock()
     telegram = AsyncMock()
     db = MagicMock()
+    db.get_scored_ids.return_value = set()
     return twitter, claude, telegram, db
 
 
@@ -22,7 +23,7 @@ def mock_embedding_manager():
     """Mocked EmbeddingManager."""
     mgr = MagicMock()
     mgr.enabled = True
-    mgr.find_similar_voted_tweets.return_value = []
+    mgr.find_neighbors.return_value = {}
     mgr.generate_embedding.return_value = [0.1] * 1536
     return mgr
 
@@ -46,52 +47,27 @@ def curator(components):
 
 class TestDeduplicateTweets:
     def test_skip_already_scored(self, curator):
-        curator.db.get_tweet_by_id.return_value = {
-            "tweet_id": "1",
-            "filter_score": 80,
-        }
-
-        tweets = [{"tweet_id": "1", "text": "old"}]
-        result = curator._deduplicate_tweets(tweets)
-
-        assert result == []
+        curator.db.get_scored_ids.return_value = {"1"}
+        assert curator._deduplicate_tweets([{"tweet_id": "1", "text": "old"}]) == []
 
     def test_keep_new_tweet(self, curator):
-        curator.db.get_tweet_by_id.return_value = None
+        curator.db.get_scored_ids.return_value = set()
+        result = curator._deduplicate_tweets([{"tweet_id": "1", "text": "new"}])
+        assert [t["tweet_id"] for t in result] == ["1"]
 
-        tweets = [{"tweet_id": "1", "text": "new"}]
-        result = curator._deduplicate_tweets(tweets)
-
-        assert len(result) == 1
-        assert result[0]["tweet_id"] == "1"
-
-    def test_keep_existing_without_score(self, curator):
-        curator.db.get_tweet_by_id.return_value = {
-            "tweet_id": "1",
-            "filter_score": None,
-        }
-
-        tweets = [{"tweet_id": "1", "text": "unscored"}]
-        result = curator._deduplicate_tweets(tweets)
-
-        assert len(result) == 1
-
-    def test_mixed_new_and_old(self, curator):
-        def mock_get(tweet_id):
-            if tweet_id == "old":
-                return {"tweet_id": "old", "filter_score": 50}
-            return None
-
-        curator.db.get_tweet_by_id.side_effect = mock_get
-
+    def test_mixed_new_and_old_single_query(self, curator):
+        curator.db.get_scored_ids.return_value = {"old"}
         tweets = [
             {"tweet_id": "old", "text": "already scored"},
             {"tweet_id": "new", "text": "fresh"},
         ]
         result = curator._deduplicate_tweets(tweets)
+        assert [t["tweet_id"] for t in result] == ["new"]
+        curator.db.get_scored_ids.assert_called_once_with(["old", "new"])
 
-        assert len(result) == 1
-        assert result[0]["tweet_id"] == "new"
+    def test_empty(self, curator):
+        assert curator._deduplicate_tweets([]) == []
+        curator.db.get_scored_ids.assert_not_called()
 
 
 # --- run_daily_curation ---
@@ -115,7 +91,6 @@ class TestRunDailyCuration:
         ]
         curator.twitter.fetch_timeline.return_value = tweets
         curator.twitter.fetch_user_tweets.return_value = []
-        curator.db.get_tweet_by_id.return_value = None  # all new
         curator.db.get_favorite_authors.return_value = ["fav_author"]
         curator.db.get_muted_authors.return_value = ["muted_author"]
 
@@ -150,7 +125,6 @@ class TestRunDailyCuration:
         ]
         curator.twitter.fetch_timeline.return_value = tweets
         curator.twitter.fetch_user_tweets.return_value = []
-        curator.db.get_tweet_by_id.return_value = None
         curator.db.get_favorite_authors.return_value = ["fav"]
         curator.db.get_muted_authors.return_value = []
 
@@ -180,7 +154,7 @@ class TestRunDailyCuration:
         curator.twitter.fetch_timeline.return_value = tweets
         curator.twitter.fetch_user_tweets.return_value = []
         curator.db.get_favorite_authors.return_value = []
-        curator.db.get_tweet_by_id.return_value = {"tweet_id": "1", "filter_score": 80}
+        curator.db.get_scored_ids.return_value = {"1"}
 
         stats = await curator.run_daily_curation()
 
@@ -274,47 +248,80 @@ class TestFeedbackHandler:
         db.save_feedback.assert_called_once()
 
 
-class TestFormatRagContext:
-    def test_format_liked_and_disliked(self):
-        similar = [
-            {"tweet_id": "1", "text": "Great technical content about rollups", "author_username": "vitalik", "vote": "up", "similarity": 0.92},
-            {"tweet_id": "2", "text": "Buy this meme coin now", "author_username": "spammer", "vote": "down", "similarity": 0.85},
-        ]
-        result = DailyCurator._format_rag_context(similar)
+class TestPickExploration:
+    def _curator(self, components, n):
+        twitter, claude, telegram, db = components
+        return DailyCurator(
+            twitter=twitter, claude=claude, telegram=telegram, db=db,
+            filter_threshold=70, favorite_threshold_offset=20,
+            muted_threshold_offset=15, exploration_per_run=n,
+        )
 
-        assert "Liked tweets" in result
-        assert "Disliked tweets" in result
-        assert "@vitalik" in result
-        assert "@spammer" in result
-        assert "0.92" in result
-        assert "0.85" in result
-
-    def test_format_only_liked(self):
-        similar = [
-            {"tweet_id": "1", "text": "Good stuff", "author_username": "dev", "vote": "up", "similarity": 0.9},
+    def test_picks_only_scored_non_passed(self, components):
+        curator = self._curator(components, 5)
+        scored = [
+            {"tweet_id": "pass", "filter_score": 90, "filter_reason": "x"},
+            {"tweet_id": "low", "filter_score": 30, "filter_reason": "x"},
+            {"tweet_id": "unscored", "filter_score": 0, "filter_reason": "Not scored by Claude"},
+            {"tweet_id": "none"},
         ]
-        result = DailyCurator._format_rag_context(similar)
-        assert "Liked tweets" in result
-        assert "Disliked tweets" not in result
+        picked = curator._pick_exploration(scored, [scored[0]])
+        assert [t["tweet_id"] for t in picked] == ["low"]
 
-    def test_format_only_disliked(self):
-        similar = [
-            {"tweet_id": "1", "text": "Bad stuff", "author_username": "troll", "vote": "down", "similarity": 0.8},
+    def test_respects_limit(self, components):
+        curator = self._curator(components, 2)
+        scored = [{"tweet_id": str(i), "filter_score": 10, "filter_reason": "x"} for i in range(10)]
+        assert len(curator._pick_exploration(scored, [])) == 2
+
+    def test_disabled(self, components):
+        curator = self._curator(components, 0)
+        scored = [{"tweet_id": "1", "filter_score": 10, "filter_reason": "x"}]
+        assert curator._pick_exploration(scored, []) == []
+
+    @pytest.mark.asyncio
+    async def test_exploration_items_sent_and_flagged(self, components):
+        twitter, claude, telegram, db = components
+        curator = self._curator(components, 1)
+        tweets = [
+            {"tweet_id": "1", "author_username": "dev", "text": "good", "is_retweet": False},
+            {"tweet_id": "2", "author_username": "dev", "text": "meh", "is_retweet": False},
         ]
-        result = DailyCurator._format_rag_context(similar)
-        assert "Liked tweets" not in result
-        assert "Disliked tweets" in result
+        twitter.fetch_timeline.return_value = tweets
+        twitter.fetch_user_tweets.return_value = []
+        db.get_favorite_authors.return_value = []
+        db.get_muted_authors.return_value = []
+
+        def fake_filter(items, threshold, **kw):
+            items[0].update(filter_score=90, filter_reason="great", filtered=True)
+            items[1].update(filter_score=20, filter_reason="meh", filtered=False)
+            return [items[0]]
+        claude.filter_tweets.side_effect = fake_filter
+
+        async def mock_digest(groups, **kw):
+            return [(t, 101 + i) for i, g in enumerate(groups) for t in g]
+        telegram.send_daily_digest.side_effect = mock_digest
+
+        stats = await curator.run_daily_curation()
+
+        assert stats["exploration"] == 1
+        assert stats["filtered"] == 2
+        sent = [t for g in telegram.send_daily_digest.call_args[0][0] for t in g]
+        flagged = [t for t in sent if t.get("exploration")]
+        assert [t["tweet_id"] for t in flagged] == ["2"]
+        saved = db.save_tweets.call_args[0][0]
+        assert any(t.get("exploration") for t in saved if t["tweet_id"] == "2")
 
 
 class TestRagInPipeline:
     @pytest.mark.asyncio
-    async def test_rag_context_passed_to_claude(self, components, mock_embedding_manager):
+    async def test_neighbors_passed_to_claude(self, components, mock_embedding_manager):
         twitter, claude, telegram, db = components
 
         curator = DailyCurator(
             twitter=twitter, claude=claude, telegram=telegram, db=db,
             filter_threshold=70, favorite_threshold_offset=20,
             muted_threshold_offset=15, embedding_manager=mock_embedding_manager,
+            neighbors_per_item=4,
         )
 
         tweets = [
@@ -322,13 +329,12 @@ class TestRagInPipeline:
         ]
         twitter.fetch_timeline.return_value = tweets
         twitter.fetch_user_tweets.return_value = []
-        db.get_tweet_by_id.return_value = None
         db.get_favorite_authors.return_value = []
         db.get_muted_authors.return_value = []
 
-        mock_embedding_manager.find_similar_voted_tweets.return_value = [
-            {"tweet_id": "x", "text": "liked tweet", "author_username": "a", "vote": "up", "similarity": 0.9},
-        ]
+        mock_embedding_manager.find_neighbors.return_value = {
+            "1": [{"tweet_id": "x", "text": "liked tweet", "author_username": "a", "vote": "up", "similarity": 0.9}],
+        }
 
         scored = [dict(tweets[0], filter_score=80, filter_reason="good", filtered=True)]
         claude.filter_tweets.return_value = scored
@@ -338,11 +344,31 @@ class TestRagInPipeline:
 
         stats = await curator.run_daily_curation()
 
-        # Verify rag_context was passed to Claude
+        mock_embedding_manager.find_neighbors.assert_called_once_with(tweets, k=4)
         call_args = claude.filter_tweets.call_args
-        assert call_args[1].get("rag_context") is not None
-        assert "liked tweet" in call_args[1]["rag_context"]
-        assert stats.get("rag_matches") == 1
+        assert call_args[1]["neighbors"] == mock_embedding_manager.find_neighbors.return_value
+        assert stats.get("rag_items_with_neighbors") == 1
+
+    @pytest.mark.asyncio
+    async def test_neighbor_failure_is_non_fatal(self, components, mock_embedding_manager):
+        twitter, claude, telegram, db = components
+        curator = DailyCurator(
+            twitter=twitter, claude=claude, telegram=telegram, db=db,
+            filter_threshold=70, favorite_threshold_offset=20,
+            muted_threshold_offset=15, embedding_manager=mock_embedding_manager,
+        )
+        tweets = [{"tweet_id": "1", "author_username": "dev", "text": "x", "is_retweet": False}]
+        twitter.fetch_timeline.return_value = tweets
+        twitter.fetch_user_tweets.return_value = []
+        db.get_favorite_authors.return_value = []
+        db.get_muted_authors.return_value = []
+        mock_embedding_manager.find_neighbors.side_effect = RuntimeError("pgvector down")
+        claude.filter_tweets.return_value = []
+
+        stats = await curator.run_daily_curation()
+
+        assert stats["errors"] == []
+        assert claude.filter_tweets.call_args[1]["neighbors"] is None
 
     @pytest.mark.asyncio
     async def test_pipeline_works_without_embedding_manager(self, components):
@@ -359,7 +385,6 @@ class TestRagInPipeline:
         ]
         twitter.fetch_timeline.return_value = tweets
         twitter.fetch_user_tweets.return_value = []
-        db.get_tweet_by_id.return_value = None
         db.get_favorite_authors.return_value = []
         db.get_muted_authors.return_value = []
 
@@ -373,4 +398,4 @@ class TestRagInPipeline:
 
         # Should work fine with no RAG
         call_args = claude.filter_tweets.call_args
-        assert call_args[1].get("rag_context") is None
+        assert call_args[1].get("neighbors") is None

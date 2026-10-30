@@ -32,9 +32,12 @@
 - [x] Inject RAG context into Claude prompt (liked/disliked tweets with similarity scores)
 - [x] Backfill script for existing feedback (`scripts/backfill_embeddings.py`)
 - [x] Graceful fallback: works without OpenAI key (uses V1 prompt, no RAG)
+- [x] Per-item nearest voted neighbours attached to each scored item (replaced 5 global examples)
+- [x] Offline eval against all votes: `scripts/eval_prompt.py` (AUC, recall, bands)
+- [x] Exploration: random below-threshold items sent each run, marked 🎲
 - [ ] Track accuracy: % of sent tweets that got 👍
 
-### A/B Testing Framework ✅
+### A/B Testing Framework (retired 2026-10-30 — see AB_TESTING_PLAN.md)
 - [x] Shadow scoring: score every tweet with control + challenger prompt, send based on control only
 - [x] Prompt registry (`PROMPT_REGISTRY` in `claude_filter.py`) for named prompt variants
 - [x] `ab_test_scores` table with paired entries per experiment
@@ -43,7 +46,6 @@
 - [x] Analysis report: score gap, precision/recall/F1, Wilcoxon signed-rank test
 - [x] CLI: `--ab-report <experiment_id>`
 - [x] 5 prompt variants: V1 (bio+rubric), V2 (V1+RAG), V3 (interests-only), V4 (binary), V5 (strict)
-- [ ] Auto-promote winning prompt after N votes
 
 ### Keyword Blocklist ✅
 - [x] `blocked_keywords` table + CRUD in DatabaseClient

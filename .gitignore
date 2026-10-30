@@ -43,3 +43,4 @@ curator.log
 # OS
 .DS_Store
 Thumbs.db
+eval_runs/

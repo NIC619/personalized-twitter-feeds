@@ -190,22 +190,26 @@ python scripts/count_twitter_timeline.py --hours 48 --max 300
 
 Use this to check if `MAX_TWEETS` is high enough to capture all your timeline activity.
 
-### A/B Test Prompts
+### Offline Prompt Evaluation
 
-Compare different Claude filter prompts to find which best predicts your preferences. See [AB_TESTING_PLAN.md](AB_TESTING_PLAN.md) for full details.
+Every vote you cast is a label. `scripts/eval_prompt.py` re-scores all voted items with
+the current prompt and reports how well the scores separate 👍 from 👎, so a prompt,
+profile or model change can be judged in minutes instead of waiting months for live votes.
+This replaced the shadow A/B framework (history kept in [AB_TESTING_PLAN.md](AB_TESTING_PLAN.md)).
 
 ```bash
-# 1. Enable in .env:
-#    AB_TEST_ENABLED=true
-#    AB_TEST_EXPERIMENT_ID=exp_001
-#    AB_TEST_CHALLENGER_PROMPT=V3
-
-# 2. Run normally — shadow scoring happens automatically
-python main.py --once
-
-# 3. After voting on ~30-50 tweets, generate report
-python main.py --ab-report exp_001
+python scripts/eval_prompt.py --label baseline                      # production model + neighbours
+python scripts/eval_prompt.py --label no-rag --no-rag               # isolate the RAG effect
+python scripts/eval_prompt.py --label sonnet55 --model claude-sonnet-5-5
+python scripts/eval_prompt.py --label profile-v2 --profile-file my_profile.md
+python scripts/eval_prompt.py --compare baseline no-rag sonnet55    # side-by-side report
 ```
+
+Runs are saved under `eval_runs/` and the report always includes a `stored@send` column
+(the scores production gave the items when they were sent). The headline metric is AUC.
+Read the caveats at the top of the script: labels only exist for items that were sent,
+so recall is over previously-sent upvotes. The 🎲 exploration items (see below) are the
+only unbiased sample of what the filter misses.
 
 ### Monthly Error Report
 
@@ -228,8 +232,6 @@ python main.py --schedule          # Run daily at configured hour (waits for nex
 python main.py --schedule --run-once-on-startup  # Also run one curation immediately
 python main.py --bot-only          # Run Telegram bot only
 python main.py --test              # Test all components
-python main.py --ab-report exp_001 # A/B test report for an experiment
-python main.py --ab-report exp_001 --threshold 80  # Custom threshold for precision/recall
 python main.py --error-report 2026-03  # Monthly error log report
 python main.py --error-report last     # Error log report for previous month
 ```
@@ -264,7 +266,8 @@ twitter-curator/
 │   └── test_blog_fetcher.py       # BlogFetcher and content utils unit tests
 ├── scripts/
 │   ├── setup_database.py          # Database schema SQL
-│   ├── ab_test_report.py          # A/B test analysis report
+│   ├── eval_prompt.py             # Offline prompt/model evaluation against votes
+│   ├── migrations/                # Incremental SQL to run in Supabase
 │   ├── error_report.py            # Monthly error log report
 │   ├── test_components.py         # Integration testing (live APIs)
 │   └── count_twitter_timeline.py  # Count tweets from Twitter
@@ -279,10 +282,11 @@ twitter-curator/
 ### Tweets
 1. **Fetch**: Pulls tweets from your home timeline (last 24 hours)
 2. **Pre-filter**: Items containing blocked keywords (managed via `/blockword`) are dropped before Claude scoring. Matching is whole-word, case-insensitive, across tweet text, X Article title/body, and quoted-tweet text. Content from starred authors is currently exempt from the blocklist.
-3. **Filter**: Claude scores each tweet 0-100 based on your interests
-4. **Send**: Tweets scoring ≥70 are sent to Telegram with 👍/👎 buttons
-5. **Store**: All tweets and feedback saved to Supabase
-6. **Learn**: Past feedback improves future filtering via RAG
+3. **Neighbours**: Each tweet is embedded and its 3 most similar past votes are looked up in pgvector
+4. **Filter**: Claude scores each tweet 0-100 against your profile, seeing each tweet's own past-vote neighbours. Output is a strict tool-use schema, no JSON parsing.
+5. **Send**: Tweets scoring ≥70 are sent to Telegram with 👍/👎 buttons, plus 2 random below-threshold items marked 🎲 (exploration) so your votes also measure what the filter misses
+6. **Store**: All tweets and feedback saved to Supabase
+7. **Learn**: Every vote becomes a neighbour for future scoring and a label for `scripts/eval_prompt.py`
 
 ### Blog Posts
 1. **Like**: Send `/like <blog_url>` to fetch, score, and save a blog post you enjoyed
@@ -338,7 +342,8 @@ The choices below reflect how I personally want this tool to behave. They are no
 
 ### Feedback & RAG
 
-- **RAG context is built only from explicitly voted tweets** (top-5 similar) — unvoted tweets don't influence future scoring. Trusts explicit signal only; ignores the implicit "sent but never reacted to" signal.
+- **Neighbours come only from explicitly voted items** (top-3 per item, `RAG_SIMILARITY_LIMIT`) — unvoted tweets don't influence future scoring. Trusts explicit signal only; ignores the implicit "sent but never reacted to" signal.
+- **Exploration over pure exploitation**: `EXPLORATION_PER_RUN` (default 2) below-threshold items are sent each run, clearly marked 🎲. Votes on them are the only unbiased measurement of recall.
 
 
 
@@ -351,10 +356,10 @@ The choices below reflect how I personally want this tool to behave. They are no
 | `SCHEDULE_HOUR`     | 9           | Hour to run daily curation (24h format) |
 | `SCHEDULE_TIMEZONE` | Asia/Taipei | Timezone for scheduling                 |
 | `SCHEDULE_SKIP_WEEKDAYS` | (empty) | Comma-separated weekday names to skip in scheduled mode (e.g. `sunday`). Evaluated in `SCHEDULE_TIMEZONE`. |
-| `RAG_ENABLED`       | true        | Enable RAG context in Claude prompts    |
-| `AB_TEST_ENABLED`   | false       | Enable A/B testing of filter prompts    |
-| `AB_TEST_EXPERIMENT_ID` | -       | Experiment ID for current A/B test      |
-| `AB_TEST_CHALLENGER_PROMPT` | V1  | Prompt registry key for challenger      |
+| `RAG_ENABLED`       | true        | Attach voted neighbours to items when scoring |
+| `RAG_SIMILARITY_LIMIT` | 3        | Neighbours per item                     |
+| `EXPLORATION_PER_RUN` | 2         | Random below-threshold items sent per run (🎲) |
+| `CLAUDE_MODEL`      | claude-sonnet-4-6 | Scoring model                     |
 
 
 ## Troubleshooting

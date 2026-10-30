@@ -10,7 +10,7 @@ logger = logging.getLogger(__name__)
 
 
 class DatabaseClient:
-    """Supabase database client for tweets, feedback, and embeddings."""
+    """Supabase database client for items, feedback, and embeddings."""
 
     def __init__(self, url: str, key: str):
         """Initialize Supabase client.
@@ -62,6 +62,7 @@ class DatabaseClient:
                 "filter_score": tweet.get("filter_score"),
                 "filter_reason": tweet.get("filter_reason"),
                 "content_type": tweet.get("content_type", "tweet"),
+                "exploration": bool(tweet.get("exploration", False)),
             }
             records.append(record)
 
@@ -229,6 +230,69 @@ class DatabaseClient:
         except Exception as e:
             logger.error(f"Error getting tweet: {e}")
             raise
+
+    def get_scored_ids(self, tweet_ids: list[str], chunk_size: int = 200) -> set[str]:
+        """Return the subset of ``tweet_ids`` that already have a filter score.
+
+        One ``IN`` query per chunk instead of one round trip per item.
+        """
+        scored: set[str] = set()
+        ids = list(dict.fromkeys(tweet_ids))
+        for i in range(0, len(ids), chunk_size):
+            chunk = ids[i : i + chunk_size]
+            try:
+                result = (
+                    self.client.table("tweets")
+                    .select("tweet_id")
+                    .in_("tweet_id", chunk)
+                    .not_.is_("filter_score", "null")
+                    .execute()
+                )
+            except Exception as e:
+                logger.error(f"Error checking scored ids: {e}")
+                raise
+            scored.update(row["tweet_id"] for row in result.data or [])
+        return scored
+
+    def get_labeled_items(self, page_size: int = 1000) -> list[dict]:
+        """All voted items joined with their content, for offline evaluation.
+
+        Returns:
+            List of item dicts (tweets-table columns) each carrying
+            ``user_vote``, ``vote_reason`` and ``voted_at``. If an item was
+            voted more than once the latest vote wins.
+        """
+        rows: list[dict] = []
+        offset = 0
+        while True:
+            try:
+                result = (
+                    self.client.table("feedback")
+                    .select("tweet_id,user_vote,notes,voted_at,tweets(*)")
+                    .order("voted_at")
+                    .range(offset, offset + page_size - 1)
+                    .execute()
+                )
+            except Exception as e:
+                logger.error(f"Error loading labeled items: {e}")
+                raise
+            page = result.data or []
+            rows.extend(page)
+            if len(page) < page_size:
+                break
+            offset += page_size
+
+        by_id: dict[str, dict] = {}
+        for row in rows:  # ordered by voted_at asc, so later rows overwrite
+            tweet = row.get("tweets")
+            if not tweet:
+                continue
+            item = dict(tweet)
+            item["user_vote"] = row["user_vote"]
+            item["vote_reason"] = row.get("notes")
+            item["voted_at"] = row.get("voted_at")
+            by_id[item["tweet_id"]] = item
+        return list(by_id.values())
 
     def save_favorite_author(self, username: str) -> dict:
         """Save an author as a favorite.
@@ -540,6 +604,34 @@ class DatabaseClient:
             logger.error(f"Error finding similar tweets: {e}")
             return []
 
+    def get_embeddings(
+        self, tweet_ids: list[str], chunk_size: int = 100
+    ) -> dict[str, list[float]]:
+        """Read stored embedding vectors for the given ids (missing ids omitted)."""
+        import json
+
+        out: dict[str, list[float]] = {}
+        ids = list(dict.fromkeys(tweet_ids))
+        for i in range(0, len(ids), chunk_size):
+            chunk = ids[i : i + chunk_size]
+            try:
+                result = (
+                    self.client.table("tweet_embeddings")
+                    .select("tweet_id,embedding")
+                    .in_("tweet_id", chunk)
+                    .execute()
+                )
+            except Exception as e:
+                logger.error(f"Error reading embeddings: {e}")
+                raise
+            for row in result.data or []:
+                vec = row.get("embedding")
+                if isinstance(vec, str):  # PostgREST serialises vector as text
+                    vec = json.loads(vec)
+                if vec:
+                    out[row["tweet_id"]] = vec
+        return out
+
     def has_embedding(self, tweet_id: str) -> bool:
         """Check if an embedding exists for a tweet.
 
@@ -560,207 +652,6 @@ class DatabaseClient:
         except Exception as e:
             logger.error(f"Error checking embedding: {e}")
             return False
-
-    def save_ab_test_scores(
-        self,
-        experiment_id: str,
-        control_scores: list[dict],
-        control_key: str,
-        challenger_scores: list[dict],
-        challenger_key: str,
-    ) -> None:
-        """Save A/B test scores for both control and challenger prompts.
-
-        Args:
-            experiment_id: Experiment identifier
-            control_scores: Scores from control prompt [{tweet_id, score, reason}]
-            control_key: Prompt registry key for control (e.g. 'V1')
-            challenger_scores: Scores from challenger prompt
-            challenger_key: Prompt registry key for challenger (e.g. 'V3')
-        """
-        records = []
-        for s in control_scores:
-            records.append({
-                "tweet_id": s["tweet_id"],
-                "experiment_id": experiment_id,
-                "prompt_variant": "control",
-                "prompt_version": control_key,
-                "score": s["score"],
-                "reason": s.get("reason", ""),
-                "is_control": True,
-            })
-        for s in challenger_scores:
-            records.append({
-                "tweet_id": s["tweet_id"],
-                "experiment_id": experiment_id,
-                "prompt_variant": "challenger",
-                "prompt_version": challenger_key,
-                "score": s["score"],
-                "reason": s.get("reason", ""),
-                "is_control": False,
-            })
-
-        if not records:
-            return
-
-        try:
-            self.client.table("ab_test_scores").insert(records).execute()
-            logger.info(
-                f"Saved {len(records)} A/B test scores for experiment '{experiment_id}'"
-            )
-        except Exception as e:
-            logger.error(f"Error saving A/B test scores: {e}")
-            raise
-
-    def get_ab_test_results(self, experiment_id: str) -> list[dict]:
-        """Get paired A/B test results with feedback via RPC.
-
-        Paginated: PostgREST caps responses at 1000 rows, so a single call
-        would silently truncate large experiments.
-
-        Args:
-            experiment_id: Experiment identifier
-
-        Returns:
-            List of paired score records with feedback
-        """
-        all_rows: list[dict] = []
-        page_size = 1000
-        offset = 0
-        try:
-            while True:
-                result = (
-                    self.client.rpc(
-                        "get_ab_test_analysis",
-                        {"p_experiment_id": experiment_id},
-                    )
-                    # Stable order — the SQL function has no ORDER BY, and
-                    # pagination without one can skip/duplicate rows
-                    .order("tweet_id")
-                    .range(offset, offset + page_size - 1)
-                    .execute()
-                )
-                rows = result.data or []
-                all_rows.extend(rows)
-                if len(rows) < page_size:
-                    break
-                offset += page_size
-            return all_rows
-        except Exception as e:
-            logger.error(f"Error getting A/B test results: {e}")
-            raise
-
-    def list_ab_experiments(self) -> list[dict]:
-        """List all A/B experiments with prompt versions, pair counts and date range.
-
-        Returns:
-            List of dicts sorted by most recent activity first:
-            [{experiment_id, control_prompt, challenger_prompt, pairs,
-              first_scored, last_scored}]
-        """
-        experiments: dict[str, dict] = {}
-        page_size = 1000
-        offset = 0
-        try:
-            while True:
-                result = (
-                    self.client.table("ab_test_scores")
-                    .select("experiment_id,prompt_version,is_control,scored_at")
-                    .order("scored_at")
-                    .range(offset, offset + page_size - 1)
-                    .execute()
-                )
-                rows = result.data or []
-                for row in rows:
-                    exp = experiments.setdefault(row["experiment_id"], {
-                        "experiment_id": row["experiment_id"],
-                        "control_prompts": set(),
-                        "challenger_prompts": set(),
-                        "pairs": 0,
-                        "first_scored": row["scored_at"],
-                        "last_scored": row["scored_at"],
-                    })
-                    if row.get("is_control"):
-                        exp["control_prompts"].add(row["prompt_version"])
-                        exp["pairs"] += 1
-                    else:
-                        exp["challenger_prompts"].add(row["prompt_version"])
-                    if row["scored_at"] < exp["first_scored"]:
-                        exp["first_scored"] = row["scored_at"]
-                    if row["scored_at"] > exp["last_scored"]:
-                        exp["last_scored"] = row["scored_at"]
-                if len(rows) < page_size:
-                    break
-                offset += page_size
-        except Exception as e:
-            logger.error(f"Error listing A/B experiments: {e}")
-            raise
-
-        summaries = []
-        for exp in experiments.values():
-            summaries.append({
-                "experiment_id": exp["experiment_id"],
-                "control_prompt": "/".join(sorted(exp["control_prompts"])) or "?",
-                "challenger_prompt": "/".join(sorted(exp["challenger_prompts"])) or "?",
-                "pairs": exp["pairs"],
-                "first_scored": exp["first_scored"],
-                "last_scored": exp["last_scored"],
-            })
-        summaries.sort(key=lambda s: s["last_scored"], reverse=True)
-        return summaries
-
-    @staticmethod
-    def _experiments_to_trim(
-        summaries: list[dict], current_experiment_id: str, keep: int
-    ) -> list[str]:
-        """Pick experiment IDs to delete, keeping the current one plus the
-        most recently active others up to `keep` total.
-
-        Args:
-            summaries: Output of list_ab_experiments (most recent first)
-            current_experiment_id: Always kept
-            keep: Total number of experiments to keep
-
-        Returns:
-            Experiment IDs to delete.
-        """
-        keep_ids = {current_experiment_id}
-        for s in summaries:
-            if len(keep_ids) >= keep:
-                break
-            keep_ids.add(s["experiment_id"])
-        return [
-            s["experiment_id"] for s in summaries
-            if s["experiment_id"] not in keep_ids
-        ]
-
-    def trim_ab_experiments(
-        self, current_experiment_id: str, keep: int = 2
-    ) -> list[str]:
-        """Delete A/B scores from experiments older than the `keep` most
-        recent ones (the current experiment always counts as kept).
-
-        Args:
-            current_experiment_id: The active experiment — never deleted
-            keep: Total experiments to keep (default: current + previous)
-
-        Returns:
-            List of deleted experiment IDs (empty if nothing to trim).
-        """
-        summaries = self.list_ab_experiments()
-        to_delete = self._experiments_to_trim(
-            summaries, current_experiment_id, keep
-        )
-        for exp_id in to_delete:
-            try:
-                self.client.table("ab_test_scores").delete(
-                    returning="minimal"
-                ).eq("experiment_id", exp_id).execute()
-                logger.info(f"Trimmed A/B scores for old experiment '{exp_id}'")
-            except Exception as e:
-                logger.error(f"Error trimming A/B experiment '{exp_id}': {e}")
-                raise
-        return to_delete
 
     def get_newsletter_preferences(self, domain: str) -> dict | None:
         """Get newsletter section preferences for a domain.

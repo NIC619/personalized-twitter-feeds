@@ -1,11 +1,16 @@
 """Tests for ClaudeFilter."""
 
 import json
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
 
-from src.claude_filter import ClaudeFilter
+from src.claude_filter import (
+    DEFAULT_PROFILE,
+    SCORE_TOOL,
+    ClaudeFilter,
+)
 
 
 @pytest.fixture
@@ -16,321 +21,172 @@ def claude_filter():
     return cf
 
 
-# --- _parse_response ---
+def tool_response(scores: list[dict]):
+    """Build a fake Messages response carrying a submit_scores tool call."""
+    block = SimpleNamespace(type="tool_use", name="submit_scores", input={"scores": scores})
+    return SimpleNamespace(content=[block], stop_reason="tool_use")
 
-class TestParseResponse:
-    def test_clean_json(self, claude_filter):
-        raw = json.dumps([
-            {"tweet_id": "1", "score": 90, "reason": "Great technical content"},
-            {"tweet_id": "2", "score": 40, "reason": "Not relevant"},
+
+def prompt_sent(claude_filter) -> str:
+    call = claude_filter.client.messages.create.call_args
+    return call[1]["messages"][0]["content"]
+
+
+# --- _extract_scores ---
+
+class TestExtractScores:
+    def test_extracts_valid_scores(self):
+        resp = tool_response([
+            {"tweet_id": "1", "score": 85, "reason": "Relevant"},
+            {"tweet_id": "2", "score": 10, "reason": "Meme"},
         ])
-        result = claude_filter._parse_response(raw)
-        assert len(result) == 2
-        assert result[0] == {"tweet_id": "1", "score": 90, "reason": "Great technical content"}
-        assert result[1] == {"tweet_id": "2", "score": 40, "reason": "Not relevant"}
+        result = ClaudeFilter._extract_scores(resp, {"1", "2"})
+        assert result == [
+            {"tweet_id": "1", "score": 85, "reason": "Relevant"},
+            {"tweet_id": "2", "score": 10, "reason": "Meme"},
+        ]
 
-    def test_markdown_wrapped_json(self, claude_filter):
-        raw = "```json\n" + json.dumps([
-            {"tweet_id": "1", "score": 85, "reason": "Relevant"}
-        ]) + "\n```"
-        result = claude_filter._parse_response(raw)
-        assert len(result) == 1
-        assert result[0]["tweet_id"] == "1"
+    def test_drops_unknown_and_duplicate_ids(self):
+        resp = tool_response([
+            {"tweet_id": "1", "score": 85, "reason": "a"},
+            {"tweet_id": "1", "score": 20, "reason": "dupe"},
+            {"tweet_id": "999", "score": 90, "reason": "hallucinated"},
+        ])
+        result = ClaudeFilter._extract_scores(resp, {"1", "2"})
+        assert [r["tweet_id"] for r in result] == ["1"]
         assert result[0]["score"] == 85
 
-    def test_skips_invalid_items(self, claude_filter):
-        raw = json.dumps([
-            {"tweet_id": "1", "score": 80, "reason": "Good"},
-            "not a dict",
-            42,
-            {"tweet_id": "2", "score": 60, "reason": "Okay"},
+    def test_clamps_and_coerces(self):
+        resp = tool_response([
+            {"tweet_id": 1, "score": 150, "reason": ""},
+            {"tweet_id": "2", "score": "abc", "reason": "x"},
         ])
-        result = claude_filter._parse_response(raw)
-        assert len(result) == 2
-        assert result[0]["tweet_id"] == "1"
-        assert result[1]["tweet_id"] == "2"
+        result = ClaudeFilter._extract_scores(resp, {"1", "2"})
+        assert result == [{"tweet_id": "1", "score": 100, "reason": "No reason provided"}]
 
-    def test_skips_missing_required_fields(self, claude_filter):
-        raw = json.dumps([
-            {"tweet_id": "1", "score": 80, "reason": "Good"},
-            {"tweet_id": "2"},  # missing score
-            {"score": 50},  # missing tweet_id
-            {"reason": "orphan"},  # missing both
-        ])
-        result = claude_filter._parse_response(raw)
-        assert len(result) == 1
-        assert result[0]["tweet_id"] == "1"
-
-    def test_missing_reason_gets_default(self, claude_filter):
-        raw = json.dumps([{"tweet_id": "1", "score": 75}])
-        result = claude_filter._parse_response(raw)
-        assert result[0]["reason"] == "No reason provided"
-
-    def test_tweet_id_coerced_to_string(self, claude_filter):
-        raw = json.dumps([{"tweet_id": 12345, "score": 80, "reason": "ok"}])
-        result = claude_filter._parse_response(raw)
-        assert result[0]["tweet_id"] == "12345"
-
-    def test_invalid_json_falls_back(self, claude_filter):
-        raw = 'Here are the scores: {"tweet_id": "1", "score": 88, "reason": "good"} and more text'
-        result = claude_filter._parse_response(raw)
-        # Should fall back to _fallback_parse
-        assert len(result) == 1
-        assert result[0]["tweet_id"] == "1"
-        assert result[0]["score"] == 88
-
-
-# --- _fallback_parse ---
-
-class TestFallbackParse:
-    def test_extracts_from_malformed_text(self, claude_filter):
-        raw = (
-            'Here are my scores:\n'
-            '{"tweet_id": "abc", "score": 92, "reason": "based rollup"}\n'
-            'some garbage\n'
-            '{"tweet_id": "def", "score": 45, "reason": "not relevant"}\n'
-        )
-        result = claude_filter._fallback_parse(raw)
-        assert len(result) == 2
-        assert result[0] == {"tweet_id": "abc", "score": 92, "reason": "based rollup"}
-        assert result[1] == {"tweet_id": "def", "score": 45, "reason": "not relevant"}
-
-    def test_no_matches_returns_empty(self, claude_filter):
-        result = claude_filter._fallback_parse("Sorry, I can't score these tweets.")
-        assert result == []
+    def test_no_tool_block_returns_empty(self):
+        resp = SimpleNamespace(content=[SimpleNamespace(type="text", text="sorry")])
+        assert ClaudeFilter._extract_scores(resp, {"1"}) == []
 
 
 # --- filter_tweets ---
 
 class TestFilterTweets:
     def test_empty_input(self, claude_filter):
-        result = claude_filter.filter_tweets([])
-        assert result == []
+        assert claude_filter.filter_tweets([]) == []
+        claude_filter.client.messages.create.assert_not_called()
 
     def test_threshold_filtering(self, claude_filter, sample_tweets):
-        scores_json = json.dumps([
+        claude_filter.client.messages.create.return_value = tool_response([
             {"tweet_id": "123456789", "score": 85, "reason": "EIP discussion"},
             {"tweet_id": "987654321", "score": 92, "reason": "Based rollup"},
             {"tweet_id": "111222333", "score": 10, "reason": "Meme coin"},
         ])
-        mock_response = MagicMock()
-        mock_response.content = [MagicMock(text=scores_json)]
-        claude_filter.client.messages.create.return_value = mock_response
 
         result = claude_filter.filter_tweets(sample_tweets, threshold=70)
 
-        assert len(result) == 2
-        tweet_ids = {t["tweet_id"] for t in result}
-        assert "123456789" in tweet_ids
-        assert "987654321" in tweet_ids
-        assert "111222333" not in tweet_ids
-
-    def test_score_mapping_to_tweets(self, claude_filter, sample_tweet):
-        scores_json = json.dumps([
-            {"tweet_id": "123456789", "score": 85, "reason": "EIP discussion"},
-        ])
-        mock_response = MagicMock()
-        mock_response.content = [MagicMock(text=scores_json)]
-        claude_filter.client.messages.create.return_value = mock_response
-
-        result = claude_filter.filter_tweets([sample_tweet], threshold=70)
-
-        assert len(result) == 1
-        assert result[0]["filter_score"] == 85
-        assert result[0]["filter_reason"] == "EIP discussion"
-        assert result[0]["filtered"] is True
+        assert {t["tweet_id"] for t in result} == {"123456789", "987654321"}
+        # All inputs annotated in place
+        meme = next(t for t in sample_tweets if t["tweet_id"] == "111222333")
+        assert meme["filter_score"] == 10
+        assert meme["filtered"] is False
 
     def test_unscored_tweet_defaults_to_skip(self, claude_filter, sample_tweet):
-        # Claude returns empty scores
-        mock_response = MagicMock()
-        mock_response.content = [MagicMock(text="[]")]
-        claude_filter.client.messages.create.return_value = mock_response
+        claude_filter.client.messages.create.return_value = tool_response([])
 
         result = claude_filter.filter_tweets([sample_tweet], threshold=70)
 
         assert result == []
         assert sample_tweet["filter_score"] == 0
-        assert sample_tweet["filtered"] is False
+        assert sample_tweet["filter_reason"] == "Not scored by Claude"
 
     def test_api_error_propagates(self, claude_filter, sample_tweet):
         claude_filter.client.messages.create.side_effect = Exception("API error")
-
         with pytest.raises(Exception, match="API error"):
             claude_filter.filter_tweets([sample_tweet])
 
-    def test_rag_context_uses_v2_prompt(self, claude_filter, sample_tweet):
-        scores_json = json.dumps([
-            {"tweet_id": "123456789", "score": 90, "reason": "Boosted by RAG"},
+    def test_uses_tool_choice_and_schema(self, claude_filter, sample_tweet):
+        claude_filter.client.messages.create.return_value = tool_response([
+            {"tweet_id": "123456789", "score": 80, "reason": "ok"},
         ])
-        mock_response = MagicMock()
-        mock_response.content = [MagicMock(text=scores_json)]
-        claude_filter.client.messages.create.return_value = mock_response
+        claude_filter.filter_tweets([sample_tweet])
 
-        rag_context = (
-            'Liked tweets (boost similar content):\n'
-            '- @vitalik: "EIP blob market" (similarity: 0.92)\n'
+        kwargs = claude_filter.client.messages.create.call_args[1]
+        assert kwargs["tools"] == [SCORE_TOOL]
+        assert kwargs["tool_choice"] == {"type": "tool", "name": "submit_scores"}
+        assert kwargs["model"] == "claude-sonnet-4-6"
+
+    def test_default_profile_in_prompt(self, claude_filter, sample_tweet):
+        claude_filter.client.messages.create.return_value = tool_response([])
+        claude_filter.filter_tweets([sample_tweet])
+        assert DEFAULT_PROFILE.splitlines()[0] in prompt_sent(claude_filter)
+
+    def test_profile_override(self, claude_filter, sample_tweet):
+        claude_filter.client.messages.create.return_value = tool_response([])
+        claude_filter.filter_tweets([sample_tweet], profile="Loves film criticism.")
+        prompt = prompt_sent(claude_filter)
+        assert "Loves film criticism." in prompt
+        assert "Based rollups" not in prompt
+
+    def test_neighbors_attached_per_item(self, claude_filter, sample_tweets):
+        claude_filter.client.messages.create.return_value = tool_response([])
+        neighbors = {
+            "123456789": [
+                {"tweet_id": "x", "text": "blob fee analysis", "author_username": "dankrad",
+                 "vote": "up", "similarity": 0.91},
+            ],
+        }
+        claude_filter.filter_tweets(sample_tweets, neighbors=neighbors)
+
+        prompt = prompt_sent(claude_filter)
+        items = json.loads(prompt.split("## Items\n", 1)[1].rsplit("\n\nScore every item", 1)[0])
+        by_id = {i["tweet_id"]: i for i in items}
+        assert by_id["123456789"]["similar_past_votes"] == [
+            {"vote": "up", "similarity": 0.91, "author": "dankrad", "text": "blob fee analysis"},
+        ]
+        assert "similar_past_votes" not in by_id["987654321"]
+
+    def test_quoted_tweet_and_article_included(self, claude_filter, sample_quote_tweet):
+        claude_filter.client.messages.create.return_value = tool_response([])
+        sample_quote_tweet["article"] = {"title": "Long read", "body": "body text"}
+        claude_filter.filter_tweets([sample_quote_tweet])
+
+        prompt = prompt_sent(claude_filter)
+        assert "Deep dive into blob fee market" in prompt
+        assert "Long read" in prompt
+
+    def test_batches_large_input(self, claude_filter):
+        claude_filter.batch_size = 2
+        tweets = [
+            {"tweet_id": str(i), "author_username": "a", "text": f"t{i}", "metrics": {}}
+            for i in range(5)
+        ]
+        claude_filter.client.messages.create.side_effect = [
+            tool_response([{"tweet_id": "0", "score": 90, "reason": ""}, {"tweet_id": "1", "score": 90, "reason": ""}]),
+            tool_response([{"tweet_id": "2", "score": 10, "reason": ""}, {"tweet_id": "3", "score": 90, "reason": ""}]),
+            tool_response([{"tweet_id": "4", "score": 90, "reason": ""}]),
+        ]
+
+        result = claude_filter.filter_tweets(tweets, threshold=70)
+
+        assert claude_filter.client.messages.create.call_count == 3
+        assert {t["tweet_id"] for t in result} == {"0", "1", "3", "4"}
+
+
+# --- build_item_entry ---
+
+class TestBuildItemEntry:
+    def test_minimal_entry(self):
+        entry = ClaudeFilter.build_item_entry({"tweet_id": "1", "author_username": "a", "text": "hi"})
+        assert entry == {"tweet_id": "1", "author": "a", "text": "hi", "likes": 0, "retweets": 0}
+
+    def test_blog_post_type_and_truncated_neighbor_text(self):
+        entry = ClaudeFilter.build_item_entry(
+            {"tweet_id": "b", "author_username": "blog", "text": "post", "content_type": "blog_post"},
+            neighbors=[{"vote": "down", "similarity": 0.7, "author_username": "z", "text": "x" * 500,
+                        "reason": "Event/promo"}],
         )
-        result = claude_filter.filter_tweets(
-            [sample_tweet], threshold=70, rag_context=rag_context
-        )
-
-        assert len(result) == 1
-        assert result[0]["filter_score"] == 90
-
-        # Verify V2 prompt was used (contains "User Feedback Context")
-        call_args = claude_filter.client.messages.create.call_args
-        prompt_text = call_args[1]["messages"][0]["content"]
-        assert "User Feedback Context" in prompt_text
-        assert "EIP blob market" in prompt_text
-
-    def test_no_rag_context_uses_fallback_text(self, claude_filter, sample_tweet):
-        scores_json = json.dumps([
-            {"tweet_id": "123456789", "score": 85, "reason": "Good"},
-        ])
-        mock_response = MagicMock()
-        mock_response.content = [MagicMock(text=scores_json)]
-        claude_filter.client.messages.create.return_value = mock_response
-
-        result = claude_filter.filter_tweets([sample_tweet], threshold=70)
-
-        # Default control prompt (V2) has a RAG placeholder; without context
-        # it gets the fallback text
-        call_args = claude_filter.client.messages.create.call_args
-        prompt_text = call_args[1]["messages"][0]["content"]
-        assert "No user feedback context available yet." in prompt_text
-
-    def test_v1_prompt_key_has_no_rag_section(self, claude_filter, sample_tweet):
-        scores_json = json.dumps([
-            {"tweet_id": "123456789", "score": 85, "reason": "Good"},
-        ])
-        mock_response = MagicMock()
-        mock_response.content = [MagicMock(text=scores_json)]
-        claude_filter.client.messages.create.return_value = mock_response
-
-        claude_filter.filter_tweets([sample_tweet], threshold=70, prompt_key="V1")
-
-        call_args = claude_filter.client.messages.create.call_args
-        prompt_text = call_args[1]["messages"][0]["content"]
-        assert "User Feedback Context" not in prompt_text
-
-    def test_quoted_tweet_included_in_claude_input(self, claude_filter, sample_quote_tweet):
-        scores_json = json.dumps([
-            {"tweet_id": "555666777", "score": 90, "reason": "Quote of blob analysis"},
-        ])
-        mock_response = MagicMock()
-        mock_response.content = [MagicMock(text=scores_json)]
-        claude_filter.client.messages.create.return_value = mock_response
-
-        result = claude_filter.filter_tweets([sample_quote_tweet], threshold=70)
-
-        assert len(result) == 1
-        # Verify the prompt sent to Claude includes quoted_tweet
-        call_args = claude_filter.client.messages.create.call_args
-        prompt_text = call_args[1]["messages"][0]["content"]
-        assert "quoted_tweet" in prompt_text
-        assert "vitalikbuterin" in prompt_text
-        assert "blob fee market" in prompt_text
-
-    def test_no_quoted_tweet_omits_field(self, claude_filter, sample_tweet):
-        scores_json = json.dumps([
-            {"tweet_id": "123456789", "score": 85, "reason": "Good"},
-        ])
-        mock_response = MagicMock()
-        mock_response.content = [MagicMock(text=scores_json)]
-        claude_filter.client.messages.create.return_value = mock_response
-
-        claude_filter.filter_tweets([sample_tweet], threshold=70)
-
-        call_args = claude_filter.client.messages.create.call_args
-        prompt_text = call_args[1]["messages"][0]["content"]
-        # quoted_tweet key should not appear for tweets without one
-        assert "quoted_tweet" not in prompt_text
-
-    def test_high_threshold(self, claude_filter, sample_tweets):
-        scores_json = json.dumps([
-            {"tweet_id": "123456789", "score": 85, "reason": "EIP discussion"},
-            {"tweet_id": "987654321", "score": 92, "reason": "Based rollup"},
-            {"tweet_id": "111222333", "score": 10, "reason": "Meme coin"},
-        ])
-        mock_response = MagicMock()
-        mock_response.content = [MagicMock(text=scores_json)]
-        claude_filter.client.messages.create.return_value = mock_response
-
-        result = claude_filter.filter_tweets(sample_tweets, threshold=90)
-
-        assert len(result) == 1
-        assert result[0]["tweet_id"] == "987654321"
-
-
-# --- validate_prompt_key ---
-
-from src.claude_filter import validate_prompt_key
-
-
-class TestValidatePromptKey:
-    def test_valid_key_passes(self):
-        validate_prompt_key("V4", "AB_TEST_CHALLENGER_PROMPT")
-
-    def test_unknown_key_raises_with_setting_name(self):
-        with pytest.raises(ValueError, match="CONTROL_PROMPT.*'V99'"):
-            validate_prompt_key("V99", "CONTROL_PROMPT")
-
-    def test_auto_is_no_longer_a_valid_key(self):
-        with pytest.raises(ValueError, match="CONTROL_PROMPT.*'auto'"):
-            validate_prompt_key("auto", "CONTROL_PROMPT")
-
-
-class TestFilterTweetsPromptKey:
-    def _mock_response(self, claude_filter):
-        scores_json = json.dumps([
-            {"tweet_id": "123456789", "score": 85, "reason": "Good"},
-        ])
-        mock_response = MagicMock()
-        mock_response.content = [MagicMock(text=scores_json)]
-        claude_filter.client.messages.create.return_value = mock_response
-
-    def test_pinned_prompt_key_used(self, claude_filter, sample_tweet):
-        self._mock_response(claude_filter)
-
-        claude_filter.filter_tweets([sample_tweet], threshold=70, prompt_key="V5")
-
-        prompt_text = claude_filter.client.messages.create.call_args[1]["messages"][0]["content"]
-        # V5 binary decision prompt
-        assert "no fence-sitting" in prompt_text
-
-    def test_pinned_rag_prompt_without_rag_gets_fallback(self, claude_filter, sample_tweet):
-        self._mock_response(claude_filter)
-
-        claude_filter.filter_tweets([sample_tweet], threshold=70, prompt_key="V5")
-
-        prompt_text = claude_filter.client.messages.create.call_args[1]["messages"][0]["content"]
-        assert "No user feedback context available yet." in prompt_text
-
-    def test_unknown_prompt_key_raises(self, claude_filter, sample_tweet):
-        self._mock_response(claude_filter)
-
-        with pytest.raises(ValueError, match="Unknown prompt key"):
-            claude_filter.filter_tweets([sample_tweet], threshold=70, prompt_key="V99")
-
-    def test_score_tweets_with_prompt_unknown_key_raises(self, claude_filter, sample_tweet):
-        with pytest.raises(ValueError, match="Unknown prompt key"):
-            claude_filter.score_tweets_with_prompt([sample_tweet], "V99")
-
-
-class TestFallbackParseReasonFirst:
-    def test_reason_before_score_order(self, claude_filter):
-        raw = 'garbage {"tweet_id": "1", "reason": "EIP deep-dive", "score": 88} garbage'
-        result = claude_filter._fallback_parse(raw)
-        assert result == [{"tweet_id": "1", "score": 88, "reason": "EIP deep-dive"}]
-
-    def test_mixed_orders_both_recovered(self, claude_filter):
-        raw = (
-            '{"tweet_id": "1", "score": 90, "reason": "Based rollup"} '
-            '{"tweet_id": "2", "reason": "Price talk", "score": 10}'
-        )
-        result = claude_filter._fallback_parse(raw)
-        assert len(result) == 2
-        by_id = {r["tweet_id"]: r for r in result}
-        assert by_id["1"]["score"] == 90
-        assert by_id["2"]["score"] == 10
-        assert by_id["2"]["reason"] == "Price talk"
+        assert entry["type"] == "blog_post"
+        n = entry["similar_past_votes"][0]
+        assert len(n["text"]) == 200
+        assert n["reason"] == "Event/promo"

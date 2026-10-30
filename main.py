@@ -9,7 +9,7 @@ from functools import partial
 
 from config.settings import get_settings
 from src.twitter_client import TwitterClient
-from src.claude_filter import ClaudeFilter, validate_prompt_key
+from src.claude_filter import ClaudeFilter
 from src.telegram_bot import TelegramCurator
 from src.database import DatabaseClient
 from src.embeddings import EmbeddingManager
@@ -82,19 +82,6 @@ def parse_args() -> argparse.Namespace:
         help="Run only the Telegram bot (for receiving feedback)",
     )
     parser.add_argument(
-        "--ab-report",
-        type=str,
-        default=None,
-        metavar="EXPERIMENT_ID",
-        help="Generate A/B test report for a given experiment ID",
-    )
-    parser.add_argument(
-        "--threshold",
-        type=int,
-        default=None,
-        help="Score threshold for A/B report precision/recall (default: FILTER_THRESHOLD)",
-    )
-    parser.add_argument(
         "--error-report",
         type=str,
         default=None,
@@ -144,7 +131,7 @@ def init_components(settings, num_tweets=None, hours=None):
     )
 
     # Initialize Claude filter
-    claude = ClaudeFilter(api_key=settings.anthropic_api_key)
+    claude = ClaudeFilter(api_key=settings.anthropic_api_key, model=settings.claude_model)
 
     # Initialize database
     db = DatabaseClient(
@@ -205,78 +192,37 @@ def init_components(settings, num_tweets=None, hours=None):
             db.save_tweets(tweets)
         return tweets
 
-    # Validate prompt keys up front so a typo fails the deploy loudly
-    # instead of silently collecting no A/B data.
-    validate_prompt_key(settings.control_prompt, "CONTROL_PROMPT")
-    if settings.ab_test_enabled:
-        validate_prompt_key(
-            settings.ab_test_challenger_prompt, "AB_TEST_CHALLENGER_PROMPT"
-        )
-
-    # Build A/B test config (needed by blog callbacks below and curator)
-    ab_test_config = {
-        "enabled": settings.ab_test_enabled,
-        "experiment_id": settings.ab_test_experiment_id,
-        "challenger_prompt": settings.ab_test_challenger_prompt,
-        "control_prompt": settings.control_prompt,
-        "rag_enabled": settings.rag_enabled,
-    }
-
     # Initialize blog fetcher
     blog_fetcher = BlogFetcher()
 
     # RAG setup
     rag_enabled = settings.rag_enabled and embedding_manager.enabled
 
-    def _build_rag_context(content: list[dict]) -> str | None:
-        """Build RAG context from similar voted content, if RAG is enabled."""
+    def _neighbors_for(content: list[dict]) -> dict[str, list[dict]] | None:
+        """Per-item voted neighbours, if RAG is enabled."""
         if not rag_enabled:
             return None
         try:
-            similar = embedding_manager.find_similar_voted_tweets(content)
-            if similar:
-                from src.scheduler import DailyCurator
-                return DailyCurator._format_rag_context(similar)
+            return embedding_manager.find_neighbors(
+                content, k=settings.rag_similarity_limit
+            ) or None
         except Exception as e:
-            logger.warning(f"RAG context generation failed: {e}")
-        return None
+            logger.warning(f"Neighbour lookup failed: {e}")
+            return None
+
+    def _score_and_save(content: list[dict]) -> list[dict]:
+        """Score items (no threshold) with their neighbours and persist them."""
+        neighbors = _neighbors_for(content)
+        claude.filter_tweets(content, threshold=0, neighbors=neighbors)
+        db.save_tweets(content)
+        return content
 
     # Create blog post like callback
     async def on_like_blog(url: str) -> dict | None:
         post = await asyncio.to_thread(blog_fetcher.fetch_blog_post, url)
         if not post:
             return None
-        # Build RAG context and score with Claude
-        rag_context = _build_rag_context([post])
-        control_key = settings.control_prompt
-        scored = await asyncio.to_thread(
-            claude.filter_tweets, [post], threshold=0, rag_context=rag_context,
-            prompt_key=settings.control_prompt,
-        )
-        if scored:
-            post = scored[0]
-        # Save to DB first (A/B test scores have FK to tweets table)
-        db.save_tweets([post])
-        # A/B test scoring
-        if ab_test_config["enabled"]:
-            try:
-                control_scores = [{
-                    "tweet_id": post["tweet_id"],
-                    "score": post.get("filter_score", 0),
-                    "reason": post.get("filter_reason", ""),
-                }]
-                challenger_scores = await asyncio.to_thread(
-                    claude.score_tweets_with_prompt,
-                    [post], ab_test_config["challenger_prompt"],
-                    rag_context=rag_context,
-                )
-                db.save_ab_test_scores(
-                    ab_test_config["experiment_id"],
-                    control_scores, control_key,
-                    challenger_scores, ab_test_config["challenger_prompt"],
-                )
-            except Exception as e:
-                logger.warning(f"A/B test scoring failed for blog post: {e}")
+        await asyncio.to_thread(_score_and_save, [post])
         return post
 
     # Create newsletter callback
@@ -286,40 +232,7 @@ def init_components(settings, num_tweets=None, hours=None):
         )
         if not posts:
             return []
-        # Build RAG context and score all posts with Claude
-        rag_context = _build_rag_context(posts)
-        control_key = settings.control_prompt
-        scored = await asyncio.to_thread(
-            claude.filter_tweets, posts, threshold=0, rag_context=rag_context,
-            prompt_key=settings.control_prompt,
-        )
-        if scored:
-            posts = scored
-        # Save to DB first (A/B test scores have FK to tweets table)
-        db.save_tweets(posts)
-        # A/B test scoring
-        if ab_test_config["enabled"]:
-            try:
-                control_scores = [
-                    {
-                        "tweet_id": p["tweet_id"],
-                        "score": p.get("filter_score", 0),
-                        "reason": p.get("filter_reason", ""),
-                    }
-                    for p in posts
-                ]
-                challenger_scores = await asyncio.to_thread(
-                    claude.score_tweets_with_prompt,
-                    posts, ab_test_config["challenger_prompt"],
-                    rag_context=rag_context,
-                )
-                db.save_ab_test_scores(
-                    ab_test_config["experiment_id"],
-                    control_scores, control_key,
-                    challenger_scores, ab_test_config["challenger_prompt"],
-                )
-            except Exception as e:
-                logger.warning(f"A/B test scoring failed for newsletter: {e}")
+        await asyncio.to_thread(_score_and_save, posts)
         return posts
 
     # Create newsletter preferences callbacks
@@ -344,16 +257,6 @@ def init_components(settings, num_tweets=None, hours=None):
     async def on_remove_blocked_keyword(keyword: str) -> None:
         db.remove_blocked_keyword(keyword)
 
-    # A/B report callback (runs blocking report generation in a worker thread)
-    async def on_ab_report(experiment_id: str, threshold: int | None) -> str:
-        from scripts.ab_test_report import build_ab_report
-        if threshold is None:
-            threshold = settings.filter_threshold
-        return await asyncio.to_thread(build_ab_report, db, experiment_id, threshold)
-
-    async def on_list_ab_experiments() -> list[dict]:
-        return await asyncio.to_thread(db.list_ab_experiments)
-
     # Initialize Telegram bot
     telegram = TelegramCurator(
         bot_token=settings.telegram_bot_token,
@@ -373,9 +276,6 @@ def init_components(settings, num_tweets=None, hours=None):
         add_blocked_keyword_callback=on_add_blocked_keyword,
         list_blocked_keywords_callback=on_list_blocked_keywords,
         remove_blocked_keyword_callback=on_remove_blocked_keyword,
-        ab_report_callback=on_ab_report,
-        list_ab_experiments_callback=on_list_ab_experiments,
-        ab_test_config=ab_test_config,
     )
 
     # Initialize curator
@@ -391,9 +291,9 @@ def init_components(settings, num_tweets=None, hours=None):
         muted_threshold_offset=settings.muted_threshold_offset,
         starred_author_max_tweets=settings.starred_author_max_tweets,
         embedding_manager=embedding_manager,
-        ab_test_config=ab_test_config,
         rag_enabled=settings.rag_enabled,
-        control_prompt=settings.control_prompt,
+        neighbors_per_item=settings.rag_similarity_limit,
+        exploration_per_run=settings.exploration_per_run,
     )
 
     logger.info(f"All components initialized (max_tweets={max_tweets}, fetch_hours={fetch_hours})")
@@ -528,7 +428,7 @@ async def run_test(settings) -> None:
     # Test Claude filter
     if tweets:
         logger.info("Testing Claude filter...")
-        claude = ClaudeFilter(api_key=settings.anthropic_api_key)
+        claude = ClaudeFilter(api_key=settings.anthropic_api_key, model=settings.claude_model)
         filtered = claude.filter_tweets(tweets[:3])
         logger.info(f"Claude filter OK - filtered {len(filtered)} tweets")
 
@@ -561,13 +461,7 @@ def main() -> int:
         return 1
 
     try:
-        if args.ab_report:
-            from scripts.ab_test_report import run_ab_report
-            db = DatabaseClient(url=settings.supabase_url, key=settings.supabase_key)
-            threshold = args.threshold if args.threshold is not None else settings.filter_threshold
-            run_ab_report(db, args.ab_report, threshold=threshold)
-            return 0
-        elif args.error_report:
+        if args.error_report:
             from scripts.error_report import run_error_report
             db = DatabaseClient(url=settings.supabase_url, key=settings.supabase_key)
             run_error_report(db, args.error_report)
