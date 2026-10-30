@@ -151,11 +151,72 @@ def init_components(settings, num_tweets=None, hours=None):
     )
 
     # Create feedback callback
-    async def on_feedback(tweet_id: str, vote: str, telegram_message_id: int, notes: str = None):
+    async def on_feedback(
+        tweet_id: str, vote: str, telegram_message_id: int, notes: str = None,
+        strength: int = 1, source: str = "button",
+    ):
         await feedback_handler(
             db, tweet_id, vote, telegram_message_id,
             notes=notes, embedding_manager=embedding_manager,
+            strength=strength, source=source,
         )
+
+    # Model-proposed reason for a vote (runs blocking calls in a thread)
+    async def on_reason(item_id: str, vote: str, strength: int) -> str | None:
+        def _propose():
+            item = db.get_tweet_by_id(item_id)
+            if not item:
+                return None
+            neighbors = None
+            past_reasons: list[str] = []
+            if settings.rag_enabled and embedding_manager.enabled:
+                try:
+                    found = embedding_manager.find_neighbors(
+                        [item], k=settings.rag_similarity_limit, exclude_self=True
+                    )
+                    neighbors = found.get(item_id)
+                    if neighbors:
+                        past_reasons = [
+                            r["reason"] for r in db.get_recent_reasons(
+                                [n["tweet_id"] for n in neighbors]
+                            ) if r.get("reason")
+                        ]
+                except Exception as e:
+                    logger.warning(f"Neighbour lookup for reason failed: {e}")
+            return claude.propose_reason(
+                item, vote, strength, neighbors=neighbors, past_reasons=past_reasons,
+            )
+        return await asyncio.to_thread(_propose)
+
+    async def on_reason_confirm(item_id: str, reason: str) -> None:
+        await asyncio.to_thread(db.update_latest_vote_reason, item_id, reason)
+
+    async def on_retract_vote(item_id: str) -> None:
+        await asyncio.to_thread(db.delete_latest_vote, item_id)
+
+    async def on_note(item_id: str, text: str, telegram_message_id: int) -> None:
+        await asyncio.to_thread(
+            db.save_signal, item_id, "note", None, 1, text, "reply", telegram_message_id,
+        )
+
+    async def on_open(item_id: str) -> str | None:
+        def _resolve():
+            item = db.get_tweet_by_id(item_id)
+            if not item or not item.get("url"):
+                return None
+            try:
+                db.save_signal(item_id=item_id, kind="open", source="redirect")
+            except Exception as e:
+                logger.warning(f"Open signal failed for {item_id}: {e}")
+            return item["url"]
+        return await asyncio.to_thread(_resolve)
+
+    async def on_lookup_message(telegram_message_id: int) -> dict | None:
+        return await asyncio.to_thread(db.get_tweet_by_message_id, telegram_message_id)
+
+    redirect_base_url = settings.redirect_base_url
+    if redirect_base_url is None and not settings.development_mode:
+        redirect_base_url = settings.webhook_url
 
     # Create favorite author callback (toggle: muted→default, default→favorite)
     async def on_favorite_author(username: str) -> str:
@@ -276,6 +337,13 @@ def init_components(settings, num_tweets=None, hours=None):
         add_blocked_keyword_callback=on_add_blocked_keyword,
         list_blocked_keywords_callback=on_list_blocked_keywords,
         remove_blocked_keyword_callback=on_remove_blocked_keyword,
+        reason_callback=on_reason,
+        reason_confirm_callback=on_reason_confirm,
+        retract_vote_callback=on_retract_vote,
+        note_callback=on_note,
+        open_callback=on_open,
+        lookup_message_callback=on_lookup_message,
+        redirect_base_url=redirect_base_url,
     )
 
     # Initialize curator

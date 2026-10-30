@@ -15,10 +15,26 @@ from telegram.ext import (
     ConversationHandler,
     ContextTypes,
     MessageHandler,
+    MessageReactionHandler,
     filters,
 )
 
 from src.content import is_blog_content, is_http_url, is_tweet_url, is_twitter_profile_url
+from src.feedback_flow import (
+    Vote,
+    parse_vote_callback,
+    reason_done_text,
+    reason_prompt_buttons,
+    reason_prompt_text,
+    vote_buttons,
+    vote_from_reactions,
+    vote_label,
+    voted_buttons,
+)
+from src.webhook_server import make_app, redirect_url
+
+# Seconds a vote can be undone before it is saved
+VOTE_GRACE_SECONDS = 10
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +70,13 @@ class TelegramCurator:
         add_blocked_keyword_callback: Optional[Callable] = None,
         list_blocked_keywords_callback: Optional[Callable] = None,
         remove_blocked_keyword_callback: Optional[Callable] = None,
+        reason_callback: Optional[Callable] = None,
+        reason_confirm_callback: Optional[Callable] = None,
+        retract_vote_callback: Optional[Callable] = None,
+        note_callback: Optional[Callable] = None,
+        open_callback: Optional[Callable] = None,
+        lookup_message_callback: Optional[Callable] = None,
+        redirect_base_url: Optional[str] = None,
     ):
         """Initialize Telegram bot.
 
@@ -75,6 +98,13 @@ class TelegramCurator:
             add_blocked_keyword_callback: Async callback function(keyword) → saved keyword
             list_blocked_keywords_callback: Async callback function() → list of keywords
             remove_blocked_keyword_callback: Async callback function(keyword) → None
+            reason_callback: Async function(item_id, vote, strength) → proposed reason text or None
+            reason_confirm_callback: Async function(item_id, reason) → None
+            retract_vote_callback: Async function(item_id) → None (reaction removed)
+            note_callback: Async function(item_id, text, telegram_message_id) → None
+            open_callback: Async function(item_id) → destination URL or None; records the open
+            lookup_message_callback: Async function(telegram_message_id) → item dict or None
+            redirect_base_url: Public base URL for /r/<item_id> tracking links (None = direct links)
         """
         self.bot_token = bot_token
         self.chat_id = chat_id
@@ -93,9 +123,22 @@ class TelegramCurator:
         self.add_blocked_keyword_callback = add_blocked_keyword_callback
         self.list_blocked_keywords_callback = list_blocked_keywords_callback
         self.remove_blocked_keyword_callback = remove_blocked_keyword_callback
+        self.reason_callback = reason_callback
+        self.reason_confirm_callback = reason_confirm_callback
+        self.retract_vote_callback = retract_vote_callback
+        self.note_callback = note_callback
+        self.open_callback = open_callback
+        self.lookup_message_callback = lookup_message_callback
+        self.redirect_base_url = redirect_base_url
         self.application: Optional[Application] = None
         self._pending_feedback: dict[str, dict] = {}  # tweet_id → pending save info
         self._tweet_authors: dict[str, str] = {}  # tweet_id → username
+        self._message_items: dict[int, str] = {}  # telegram message_id → item_id
+        self._item_votes: dict[str, Vote] = {}  # item_id → latest vote
+        self._reason_prompts: dict[int, str] = {}  # proposal message_id → item_id
+        self._item_prompts: dict[str, tuple[int, str]] = {}  # item_id → (prompt msg id, proposal)
+        self._pending_reasons: dict[str, str] = {}  # item_id → reason confirmed before save
+        self._awaiting_reason: dict[str, str] = {}  # chat_id → item_id waiting for typed reason
         self._section_selection: dict[str, dict] = {}  # chat_id → {url, domain, sections, ignored}
         self._blockword_list: dict[str, list[str]] = {}  # chat_id → keyword list shown
         logger.info("Telegram bot initialized")
@@ -243,6 +286,11 @@ class TelegramCurator:
             CallbackQueryHandler(self._handle_feedback)
         )
 
+        # Emoji reactions on sent items count as votes
+        self.application.add_handler(
+            MessageReactionHandler(self._handle_reaction)
+        )
+
         # Default handler: route plain messages to /like (tweets/blogs) or
         # /star (profiles/usernames) based on content. Registered last so
         # active ConversationHandlers take precedence.
@@ -284,6 +332,10 @@ class TelegramCurator:
             "- I send you filtered tweets daily\n"
             "- Items marked 🎲 scored below the threshold and are sent at random "
             "so your vote tells me what the filter is missing\n"
+            "- Vote with the buttons (🔥 strong like, 👍, 👎) or just react to the "
+            "message with an emoji; remove the reaction to retract\n"
+            "- After a vote I guess why; tap ✅, or ✏️ and reply with your own words\n"
+            "- Reply to any item to attach a note\n"
             "- Use the buttons to tell me what you like\n"
             "- Your feedback helps improve future curation\n"
             "- /like accepts both tweet URLs and blog post URLs\n"
@@ -431,7 +483,50 @@ class TelegramCurator:
             return arg
         return None
 
+    async def _handle_text_signals(self, update: Update) -> bool:
+        """Typed reasons and reply-notes. Returns True if the message was consumed."""
+        message = update.message
+        text = (message.text or "").strip()
+        chat_id = str(message.chat_id)
+        if not text:
+            return False
+
+        replied = message.reply_to_message
+        replied_id = replied.message_id if replied else None
+
+        # 1. Reply to a reason prompt, or a typed reason after ✏️
+        item_id = None
+        if replied_id is not None and replied_id in self._reason_prompts:
+            item_id = self._reason_prompts[replied_id]
+        elif chat_id in self._awaiting_reason:
+            item_id = self._awaiting_reason[chat_id]
+        if item_id:
+            self._awaiting_reason.pop(chat_id, None)
+            await self._confirm_reason(item_id, text)
+            await message.reply_text("✅ Reason saved.")
+            return True
+
+        # 2. Reply to a sent item → note
+        if replied_id is not None:
+            item_id = await self._item_for_message(replied_id)
+            if item_id and self.note_callback:
+                try:
+                    await self.note_callback(item_id, text, replied_id)
+                    await message.reply_text("📝 Note saved.")
+                except Exception as e:
+                    logger.error(f"Error saving note for {item_id}: {e}")
+                    await message.reply_text("Error saving note.")
+                return True
+        return False
+
     async def _handle_default_message(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        if await self._handle_text_signals(update):
+            return
+        await self._route_plain_message(update, context)
+
+    async def _route_plain_message(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
         """Default handler for plain text: route to /like or /star based on content.
@@ -545,19 +640,7 @@ class TelegramCurator:
             # Store author mapping for undo functionality
             self._tweet_authors[tweet_id] = tweet["author_username"]
 
-            # Send with reason category buttons
-            keyboard = self._make_like_reason_buttons(tweet_id)
-
-            try:
-                await self.application.bot.send_message(
-                    chat_id=self.chat_id,
-                    text=message,
-                    reply_markup=keyboard,
-                    parse_mode="HTML",
-                    disable_web_page_preview=True,
-                )
-            except Exception as e:
-                logger.error(f"Error sending like message for {tweet_id}: {e}")
+            if not await self._send_liked_item(tweet_id, message):
                 await update.message.reply_text(f"Error sending tweet {tweet_id}.")
 
     async def _like_blog_post(self, update: Update, url: str) -> None:
@@ -585,19 +668,7 @@ class TelegramCurator:
         # Store author mapping for undo functionality
         self._tweet_authors[content_id] = post["author_username"]
 
-        # Send with reason category buttons
-        keyboard = self._make_like_reason_buttons(content_id)
-
-        try:
-            await self.application.bot.send_message(
-                chat_id=self.chat_id,
-                text=message,
-                reply_markup=keyboard,
-                parse_mode="HTML",
-                disable_web_page_preview=True,
-            )
-        except Exception as e:
-            logger.error(f"Error sending blog like message for {content_id}: {e}")
+        if not await self._send_liked_item(content_id, message):
             await update.message.reply_text("Error sending blog post.")
 
     async def _handle_thread(
@@ -1154,32 +1225,6 @@ class TelegramCurator:
 
         return message
 
-    @staticmethod
-    def _make_like_reason_buttons(tweet_id: str) -> InlineKeyboardMarkup:
-        """Build the reason category buttons for a liked tweet."""
-        return InlineKeyboardMarkup([
-            [
-                InlineKeyboardButton(
-                    "Tech content",
-                    callback_data=f"like_reason:{tweet_id}:tech",
-                ),
-                InlineKeyboardButton(
-                    "Non-tech insight",
-                    callback_data=f"like_reason:{tweet_id}:non_tech",
-                ),
-            ],
-            [
-                InlineKeyboardButton(
-                    "Soft skills",
-                    callback_data=f"like_reason:{tweet_id}:soft_skills",
-                ),
-                InlineKeyboardButton(
-                    "Life wisdom",
-                    callback_data=f"like_reason:{tweet_id}:life_wisdom",
-                ),
-            ],
-        ])
-
     def _format_like_message(self, tweet: dict) -> str:
         """Format tweet for like message (no score/reason header)."""
         metrics = tweet.get("metrics", {})
@@ -1196,7 +1241,7 @@ class TelegramCurator:
         header = self._retweet_header(tweet) + self._quote_header(tweet)
         message = (
             f"<b>@{tweet['author_username']}</b> | "
-            f"<a href=\"{tweet['url']}\">View Tweet</a>\n\n"
+            f"<a href=\"{self._link(tweet)}\">View Tweet</a>\n\n"
             f"{header}{text}"
         )
 
@@ -1471,274 +1516,55 @@ class TelegramCurator:
             await self._handle_blockword_remove(query, data)
             return
 
-        # Handle vote: "vote:{tweet_id}:{up|down}"
+        # Handle vote: "vote:{item_id}:{up|down}[:{strength}]"
         if data.startswith("vote:"):
-            parts = data.split(":")
-            if len(parts) != 3:
+            parsed = parse_vote_callback(data)
+            if not parsed:
                 return
-
-            _, tweet_id, vote = parts
-
-            if vote == "up":
-                # Thumbs up - show category buttons
-                await query.edit_message_reply_markup(
-                    reply_markup=InlineKeyboardMarkup([
-                        [
-                            InlineKeyboardButton(
-                                "Tech content",
-                                callback_data=f"reason:{tweet_id}:up:tech"
-                            ),
-                            InlineKeyboardButton(
-                                "Non-tech insight",
-                                callback_data=f"reason:{tweet_id}:up:non_tech"
-                            ),
-                        ],
-                        [
-                            InlineKeyboardButton(
-                                "Soft skills",
-                                callback_data=f"reason:{tweet_id}:up:soft_skills"
-                            ),
-                            InlineKeyboardButton(
-                                "Life wisdom",
-                                callback_data=f"reason:{tweet_id}:up:life_wisdom"
-                            ),
-                        ],
-                    ])
-                )
-
-            elif vote == "down":
-                # Thumbs down - show reason buttons
-                await query.edit_message_reply_markup(
-                    reply_markup=InlineKeyboardMarkup([
-                        [
-                            InlineKeyboardButton(
-                                "No tech content",
-                                callback_data=f"reason:{tweet_id}:down:no_tech"
-                            ),
-                            InlineKeyboardButton(
-                                "Event/promo",
-                                callback_data=f"reason:{tweet_id}:down:event_promo"
-                            ),
-                        ],
-                        [
-                            InlineKeyboardButton(
-                                "Low quality",
-                                callback_data=f"reason:{tweet_id}:down:low_quality"
-                            ),
-                            InlineKeyboardButton(
-                                "Not relevant",
-                                callback_data=f"reason:{tweet_id}:down:not_relevant"
-                            ),
-                        ],
-                    ])
-                )
-
-        # Handle vote reason: "reason:{tweet_id}:{up|down}:{reason_code}"
-        elif data.startswith("reason:"):
-            parts = data.split(":")
-            if len(parts) != 4:
-                return
-
-            _, tweet_id, vote, reason_code = parts
-
-            reason_labels = {
-                # Upvote reasons
-                "tech": "Tech content",
-                "non_tech": "Non-tech insight",
-                "soft_skills": "Soft skills",
-                "life_wisdom": "Life wisdom",
-                # Downvote reasons
-                "no_tech": "No tech content",
-                "event_promo": "Event/promo",
-                "low_quality": "Low quality",
-                "not_relevant": "Not relevant",
-            }
-            reason = reason_labels.get(reason_code, reason_code)
-            vote_emoji = "👍" if vote == "up" else "👎"
-            message_id = query.message.message_id
-
-            # Cancel any existing pending feedback for this tweet
-            if tweet_id in self._pending_feedback:
-                self._pending_feedback[tweet_id]["task"].cancel()
-
-            # Show confirmation with undo button
-            await query.edit_message_reply_markup(
-                reply_markup=InlineKeyboardMarkup([
-                    [
-                        InlineKeyboardButton(
-                            f"{vote_emoji} {reason}", callback_data="voted"
-                        ),
-                        InlineKeyboardButton(
-                            "↩ Undo", callback_data=f"undo:{tweet_id}"
-                        ),
-                    ]
-                ])
+            item_id, vote = parsed
+            await self._record_vote(
+                item_id, vote, query.message.message_id, source="button",
+                grace=True, query=query,
             )
 
-            # Schedule feedback save after 10 seconds
-            async def _save_after_delay(
-                t_id=tweet_id, v=vote, r=reason, m_id=message_id, emoji=vote_emoji
-            ):
-                await asyncio.sleep(10)
-                if t_id not in self._pending_feedback:
-                    return
-
-                if self.feedback_callback:
-                    try:
-                        await self.feedback_callback(
-                            tweet_id=t_id,
-                            vote=v,
-                            telegram_message_id=m_id,
-                            notes=r,
-                        )
-                        logger.info(
-                            f"Feedback recorded: tweet={t_id}, vote={v}, reason={r}"
-                        )
-                    except Exception as e:
-                        logger.error(f"Error recording feedback: {e}")
-
-                # Remove undo button
+        # Reason prompt: "rsn_ok|rsn_edit|rsn_skip:{item_id}"
+        elif data.startswith(("rsn_ok:", "rsn_edit:", "rsn_skip:")):
+            action, _, item_id = data.partition(":")
+            prompt = self._item_prompts.get(item_id)
+            if action == "rsn_ok":
+                if prompt:
+                    await self._confirm_reason(item_id, prompt[1])
+            elif action == "rsn_edit":
+                self._awaiting_reason[str(query.message.chat_id)] = item_id
                 try:
-                    await self.application.bot.edit_message_reply_markup(
-                        chat_id=self.chat_id,
-                        message_id=m_id,
-                        reply_markup=InlineKeyboardMarkup([
-                            [InlineKeyboardButton(
-                                f"{emoji} {r}", callback_data="voted"
-                            )]
-                        ]),
+                    await query.edit_message_text(
+                        "✏️ Reply to this message with your reason.", parse_mode="HTML",
+                    )
+                except Exception:
+                    pass
+            else:  # skip
+                self._item_prompts.pop(item_id, None)
+                self._reason_prompts.pop(query.message.message_id, None)
+                vote = self._item_votes.get(item_id)
+                try:
+                    await query.edit_message_text(
+                        f"{vote_label(vote) if vote else '✔'} (no reason)", parse_mode="HTML",
                     )
                 except Exception:
                     pass
 
-                self._pending_feedback.pop(t_id, None)
-
-            task = asyncio.create_task(_save_after_delay())
-            self._pending_feedback[tweet_id] = {
-                "task": task,
-                "message_id": message_id,
-            }
-
-        # Handle like reason: "like_reason:{tweet_id}:{reason_code}"
-        elif data.startswith("like_reason:"):
-            parts = data.split(":")
-            if len(parts) != 3:
-                return
-
-            _, tweet_id, reason_code = parts
-
-            reason_labels = {
-                "tech": "Tech content",
-                "non_tech": "Non-tech insight",
-                "soft_skills": "Soft skills",
-                "life_wisdom": "Life wisdom",
-            }
-            reason = reason_labels.get(reason_code, reason_code)
-            message_id = query.message.message_id
-
-            # Cancel any existing pending feedback for this tweet
-            if tweet_id in self._pending_feedback:
-                self._pending_feedback[tweet_id]["task"].cancel()
-
-            # Show confirmation with undo button
-            await query.edit_message_reply_markup(
-                reply_markup=InlineKeyboardMarkup([
-                    [
-                        InlineKeyboardButton(
-                            f"👍 {reason}", callback_data="voted"
-                        ),
-                        InlineKeyboardButton(
-                            "↩ Undo", callback_data=f"like_undo:{tweet_id}"
-                        ),
-                    ]
-                ])
-            )
-
-            # Schedule feedback save after 10 seconds
-            async def _save_like_after_delay(
-                t_id=tweet_id, r=reason, m_id=message_id
-            ):
-                await asyncio.sleep(10)
-                if t_id not in self._pending_feedback:
-                    return
-
-                if self.feedback_callback:
-                    try:
-                        await self.feedback_callback(
-                            tweet_id=t_id,
-                            vote="up",
-                            telegram_message_id=m_id,
-                            notes=r,
-                        )
-                        logger.info(
-                            f"Like feedback recorded: tweet={t_id}, reason={r}"
-                        )
-                    except Exception as e:
-                        logger.error(f"Error recording like feedback: {e}")
-
-                # Remove undo button
-                try:
-                    await self.application.bot.edit_message_reply_markup(
-                        chat_id=self.chat_id,
-                        message_id=m_id,
-                        reply_markup=InlineKeyboardMarkup([
-                            [InlineKeyboardButton(
-                                f"👍 {r}", callback_data="voted"
-                            )]
-                        ]),
-                    )
-                except Exception:
-                    pass
-
-                self._pending_feedback.pop(t_id, None)
-
-            task = asyncio.create_task(_save_like_after_delay())
-            self._pending_feedback[tweet_id] = {
-                "task": task,
-                "message_id": message_id,
-            }
-
-        # Handle like undo: "like_undo:{tweet_id}"
-        elif data.startswith("like_undo:"):
-            parts = data.split(":")
-            if len(parts) != 2:
-                return
-
-            _, tweet_id = parts
-
-            if tweet_id not in self._pending_feedback:
-                logger.info(f"Like undo too late: tweet={tweet_id}, already saved")
-                return
-
-            self._pending_feedback[tweet_id]["task"].cancel()
-            del self._pending_feedback[tweet_id]
-
-            await query.edit_message_reply_markup(
-                reply_markup=self._make_like_reason_buttons(tweet_id)
-            )
-            logger.info(f"Like feedback undone: tweet={tweet_id}")
-
-        # Handle undo: "undo:{tweet_id}"
+        # Handle undo: "undo:{item_id}"
         elif data.startswith("undo:"):
-            parts = data.split(":")
-            if len(parts) != 2:
+            _, _, item_id = data.partition(":")
+            if item_id not in self._pending_feedback:
+                logger.info(f"Undo too late: item={item_id}, already saved")
                 return
-
-            _, tweet_id = parts
-
-            if tweet_id not in self._pending_feedback:
-                # Too late — feedback already saved
-                logger.info(f"Undo too late: tweet={tweet_id}, already saved")
-                return
-
-            self._pending_feedback[tweet_id]["task"].cancel()
-            del self._pending_feedback[tweet_id]
-
-            username = self._tweet_authors.get(tweet_id, "unknown")
+            await self._cancel_vote(item_id, restore_keyboard=False)
+            username = self._tweet_authors.get(item_id)
             await query.edit_message_reply_markup(
-                reply_markup=self._make_tweet_buttons(tweet_id, username)
+                reply_markup=self._make_tweet_buttons(item_id, username)
             )
-            logger.info(f"Feedback undone: tweet={tweet_id}")
+            logger.info(f"Feedback undone: item={item_id}")
 
         # Handle favorite author: "fav:{username}:{tweet_id}"
         elif data.startswith("fav:"):
@@ -1823,6 +1649,7 @@ class TelegramCurator:
                 parse_mode="HTML",
                 disable_web_page_preview=True,
             )
+            self._message_items[sent_message.message_id] = tweet["tweet_id"]
             logger.info(f"Sent tweet {tweet['tweet_id']} to Telegram")
             return sent_message.message_id
         except Exception as e:
@@ -1832,31 +1659,228 @@ class TelegramCurator:
     @staticmethod
     def _make_tweet_buttons(
         tweet_id: str,
-        username: str,
+        username: Optional[str],
         fav_label: str = "⭐ Author",
         mute_label: str = "🔇 Mute",
     ) -> InlineKeyboardMarkup:
-        """Build the two-row inline keyboard for a tweet.
+        """Vote row (🔥 👍 👎) plus author controls when a username is known."""
+        return vote_buttons(tweet_id, username, fav_label=fav_label, mute_label=mute_label)
 
-        Args:
-            tweet_id: Twitter ID
-            username: Author username
-            fav_label: Label for favorite button
-            mute_label: Label for mute button
+    # ------------------------------------------------------------ vote flow
 
-        Returns:
-            InlineKeyboardMarkup with two rows
-        """
-        return InlineKeyboardMarkup([
-            [
-                InlineKeyboardButton("👍", callback_data=f"vote:{tweet_id}:up"),
-                InlineKeyboardButton("👎", callback_data=f"vote:{tweet_id}:down"),
-            ],
-            [
-                InlineKeyboardButton(fav_label, callback_data=f"fav:{username}:{tweet_id}"),
-                InlineKeyboardButton(mute_label, callback_data=f"mute:{username}:{tweet_id}"),
-            ],
-        ])
+    def _link(self, item: dict) -> str:
+        """Tracking link for an item when configured, else its real URL."""
+        return redirect_url(self.redirect_base_url, item["tweet_id"]) or item["url"]
+
+    async def _item_for_message(self, message_id: int) -> Optional[str]:
+        item_id = self._message_items.get(message_id)
+        if item_id or not self.lookup_message_callback:
+            return item_id
+        try:
+            item = await self.lookup_message_callback(message_id)
+        except Exception as e:
+            logger.warning(f"Message lookup failed for {message_id}: {e}")
+            return None
+        if item:
+            self._message_items[message_id] = item["tweet_id"]
+            self._tweet_authors.setdefault(item["tweet_id"], item.get("author_username"))
+            return item["tweet_id"]
+        return None
+
+    async def _send_liked_item(self, item_id: str, message: str) -> bool:
+        """Send a /like'd item and record an immediate upvote (with undo)."""
+        vote = Vote("up", 1)
+        try:
+            sent = await self.application.bot.send_message(
+                chat_id=self.chat_id,
+                text=message,
+                reply_markup=voted_buttons(item_id, vote, undo=True),
+                parse_mode="HTML",
+                disable_web_page_preview=True,
+            )
+        except Exception as e:
+            logger.error(f"Error sending liked item {item_id}: {e}")
+            return False
+        self._message_items[sent.message_id] = item_id
+        await self._record_vote(item_id, vote, sent.message_id, source="like_cmd", grace=True)
+        return True
+
+    async def _record_vote(
+        self,
+        item_id: str,
+        vote: Vote,
+        message_id: int,
+        source: str,
+        grace: bool,
+        query=None,
+    ) -> None:
+        """Register a vote: show it, save it (after an undo grace period for
+        buttons), then ask the model to propose a reason."""
+        await self._cancel_vote(item_id, restore_keyboard=False)
+        self._item_votes[item_id] = vote
+        self._message_items[message_id] = item_id
+
+        await self._set_keyboard(
+            message_id, voted_buttons(item_id, vote, undo=grace), query=query
+        )
+
+        async def _save(delay: float):
+            if delay:
+                await asyncio.sleep(delay)
+            notes = self._pending_reasons.pop(item_id, None)
+            if self.feedback_callback:
+                try:
+                    await self.feedback_callback(
+                        tweet_id=item_id,
+                        vote=vote.vote,
+                        telegram_message_id=message_id,
+                        notes=notes,
+                        strength=vote.strength,
+                        source=source,
+                    )
+                    logger.info(
+                        f"Feedback recorded: item={item_id}, vote={vote.vote}, "
+                        f"strength={vote.strength}, source={source}"
+                    )
+                except Exception as e:
+                    logger.error(f"Error recording feedback: {e}")
+            self._pending_feedback.pop(item_id, None)
+            if grace:
+                await self._set_keyboard(message_id, voted_buttons(item_id, vote, undo=False))
+
+        if grace:
+            task = asyncio.create_task(_save(VOTE_GRACE_SECONDS))
+            self._pending_feedback[item_id] = {"task": task, "message_id": message_id}
+        else:
+            await _save(0)
+
+        await self._propose_reason(item_id, vote, message_id)
+
+    async def _cancel_vote(self, item_id: str, restore_keyboard: bool = True) -> None:
+        """Cancel a pending (unsaved) vote and clean up its reason prompt."""
+        pending = self._pending_feedback.pop(item_id, None)
+        if pending:
+            pending["task"].cancel()
+        self._pending_reasons.pop(item_id, None)
+        await self._remove_reason_prompt(item_id)
+        if pending and restore_keyboard:
+            await self._set_keyboard(
+                pending["message_id"],
+                self._make_tweet_buttons(item_id, self._tweet_authors.get(item_id)),
+            )
+
+    async def _set_keyboard(self, message_id: int, markup, query=None) -> None:
+        try:
+            if query is not None:
+                await query.edit_message_reply_markup(reply_markup=markup)
+            else:
+                await self.application.bot.edit_message_reply_markup(
+                    chat_id=self.chat_id, message_id=message_id, reply_markup=markup,
+                )
+        except Exception as e:
+            logger.debug(f"Keyboard update skipped for {message_id}: {e}")
+
+    async def _propose_reason(self, item_id: str, vote: Vote, message_id: int) -> None:
+        """Ask the model why the user voted this way and offer ✅ / ✏️ / skip."""
+        if not self.reason_callback:
+            return
+        try:
+            proposal = await self.reason_callback(item_id, vote.vote, vote.strength)
+        except Exception as e:
+            logger.warning(f"Reason proposal failed for {item_id}: {e}")
+            return
+        if not proposal:
+            return
+        try:
+            sent = await self.application.bot.send_message(
+                chat_id=self.chat_id,
+                text=reason_prompt_text(vote, self._escape_html(proposal)),
+                reply_markup=reason_prompt_buttons(item_id),
+                parse_mode="HTML",
+                reply_to_message_id=message_id,
+            )
+        except Exception as e:
+            logger.warning(f"Could not send reason prompt for {item_id}: {e}")
+            return
+        self._reason_prompts[sent.message_id] = item_id
+        self._item_prompts[item_id] = (sent.message_id, proposal)
+
+    async def _confirm_reason(self, item_id: str, reason: str) -> None:
+        """Store a confirmed/typed reason on the item's latest vote."""
+        reason = reason.strip()
+        if item_id in self._pending_feedback:
+            # Vote not saved yet (grace period): the save will carry it
+            self._pending_reasons[item_id] = reason
+        elif self.reason_confirm_callback:
+            try:
+                await self.reason_confirm_callback(item_id, reason)
+            except Exception as e:
+                logger.error(f"Error saving reason for {item_id}: {e}")
+        prompt = self._item_prompts.pop(item_id, None)
+        if prompt:
+            self._reason_prompts.pop(prompt[0], None)
+            vote = self._item_votes.get(item_id) or Vote("up", 1)
+            try:
+                await self.application.bot.edit_message_text(
+                    chat_id=self.chat_id,
+                    message_id=prompt[0],
+                    text=reason_done_text(vote, self._escape_html(reason)),
+                    parse_mode="HTML",
+                )
+            except Exception as e:
+                logger.debug(f"Reason prompt edit skipped: {e}")
+
+    async def _remove_reason_prompt(self, item_id: str) -> None:
+        prompt = self._item_prompts.pop(item_id, None)
+        if not prompt:
+            return
+        self._reason_prompts.pop(prompt[0], None)
+        try:
+            await self.application.bot.delete_message(
+                chat_id=self.chat_id, message_id=prompt[0],
+            )
+        except Exception as e:
+            logger.debug(f"Reason prompt delete skipped: {e}")
+
+    async def _handle_reaction(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Emoji reactions on sent items: 🔥/👍/👎 vote, removal retracts."""
+        mr = update.message_reaction
+        if mr is None or str(mr.chat.id) != str(self.chat_id):
+            return
+        item_id = await self._item_for_message(mr.message_id)
+        if not item_id:
+            return
+        vote, retracted = vote_from_reactions(mr.new_reaction, mr.old_reaction)
+        previous = self._item_votes.get(item_id)
+
+        if retracted or (vote and previous and previous != vote):
+            await self._cancel_vote(item_id, restore_keyboard=False)
+            if self.retract_vote_callback and (retracted or previous):
+                try:
+                    await self.retract_vote_callback(item_id)
+                except Exception as e:
+                    logger.error(f"Error retracting vote for {item_id}: {e}")
+            self._item_votes.pop(item_id, None)
+            if retracted:
+                await self._set_keyboard(
+                    mr.message_id,
+                    self._make_tweet_buttons(item_id, self._tweet_authors.get(item_id)),
+                )
+                logger.info(f"Reaction removed → vote retracted: item={item_id}")
+                return
+
+        if vote and vote != previous:
+            await self._record_vote(
+                item_id, vote, mr.message_id, source="reaction", grace=False,
+            )
+
+    async def resolve_open(self, item_id: str) -> Optional[str]:
+        """Used by the redirect endpoint: record the open, return the real URL."""
+        if not self.open_callback:
+            return None
+        return await self.open_callback(item_id)
 
     def _format_tweet_message(
         self,
@@ -1892,7 +1916,7 @@ class TelegramCurator:
         message = (
             f"{prefix}"
             f"<b>@{tweet['author_username']}</b> | "
-            f"<a href=\"{tweet['url']}\">View Tweet</a>\n\n"
+            f"<a href=\"{self._link(tweet)}\">View Tweet</a>\n\n"
             f"{self._retweet_header(tweet)}{self._quote_header(tweet)}"
         )
 
@@ -2074,7 +2098,9 @@ class TelegramCurator:
 
         logger.info("Starting Telegram bot polling...")
         await self.application.start()
-        await self.application.updater.start_polling(bootstrap_retries=3)
+        await self.application.updater.start_polling(
+            bootstrap_retries=3, allowed_updates=Update.ALL_TYPES,
+        )
 
         # Keep running until interrupted
         try:
@@ -2087,6 +2113,10 @@ class TelegramCurator:
 
     async def run_webhook(self, webhook_url: str, port: int) -> None:
         """Start the bot in webhook mode.
+
+        Runs our own HTTP server (see ``src/webhook_server.py``) so the same
+        port serves Telegram updates at ``/<token>`` and click-tracking
+        redirects at ``/r/<item_id>``.
 
         Args:
             webhook_url: Public HTTPS base URL Telegram will POST updates to
@@ -2101,13 +2131,12 @@ class TelegramCurator:
         url_path = self.bot_token
         full_url = f"{webhook_url.rstrip('/')}/{url_path}"
 
-        logger.info(f"Starting Telegram bot webhook on port {port}, url={webhook_url}/<token>")
+        logger.info(f"Starting webhook server on port {port}, url={webhook_url}/<token>")
+        app = make_app(self.application, url_path, self.resolve_open)
+        server = app.listen(port, address="0.0.0.0")
         await self.application.start()
-        await self.application.updater.start_webhook(
-            listen="0.0.0.0",
-            port=port,
-            url_path=url_path,
-            webhook_url=full_url,
+        await self.application.bot.set_webhook(
+            url=full_url, allowed_updates=Update.ALL_TYPES,
         )
 
         try:
@@ -2116,6 +2145,7 @@ class TelegramCurator:
         except asyncio.CancelledError:
             pass
         finally:
+            server.stop()
             await self.shutdown()
 
     async def shutdown(self) -> None:

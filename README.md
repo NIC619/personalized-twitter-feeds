@@ -284,7 +284,7 @@ twitter-curator/
 2. **Pre-filter**: Items containing blocked keywords (managed via `/blockword`) are dropped before Claude scoring. Matching is whole-word, case-insensitive, across tweet text, X Article title/body, and quoted-tweet text. Content from starred authors is currently exempt from the blocklist.
 3. **Neighbours**: Each tweet is embedded and its 3 most similar past votes are looked up in pgvector
 4. **Filter**: Claude scores each tweet 0-100 against your profile, seeing each tweet's own past-vote neighbours. Output is a strict tool-use schema, no JSON parsing.
-5. **Send**: Tweets scoring ≥70 are sent to Telegram with 👍/👎 buttons, plus 2 random below-threshold items marked 🎲 (exploration) so your votes also measure what the filter misses
+5. **Send**: Tweets scoring ≥70 are sent to Telegram with 🔥/👍/👎 buttons (emoji reactions work too), plus 2 random below-threshold items marked 🎲 (exploration) so your votes also measure what the filter misses
 6. **Store**: All tweets and feedback saved to Supabase
 7. **Learn**: Every vote becomes a neighbour for future scoring and a label for `scripts/eval_prompt.py`
 
@@ -340,6 +340,14 @@ The choices below reflect how I personally want this tool to behave. They are no
 - **24-hour fetch window, max 100 tweets per run.** Trades recency against catch-up after absences.
 - **Tweets grouped by thread (conversation_id) and sorted chronologically within threads** at delivery time. Optimizes for reading threads as a unit rather than flat chronological order.
 
+### Feedback capture
+
+- **Three ways to vote, lowest friction first**: react to the message with an emoji (🔥 strong like, 👍 / ❤️ like, 👎 skip; remove the reaction to retract), tap the 🔥 👍 👎 buttons, or `/like` a URL. Reactions save immediately; buttons keep a 10-second undo.
+- **The model proposes the reason, you confirm it.** After every vote the bot replies with a one-line guess ("Liked because: concrete preconf economics?") and ✅ / ✏️ / skip. Free text beats fixed categories, and it is what the compiled profile is built from. The old eight reason buttons are gone; their labels survive as reason text on past votes.
+- **Reply to any item to attach a note.**
+- **Opens are tracked.** In production, item links go through `/r/<item_id>` on the bot's own web server, which records an `open` signal and redirects. Set `REDIRECT_BASE_URL` to override (defaults to `WEBHOOK_URL`); links stay direct in `DEVELOPMENT_MODE`.
+- **Everything lands in the `signals` table** (`kind`: vote / note / open, with `strength`, `reason`, `source`). Votes are also still written to the legacy `feedback` table until phase 3 moves reads over.
+
 ### Feedback & RAG
 
 - **Neighbours come only from explicitly voted items** (top-3 per item, `RAG_SIMILARITY_LIMIT`) — unvoted tweets don't influence future scoring. Trusts explicit signal only; ignores the implicit "sent but never reacted to" signal.
@@ -360,6 +368,7 @@ The choices below reflect how I personally want this tool to behave. They are no
 | `RAG_SIMILARITY_LIMIT` | 3        | Neighbours per item                     |
 | `EXPLORATION_PER_RUN` | 2         | Random below-threshold items sent per run (🎲) |
 | `CLAUDE_MODEL`      | claude-sonnet-4-6 | Scoring model                     |
+| `REDIRECT_BASE_URL` | `WEBHOOK_URL` | Base URL for click-tracking links; unset in dev = direct links |
 
 
 ## Troubleshooting

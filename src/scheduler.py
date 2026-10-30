@@ -450,18 +450,23 @@ async def feedback_handler(
     telegram_message_id: int,
     notes: str = None,
     embedding_manager: Optional[EmbeddingManager] = None,
+    strength: int = 1,
+    source: str = "button",
 ) -> None:
-    """Handle feedback from Telegram buttons.
+    """Handle a vote from Telegram (button, reaction or /like).
 
-    Saves feedback and embeds the tweet for future RAG context.
+    Writes the legacy ``feedback`` row, appends a ``signals`` row, and
+    embeds the item for future neighbour lookups.
 
     Args:
         db: Database client
-        tweet_id: Twitter ID of the tweet
+        tweet_id: Item ID
         vote: 'up' or 'down'
         telegram_message_id: Telegram message ID
         notes: Optional reason for the vote
-        embedding_manager: Optional EmbeddingManager to embed voted tweet
+        embedding_manager: Optional EmbeddingManager to embed voted item
+        strength: 1 normal, 2 strong (🔥)
+        source: 'button' | 'reaction' | 'like_cmd'
     """
     try:
         db.save_feedback(
@@ -470,12 +475,28 @@ async def feedback_handler(
             telegram_message_id=telegram_message_id,
             notes=notes,
         )
-        logger.info(f"Saved feedback: tweet={tweet_id}, vote={vote}, notes={notes}")
+        logger.info(
+            f"Saved feedback: tweet={tweet_id}, vote={vote}, strength={strength}, "
+            f"source={source}, notes={notes}"
+        )
     except Exception as e:
         logger.error(f"Error saving feedback: {e}")
         return
 
-    # Embed the tweet for RAG (skip if already embedded)
+    try:
+        db.save_signal(
+            item_id=tweet_id,
+            kind="vote",
+            value=vote,
+            strength=strength,
+            reason=notes,
+            source=source,
+            telegram_message_id=telegram_message_id,
+        )
+    except Exception as e:
+        logger.warning(f"Signal save failed (feedback row kept): {e}")
+
+    # Embed the item for RAG (skip if already embedded)
     if embedding_manager and embedding_manager.enabled:
         try:
             if not db.has_embedding(tweet_id):

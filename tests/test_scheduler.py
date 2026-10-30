@@ -183,6 +183,27 @@ class TestFeedbackHandler:
             telegram_message_id=42,
             notes="great content",
         )
+        db.save_signal.assert_called_once_with(
+            item_id="123", kind="vote", value="up", strength=1,
+            reason="great content", source="button", telegram_message_id=42,
+        )
+
+    @pytest.mark.asyncio
+    async def test_strength_and_source_passed_to_signal(self):
+        db = MagicMock()
+        await feedback_handler(
+            db=db, tweet_id="1", vote="up", telegram_message_id=7,
+            strength=2, source="reaction",
+        )
+        kwargs = db.save_signal.call_args[1]
+        assert kwargs["strength"] == 2 and kwargs["source"] == "reaction"
+
+    @pytest.mark.asyncio
+    async def test_signal_failure_keeps_feedback(self):
+        db = MagicMock()
+        db.save_signal.side_effect = RuntimeError("no table yet")
+        await feedback_handler(db=db, tweet_id="1", vote="down", telegram_message_id=7)
+        db.save_feedback.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_error_does_not_raise(self):

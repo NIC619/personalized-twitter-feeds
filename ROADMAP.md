@@ -79,7 +79,10 @@
 - [x] /starred command (list favorite authors)
 - [x] /star command (add/toggle favorite author — supports username, @mention, URL, multiple authors)
 - [ ] /unfav command (remove favorite author) — covered by /star toggle
-- [ ] Reply to tweet message to add notes
+- [x] Reply to tweet message to add notes
+- [x] Emoji reactions as votes (🔥 strong / 👍 / 👎), removal retracts
+- [x] Model-proposed vote reason with ✅ / ✏️ confirm (replaced fixed reason buttons)
+- [x] Click tracking via /r/<item_id> redirect → `open` signals
 
 ## Future Ideas
 

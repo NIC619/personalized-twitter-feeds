@@ -114,6 +114,140 @@ class DatabaseClient:
             logger.error(f"Error saving feedback: {e}")
             raise
 
+    def save_signal(
+        self,
+        item_id: str,
+        kind: str,
+        value: Optional[str] = None,
+        strength: int = 1,
+        reason: Optional[str] = None,
+        source: Optional[str] = None,
+        telegram_message_id: Optional[int] = None,
+    ) -> dict:
+        """Append a preference signal (vote / note / open) for an item."""
+        record = {
+            "item_id": item_id,
+            "kind": kind,
+            "value": value,
+            "strength": strength,
+            "reason": reason,
+            "source": source,
+            "telegram_message_id": telegram_message_id,
+        }
+        try:
+            result = self.client.table("signals").insert(record).execute()
+            logger.info(f"Saved signal {kind}={value} for item {item_id}")
+            return result.data[0] if result.data else {}
+        except Exception as e:
+            logger.error(f"Error saving signal: {e}")
+            raise
+
+    def update_latest_vote_reason(self, item_id: str, reason: str) -> bool:
+        """Attach a reason to the most recent vote on an item.
+
+        Updates both the legacy ``feedback.notes`` and ``signals.reason``.
+
+        Returns:
+            True if a vote existed to update.
+        """
+        updated = False
+        try:
+            fb = (
+                self.client.table("feedback")
+                .select("id")
+                .eq("tweet_id", item_id)
+                .order("voted_at", desc=True)
+                .limit(1)
+                .execute()
+            )
+            if fb.data:
+                self.client.table("feedback").update({"notes": reason}).eq(
+                    "id", fb.data[0]["id"]
+                ).execute()
+                updated = True
+            sig = (
+                self.client.table("signals")
+                .select("id")
+                .eq("item_id", item_id)
+                .eq("kind", "vote")
+                .order("created_at", desc=True)
+                .limit(1)
+                .execute()
+            )
+            if sig.data:
+                self.client.table("signals").update({"reason": reason}).eq(
+                    "id", sig.data[0]["id"]
+                ).execute()
+                updated = True
+        except Exception as e:
+            logger.error(f"Error updating vote reason: {e}")
+            raise
+        return updated
+
+    def delete_latest_vote(self, item_id: str) -> None:
+        """Remove the most recent vote on an item (reaction retracted)."""
+        try:
+            fb = (
+                self.client.table("feedback")
+                .select("id")
+                .eq("tweet_id", item_id)
+                .order("voted_at", desc=True)
+                .limit(1)
+                .execute()
+            )
+            if fb.data:
+                self.client.table("feedback").delete().eq("id", fb.data[0]["id"]).execute()
+            sig = (
+                self.client.table("signals")
+                .select("id")
+                .eq("item_id", item_id)
+                .eq("kind", "vote")
+                .order("created_at", desc=True)
+                .limit(1)
+                .execute()
+            )
+            if sig.data:
+                self.client.table("signals").delete().eq("id", sig.data[0]["id"]).execute()
+            logger.info(f"Deleted latest vote for item {item_id}")
+        except Exception as e:
+            logger.error(f"Error deleting vote: {e}")
+            raise
+
+    def get_tweet_by_message_id(self, telegram_message_id: int) -> Optional[dict]:
+        """Find the item that was sent as a given Telegram message."""
+        try:
+            result = (
+                self.client.table("tweets")
+                .select("*")
+                .eq("telegram_message_id", telegram_message_id)
+                .limit(1)
+                .execute()
+            )
+            return result.data[0] if result.data else None
+        except Exception as e:
+            logger.error(f"Error looking up item by message id: {e}")
+            return None
+
+    def get_recent_reasons(self, item_ids: list[str], limit: int = 20) -> list[dict]:
+        """Confirmed reasons on the given items (for proposing new reasons)."""
+        if not item_ids:
+            return []
+        try:
+            result = (
+                self.client.table("signals")
+                .select("item_id,value,reason")
+                .in_("item_id", item_ids)
+                .eq("kind", "vote")
+                .not_.is_("reason", "null")
+                .order("created_at", desc=True)
+                .limit(limit)
+                .execute()
+            )
+            return result.data or []
+        except Exception as e:
+            logger.error(f"Error loading reasons: {e}")
+            return []
+
     def get_feedback_examples(
         self, vote_type: Optional[str] = None, limit: int = 10
     ) -> list[dict]:

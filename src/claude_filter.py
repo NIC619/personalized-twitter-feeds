@@ -90,6 +90,31 @@ SCORE_TOOL = {
 }
 
 
+REASON_PROMPT = """A reader just voted {verb} on the item below. Guess, in at most 12 words, WHY — phrased as a reusable preference about the content ("deep technical dive on preconfirmation economics", "event promotion without substance"), never a summary of the item and never starting with "the reader".
+
+## Reader profile
+{profile}
+
+## Reasons the reader gave on similar items
+{past_reasons}
+
+## Item
+{item_json}
+
+Call propose_reason with your best single guess."""
+
+
+REASON_TOOL = {
+    "name": "propose_reason",
+    "description": "Propose the reader's reason for the vote.",
+    "input_schema": {
+        "type": "object",
+        "properties": {"reason": {"type": "string"}},
+        "required": ["reason"],
+    },
+}
+
+
 class ClaudeFilter:
     """Claude-based content scorer."""
 
@@ -196,6 +221,42 @@ class ClaudeFilter:
                 )
             all_scores.extend(self._score_batch(batch, neighbors, profile))
         return all_scores
+
+    def propose_reason(
+        self,
+        item: dict,
+        vote: str,
+        strength: int = 1,
+        neighbors: Optional[list[dict]] = None,
+        past_reasons: Optional[list[str]] = None,
+        profile: Optional[str] = None,
+    ) -> Optional[str]:
+        """Guess why the reader voted this way (one short phrase, or None)."""
+        verb = "DOWN (skip)" if vote == "down" else ("UP, strongly (🔥)" if strength >= 2 else "UP")
+        reasons = [r for r in (past_reasons or []) if r]
+        prompt = REASON_PROMPT.format(
+            verb=verb,
+            profile=profile or self.profile,
+            past_reasons="\n".join(f"- {r}" for r in reasons[:15]) or "(none yet)",
+            item_json=json.dumps(self.build_item_entry(item, neighbors), indent=2, ensure_ascii=False),
+        )
+        try:
+            response = self.client.messages.create(
+                model=self.model,
+                max_tokens=200,
+                temperature=0.0,
+                tools=[REASON_TOOL],
+                tool_choice={"type": "tool", "name": "propose_reason"},
+                messages=[{"role": "user", "content": prompt}],
+            )
+        except Exception as e:
+            logger.warning(f"Reason proposal failed: {e}")
+            return None
+        for block in getattr(response, "content", []) or []:
+            if getattr(block, "type", None) == "tool_use" and block.name == "propose_reason":
+                reason = str(block.input.get("reason", "")).strip().rstrip(".")
+                return reason[:160] or None
+        return None
 
     # ----------------------------------------------------------------- helpers
 

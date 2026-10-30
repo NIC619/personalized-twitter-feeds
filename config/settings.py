@@ -59,6 +59,11 @@ class Settings(BaseSettings):
         description="Public HTTPS base URL for the Telegram webhook, e.g. "
                     "https://app.up.railway.app. Required when development_mode=false.",
     )
+    redirect_base_url: Optional[str] = Field(
+        default=None,
+        description="Public base URL for click-tracking links (/r/<item_id>). "
+                    "Defaults to WEBHOOK_URL in production; links stay direct in dev.",
+    )
     port: int = Field(
         default=8080,
         description="Port the webhook server binds to. Railway injects this via the PORT env var.",

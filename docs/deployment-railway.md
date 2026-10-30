@@ -41,6 +41,7 @@ This project deploys as a single always-on **Web** service on Railway. One proce
 - `FAVORITE_THRESHOLD_OFFSET`, `MUTED_THRESHOLD_OFFSET`, `STARRED_AUTHOR_MAX_TWEETS`
 - `RAG_ENABLED`, `EMBEDDING_MODEL`, `RAG_SIMILARITY_LIMIT` (neighbours per item)
 - `EXPLORATION_PER_RUN`, `CLAUDE_MODEL`
+- `REDIRECT_BASE_URL` (defaults to `WEBHOOK_URL`) — base for `/r/<item_id>` click-tracking links served by the bot's own HTTP server, which also serves the Telegram webhook at `/<token>` and `/health`
 - Removed (ignored if still set): `CONTROL_PROMPT`, `AB_TEST_ENABLED`, `AB_TEST_EXPERIMENT_ID`, `AB_TEST_CHALLENGER_PROMPT`
 
 ### Timezone: `SCHEDULE_TIMEZONE` vs Railway's `TZ`
@@ -51,6 +52,9 @@ There are two separate timezone concerns — keep them in mind:
 2. **Container local time** — controlled by Railway's `TZ` env var. Affects log timestamps and any `datetime.now()` calls without a tz. Railway containers default to **UTC**. If you want log timestamps to match your local clock, set `TZ=Asia/Taipei` (or whatever you prefer) as a Railway env var. This is cosmetic — it does **not** affect the curation schedule.
 
 Recommended: set **both** to the same value to avoid confusion.
+
+### Reactions
+The webhook is registered with `allowed_updates=ALL_TYPES` so emoji reactions on sent items reach the bot. If you ever registered the webhook by hand, redeploying re-registers it with the right update types.
 
 ## Operational notes
 
