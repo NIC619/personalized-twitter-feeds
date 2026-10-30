@@ -37,32 +37,38 @@ def prompt_sent(claude_filter) -> str:
 class TestExtractScores:
     def test_extracts_valid_scores(self):
         resp = tool_response([
-            {"tweet_id": "1", "score": 85, "reason": "Relevant"},
-            {"tweet_id": "2", "score": 10, "reason": "Meme"},
+            {"item_id": "1", "score": 85, "reason": "Relevant"},
+            {"item_id": "2", "score": 10, "reason": "Meme"},
         ])
         result = ClaudeFilter._extract_scores(resp, {"1", "2"})
         assert result == [
-            {"tweet_id": "1", "score": 85, "reason": "Relevant"},
-            {"tweet_id": "2", "score": 10, "reason": "Meme"},
+            {"item_id": "1", "score": 85, "reason": "Relevant", "domain": "other"},
+            {"item_id": "2", "score": 10, "reason": "Meme", "domain": "other"},
         ]
+
+    def test_domain_kept_when_known(self):
+        resp = tool_response([{"item_id": "1", "score": 50, "reason": "r", "domain": "ai"},
+                              {"item_id": "2", "score": 50, "reason": "r", "domain": "made-up"}])
+        result = ClaudeFilter._extract_scores(resp, {"1", "2"})
+        assert [r["domain"] for r in result] == ["ai", "other"]
 
     def test_drops_unknown_and_duplicate_ids(self):
         resp = tool_response([
-            {"tweet_id": "1", "score": 85, "reason": "a"},
-            {"tweet_id": "1", "score": 20, "reason": "dupe"},
-            {"tweet_id": "999", "score": 90, "reason": "hallucinated"},
+            {"item_id": "1", "score": 85, "reason": "a"},
+            {"item_id": "1", "score": 20, "reason": "dupe"},
+            {"item_id": "999", "score": 90, "reason": "hallucinated"},
         ])
         result = ClaudeFilter._extract_scores(resp, {"1", "2"})
-        assert [r["tweet_id"] for r in result] == ["1"]
+        assert [r["item_id"] for r in result] == ["1"]
         assert result[0]["score"] == 85
 
     def test_clamps_and_coerces(self):
         resp = tool_response([
-            {"tweet_id": 1, "score": 150, "reason": ""},
-            {"tweet_id": "2", "score": "abc", "reason": "x"},
+            {"item_id": 1, "score": 150, "reason": ""},
+            {"item_id": "2", "score": "abc", "reason": "x"},
         ])
         result = ClaudeFilter._extract_scores(resp, {"1", "2"})
-        assert result == [{"tweet_id": "1", "score": 100, "reason": "No reason provided"}]
+        assert result == [{"item_id": "1", "score": 100, "reason": "No reason provided", "domain": "other"}]
 
     def test_no_tool_block_returns_empty(self):
         resp = SimpleNamespace(content=[SimpleNamespace(type="text", text="sorry")])
@@ -78,16 +84,17 @@ class TestFilterTweets:
 
     def test_threshold_filtering(self, claude_filter, sample_tweets):
         claude_filter.client.messages.create.return_value = tool_response([
-            {"tweet_id": "123456789", "score": 85, "reason": "EIP discussion"},
-            {"tweet_id": "987654321", "score": 92, "reason": "Based rollup"},
-            {"tweet_id": "111222333", "score": 10, "reason": "Meme coin"},
+            {"item_id": "123456789", "score": 85, "reason": "EIP discussion"},
+            {"item_id": "987654321", "score": 92, "reason": "Based rollup"},
+            {"item_id": "111222333", "score": 10, "reason": "Meme coin"},
         ])
 
         result = claude_filter.filter_tweets(sample_tweets, threshold=70)
 
-        assert {t["tweet_id"] for t in result} == {"123456789", "987654321"}
+        assert {t["item_id"] for t in result} == {"123456789", "987654321"}
+        assert all(t["domain"] == "other" for t in sample_tweets)
         # All inputs annotated in place
-        meme = next(t for t in sample_tweets if t["tweet_id"] == "111222333")
+        meme = next(t for t in sample_tweets if t["item_id"] == "111222333")
         assert meme["filter_score"] == 10
         assert meme["filtered"] is False
 
@@ -107,7 +114,7 @@ class TestFilterTweets:
 
     def test_uses_tool_choice_and_schema(self, claude_filter, sample_tweet):
         claude_filter.client.messages.create.return_value = tool_response([
-            {"tweet_id": "123456789", "score": 80, "reason": "ok"},
+            {"item_id": "123456789", "score": 80, "reason": "ok"},
         ])
         claude_filter.filter_tweets([sample_tweet])
 
@@ -132,7 +139,7 @@ class TestFilterTweets:
         claude_filter.client.messages.create.return_value = tool_response([])
         neighbors = {
             "123456789": [
-                {"tweet_id": "x", "text": "blob fee analysis", "author_username": "dankrad",
+                {"item_id": "x", "text": "blob fee analysis", "author_username": "dankrad",
                  "vote": "up", "similarity": 0.91},
             ],
         }
@@ -140,7 +147,7 @@ class TestFilterTweets:
 
         prompt = prompt_sent(claude_filter)
         items = json.loads(prompt.split("## Items\n", 1)[1].rsplit("\n\nScore every item", 1)[0])
-        by_id = {i["tweet_id"]: i for i in items}
+        by_id = {i["item_id"]: i for i in items}
         assert by_id["123456789"]["similar_past_votes"] == [
             {"vote": "up", "similarity": 0.91, "author": "dankrad", "text": "blob fee analysis"},
         ]
@@ -158,31 +165,31 @@ class TestFilterTweets:
     def test_batches_large_input(self, claude_filter):
         claude_filter.batch_size = 2
         tweets = [
-            {"tweet_id": str(i), "author_username": "a", "text": f"t{i}", "metrics": {}}
+            {"item_id": str(i), "author_username": "a", "text": f"t{i}", "metrics": {}}
             for i in range(5)
         ]
         claude_filter.client.messages.create.side_effect = [
-            tool_response([{"tweet_id": "0", "score": 90, "reason": ""}, {"tweet_id": "1", "score": 90, "reason": ""}]),
-            tool_response([{"tweet_id": "2", "score": 10, "reason": ""}, {"tweet_id": "3", "score": 90, "reason": ""}]),
-            tool_response([{"tweet_id": "4", "score": 90, "reason": ""}]),
+            tool_response([{"item_id": "0", "score": 90, "reason": ""}, {"item_id": "1", "score": 90, "reason": ""}]),
+            tool_response([{"item_id": "2", "score": 10, "reason": ""}, {"item_id": "3", "score": 90, "reason": ""}]),
+            tool_response([{"item_id": "4", "score": 90, "reason": ""}]),
         ]
 
         result = claude_filter.filter_tweets(tweets, threshold=70)
 
         assert claude_filter.client.messages.create.call_count == 3
-        assert {t["tweet_id"] for t in result} == {"0", "1", "3", "4"}
+        assert {t["item_id"] for t in result} == {"0", "1", "3", "4"}
 
 
 # --- build_item_entry ---
 
 class TestBuildItemEntry:
     def test_minimal_entry(self):
-        entry = ClaudeFilter.build_item_entry({"tweet_id": "1", "author_username": "a", "text": "hi"})
-        assert entry == {"tweet_id": "1", "author": "a", "text": "hi", "likes": 0, "retweets": 0}
+        entry = ClaudeFilter.build_item_entry({"item_id": "1", "author_username": "a", "text": "hi"})
+        assert entry == {"item_id": "1", "author": "a", "text": "hi", "likes": 0, "retweets": 0}
 
     def test_blog_post_type_and_truncated_neighbor_text(self):
         entry = ClaudeFilter.build_item_entry(
-            {"tweet_id": "b", "author_username": "blog", "text": "post", "content_type": "blog_post"},
+            {"item_id": "b", "author_username": "blog", "text": "post", "content_type": "blog_post"},
             neighbors=[{"vote": "down", "similarity": 0.7, "author_username": "z", "text": "x" * 500,
                         "reason": "Event/promo"}],
         )

@@ -209,7 +209,7 @@ class TestRunErrorReport:
                 "source": "src.embeddings",
                 "level": "WARNING",
                 "error_type": None,
-                "message": "find_similar_tweets: supabase 502",
+                "message": "find_similar_voted: supabase 502",
             },
             {
                 "logged_at": "2026-03-02T11:00:00+00:00",

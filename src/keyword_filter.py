@@ -81,7 +81,7 @@ def filter_blocked_keywords(
             item["blocked_keyword"] = match
             blocked.append(item)
             logger.info(
-                f"Blocked by keyword '{match}': @{author} {item.get('tweet_id', '?')}"
+                f"Blocked by keyword '{match}': @{author} {item.get('item_id', '?')}"
             )
         else:
             kept.append(item)

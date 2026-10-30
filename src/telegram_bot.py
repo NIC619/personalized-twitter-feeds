@@ -19,6 +19,7 @@ from telegram.ext import (
     filters,
 )
 
+from src.capture import classify_message, forward_origin
 from src.content import is_blog_content, is_http_url, is_tweet_url, is_twitter_profile_url
 from src.feedback_flow import (
     Vote,
@@ -70,6 +71,8 @@ class TelegramCurator:
         add_blocked_keyword_callback: Optional[Callable] = None,
         list_blocked_keywords_callback: Optional[Callable] = None,
         remove_blocked_keyword_callback: Optional[Callable] = None,
+        capture_url_callback: Optional[Callable] = None,
+        capture_text_callback: Optional[Callable] = None,
         reason_callback: Optional[Callable] = None,
         reason_confirm_callback: Optional[Callable] = None,
         retract_vote_callback: Optional[Callable] = None,
@@ -83,13 +86,13 @@ class TelegramCurator:
         Args:
             bot_token: Telegram bot token from BotFather
             chat_id: Target chat ID to send messages to
-            feedback_callback: Async callback function(tweet_id, vote, message_id)
+            feedback_callback: Async callback function(item_id, vote, message_id)
             favorite_author_callback: Async callback function(username) → state string
             mute_author_callback: Async callback function(username) → state string
             stats_callback: Async callback function() → list of author stat dicts
             list_starred_callback: Async callback function() → list of starred usernames
-            like_tweet_callback: Async callback function(tweet_id) → tweet dict or None
-            thread_callback: Async callback function(tweet_id) → list of tweet dicts or None
+            like_tweet_callback: Async callback function(item_id) → tweet dict or None
+            thread_callback: Async callback function(item_id) → list of tweet dicts or None
             like_blog_callback: Async callback function(url) → blog post dict or None
             newsletter_callback: Async callback function(url, ignored_sections) → list of blog post dicts
             get_newsletter_prefs_callback: Async callback function(domain) → prefs dict or None
@@ -98,6 +101,8 @@ class TelegramCurator:
             add_blocked_keyword_callback: Async callback function(keyword) → saved keyword
             list_blocked_keywords_callback: Async callback function() → list of keywords
             remove_blocked_keyword_callback: Async callback function(keyword) → None
+            capture_url_callback: Async function(url) → item dict (fetched, scored, saved) or None
+            capture_text_callback: Async function(text, origin) → item dict or None
             reason_callback: Async function(item_id, vote, strength) → proposed reason text or None
             reason_confirm_callback: Async function(item_id, reason) → None
             retract_vote_callback: Async function(item_id) → None (reaction removed)
@@ -123,6 +128,8 @@ class TelegramCurator:
         self.add_blocked_keyword_callback = add_blocked_keyword_callback
         self.list_blocked_keywords_callback = list_blocked_keywords_callback
         self.remove_blocked_keyword_callback = remove_blocked_keyword_callback
+        self.capture_url_callback = capture_url_callback
+        self.capture_text_callback = capture_text_callback
         self.reason_callback = reason_callback
         self.reason_confirm_callback = reason_confirm_callback
         self.retract_vote_callback = retract_vote_callback
@@ -131,8 +138,8 @@ class TelegramCurator:
         self.lookup_message_callback = lookup_message_callback
         self.redirect_base_url = redirect_base_url
         self.application: Optional[Application] = None
-        self._pending_feedback: dict[str, dict] = {}  # tweet_id → pending save info
-        self._tweet_authors: dict[str, str] = {}  # tweet_id → username
+        self._pending_feedback: dict[str, dict] = {}  # item_id → pending save info
+        self._tweet_authors: dict[str, str] = {}  # item_id → username
         self._message_items: dict[int, str] = {}  # telegram message_id → item_id
         self._item_votes: dict[str, Vote] = {}  # item_id → latest vote
         self._reason_prompts: dict[int, str] = {}  # proposal message_id → item_id
@@ -462,7 +469,7 @@ class TelegramCurator:
         await update.message.reply_text("\n".join(results))
 
     @staticmethod
-    def _extract_tweet_id(arg: str) -> str | None:
+    def _extract_item_id(arg: str) -> str | None:
         """Extract a tweet ID from a URL or raw numeric string.
 
         Supports:
@@ -529,44 +536,101 @@ class TelegramCurator:
     async def _route_plain_message(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
-        """Default handler for plain text: route to /like or /star based on content.
+        """Default handler for plain messages: everything you send is captured.
 
-        - Tweet URLs, numeric tweet IDs, and non-tweet HTTP(S) URLs → /like
-        - Twitter/X profile URLs, @mentions, and plain usernames → /star
+        - Tweet URLs / numeric ids → like that tweet
+        - Profile URLs / @handles → star the author
+        - Any other URL → fetch, score, store as an item with an implied like
+        - Forwarded posts and free text (20+ chars) → stored as an item with an implied like
         """
-        if not update.message or not update.message.text:
+        message = update.message
+        if not message or not message.text:
             return
 
-        args = update.message.text.strip().split()
-        if not args:
-            return
+        origin = forward_origin(message)
+        classified = classify_message(message.text, forwarded=origin is not None)
 
-        like_args: list[str] = []
-        star_args: list[str] = []
-        unknown: list[str] = []
-
-        for arg in args:
-            if is_http_url(arg):
-                if is_twitter_profile_url(arg):
-                    star_args.append(arg)
-                else:
-                    # Tweet URL or any other URL (blog) → like
-                    like_args.append(arg)
-            elif arg.isdigit():
-                like_args.append(arg)
-            elif re.match(r"^@?[A-Za-z0-9_]+$", arg):
-                star_args.append(arg)
-            else:
-                unknown.append(arg)
-
-        if like_args and self.like_tweet_callback:
-            await self._like_tweets(update, like_args)
-        if star_args and self.favorite_author_callback:
-            await self._star_authors(update, star_args)
-        if unknown:
-            await update.message.reply_text(
-                "Could not interpret: " + " ".join(unknown)
+        if classified.tweet_refs and self.like_tweet_callback:
+            await self._like_tweets(update, classified.tweet_refs)
+        for url in classified.urls:
+            await self._capture_url(update, url)
+        if classified.usernames and self.favorite_author_callback:
+            await self._star_authors(update, classified.usernames)
+        if classified.text:
+            await self._capture_text(update, classified.text, origin)
+        if classified.unknown:
+            await message.reply_text(
+                "Could not interpret: " + " ".join(classified.unknown)
+                + "\n(Send a URL, a @handle, or a longer note to save it.)"
             )
+
+    async def _capture_url(self, update: Update, url: str) -> None:
+        """Store a non-tweet URL as a liked item."""
+        if not self.capture_url_callback:
+            await self._like_blog_post(update, url)
+            return
+        await update.message.reply_text("Saving…")
+        try:
+            item = await self.capture_url_callback(url)
+        except Exception as e:
+            logger.error(f"Error capturing {url}: {e}")
+            await update.message.reply_text("Error saving that link.")
+            return
+        if not item:
+            await update.message.reply_text("Could not save that link.")
+            return
+        self._tweet_authors[item["item_id"]] = item.get("author_username")
+        if not await self._send_liked_item(item["item_id"], self._format_item_message(item)):
+            await update.message.reply_text("Error sending item.")
+
+    async def _capture_text(self, update: Update, text: str, origin: Optional[dict]) -> None:
+        """Store free text / a forwarded post as a liked item."""
+        if not self.capture_text_callback:
+            await update.message.reply_text("Text capture not available.")
+            return
+        try:
+            item = await self.capture_text_callback(text, origin)
+        except Exception as e:
+            logger.error(f"Error capturing text: {e}")
+            await update.message.reply_text("Error saving that.")
+            return
+        if not item:
+            await update.message.reply_text("Could not save that.")
+            return
+        self._tweet_authors[item["item_id"]] = item.get("author_username")
+        if not await self._send_liked_item(item["item_id"], self._format_item_message(item)):
+            await update.message.reply_text("Error sending item.")
+
+    def _format_item_message(self, item: dict) -> str:
+        """Format any item (tweet, article, forwarded post, note) for Telegram."""
+        if item.get("content_type") == "tweet" and item.get("metrics"):
+            return self._format_like_message(item)
+        if item.get("article") or item.get("content_type") == "blog_post":
+            return self._format_blog_like_message(item)
+        author = self._escape_html(item.get("author_name") or item.get("author_username") or "note")
+        header = f"<b>{author}</b>"
+        if item.get("url"):
+            header += f" | <a href=\"{self._link(item)}\">source</a>"
+        domain = item.get("domain")
+        if domain:
+            header += f"  <i>#{self._escape_html(domain)}</i>"
+        body = self._escape_html((item.get("text") or "")[:1200])
+        return f"{header}\n\n{body}"
+
+    async def send_profile_update(self, written: dict[str, str]) -> None:
+        """Announce a recompiled profile with its overall section."""
+        if not self.application:
+            return
+        overall = written.get("overall", "")
+        domains = ", ".join(d for d in written if d != "overall")
+        text = (
+            f"🧭 <b>Preference profile updated</b> ({domains})\n\n"
+            f"{self._escape_html(overall[:3000])}"
+        )
+        await self.application.bot.send_message(
+            chat_id=self.chat_id, text=text, parse_mode="HTML",
+            disable_web_page_preview=True,
+        )
 
     async def _handle_like(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
@@ -615,33 +679,33 @@ class TelegramCurator:
         for arg in args:
             # Check if this is a blog post URL (not a tweet URL)
             if is_http_url(arg) and not is_tweet_url(arg):
-                await self._like_blog_post(update, arg)
+                await self._capture_url(update, arg)
                 continue
 
-            tweet_id = self._extract_tweet_id(arg)
-            if not tweet_id:
+            item_id = self._extract_item_id(arg)
+            if not item_id:
                 await update.message.reply_text(f"Could not parse ID from: {arg}")
                 continue
 
             try:
-                tweet = await self.like_tweet_callback(tweet_id)
+                tweet = await self.like_tweet_callback(item_id)
             except Exception as e:
-                logger.error(f"Error fetching tweet {tweet_id}: {e}")
-                await update.message.reply_text(f"Error fetching tweet {tweet_id}.")
+                logger.error(f"Error fetching tweet {item_id}: {e}")
+                await update.message.reply_text(f"Error fetching tweet {item_id}.")
                 continue
 
             if not tweet:
-                await update.message.reply_text(f"Tweet {tweet_id} not found.")
+                await update.message.reply_text(f"Tweet {item_id} not found.")
                 continue
 
             # Format message without score/reason
             message = self._format_like_message(tweet)
 
             # Store author mapping for undo functionality
-            self._tweet_authors[tweet_id] = tweet["author_username"]
+            self._tweet_authors[item_id] = tweet["author_username"]
 
-            if not await self._send_liked_item(tweet_id, message):
-                await update.message.reply_text(f"Error sending tweet {tweet_id}.")
+            if not await self._send_liked_item(item_id, message):
+                await update.message.reply_text(f"Error sending tweet {item_id}.")
 
     async def _like_blog_post(self, update: Update, url: str) -> None:
         """Process a blog post URL for liking."""
@@ -662,7 +726,7 @@ class TelegramCurator:
             await update.message.reply_text("Could not fetch blog post.")
             return
 
-        content_id = post["tweet_id"]
+        content_id = post["item_id"]
         message = self._format_blog_like_message(post)
 
         # Store author mapping for undo functionality
@@ -714,20 +778,20 @@ class TelegramCurator:
 
     async def _fetch_and_send_thread(self, update: Update, arg: str) -> None:
         """Fetch a thread and send it as a compiled message."""
-        tweet_id = self._extract_tweet_id(arg)
-        if not tweet_id:
+        item_id = self._extract_item_id(arg)
+        if not item_id:
             await update.message.reply_text(f"Could not parse tweet ID from: {arg}")
             return
 
         try:
-            tweets = await self.thread_callback(tweet_id)
+            tweets = await self.thread_callback(item_id)
         except Exception as e:
-            logger.error(f"Error fetching thread for {tweet_id}: {e}")
-            await update.message.reply_text(f"Error fetching thread for tweet {tweet_id}.")
+            logger.error(f"Error fetching thread for {item_id}: {e}")
+            await update.message.reply_text(f"Error fetching thread for tweet {item_id}.")
             return
 
         if not tweets:
-            await update.message.reply_text(f"Could not find thread for tweet {tweet_id}.")
+            await update.message.reply_text(f"Could not find thread for tweet {item_id}.")
             return
 
         message = self._format_thread_message(tweets)
@@ -740,8 +804,8 @@ class TelegramCurator:
                 disable_web_page_preview=True,
             )
         except Exception as e:
-            logger.error(f"Error sending thread message for {tweet_id}: {e}")
-            await update.message.reply_text(f"Error sending thread for tweet {tweet_id}.")
+            logger.error(f"Error sending thread message for {item_id}: {e}")
+            await update.message.reply_text(f"Error sending thread for tweet {item_id}.")
 
     def _format_thread_message(self, tweets: list[dict]) -> str:
         """Format a list of thread tweets into a single compiled message.
@@ -991,7 +1055,7 @@ class TelegramCurator:
         total = len(posts)
         sent_count = 0
         for idx, post in enumerate(posts, start=1):
-            content_id = post["tweet_id"]
+            content_id = post["item_id"]
             self._tweet_authors[content_id] = post["author_username"]
             message = self._format_blog_scored_message(post, position=(idx, total))
             keyboard = self._make_tweet_buttons(
@@ -1038,7 +1102,7 @@ class TelegramCurator:
         total = len(posts)
         sent_count = 0
         for idx, post in enumerate(posts, start=1):
-            content_id = post["tweet_id"]
+            content_id = post["item_id"]
             self._tweet_authors[content_id] = post["author_username"]
 
             message = self._format_blog_scored_message(post, position=(idx, total))
@@ -1183,7 +1247,7 @@ class TelegramCurator:
 
         message = (
             f"<b>{self._escape_html(author_name)}</b> | "
-            f"<a href=\"{url}\">{source}</a>\n\n"
+            f"<a href=\"{self._link(post)}\">{source}</a>\n\n"
             f"<b>{title}</b>\n"
         )
 
@@ -1566,13 +1630,13 @@ class TelegramCurator:
             )
             logger.info(f"Feedback undone: item={item_id}")
 
-        # Handle favorite author: "fav:{username}:{tweet_id}"
+        # Handle favorite author: "fav:{username}:{item_id}"
         elif data.startswith("fav:"):
             parts = data.split(":")
             if len(parts) != 3:
                 return
 
-            _, username, tweet_id = parts
+            _, username, item_id = parts
 
             state = None
             if self.favorite_author_callback:
@@ -1584,16 +1648,16 @@ class TelegramCurator:
 
             label = f"⭐ @{username}" if state == "favorited" else f"⭐ Author"
             await query.edit_message_reply_markup(
-                reply_markup=self._make_tweet_buttons(tweet_id, username, fav_label=label)
+                reply_markup=self._make_tweet_buttons(item_id, username, fav_label=label)
             )
 
-        # Handle mute author: "mute:{username}:{tweet_id}"
+        # Handle mute author: "mute:{username}:{item_id}"
         elif data.startswith("mute:"):
             parts = data.split(":")
             if len(parts) != 3:
                 return
 
-            _, username, tweet_id = parts
+            _, username, item_id = parts
 
             state = None
             if self.mute_author_callback:
@@ -1605,7 +1669,7 @@ class TelegramCurator:
 
             label = f"🔇 @{username}" if state == "muted" else f"🔇 Mute"
             await query.edit_message_reply_markup(
-                reply_markup=self._make_tweet_buttons(tweet_id, username, mute_label=label)
+                reply_markup=self._make_tweet_buttons(item_id, username, mute_label=label)
             )
 
     async def send_tweet(
@@ -1617,7 +1681,7 @@ class TelegramCurator:
 
         Args:
             tweet: Tweet dictionary with:
-                - tweet_id: Twitter ID
+                - item_id: Twitter ID
                 - author_username: Author's username
                 - author_name: Author's display name
                 - text: Tweet text
@@ -1636,10 +1700,10 @@ class TelegramCurator:
         message = self._format_tweet_message(tweet, position=position)
 
         # Store author mapping for undo functionality
-        self._tweet_authors[tweet["tweet_id"]] = tweet["author_username"]
+        self._tweet_authors[tweet["item_id"]] = tweet["author_username"]
 
         # Create inline keyboard with feedback buttons
-        keyboard = self._make_tweet_buttons(tweet["tweet_id"], tweet["author_username"])
+        keyboard = self._make_tweet_buttons(tweet["item_id"], tweet["author_username"])
 
         try:
             sent_message = await self.application.bot.send_message(
@@ -1649,28 +1713,28 @@ class TelegramCurator:
                 parse_mode="HTML",
                 disable_web_page_preview=True,
             )
-            self._message_items[sent_message.message_id] = tweet["tweet_id"]
-            logger.info(f"Sent tweet {tweet['tweet_id']} to Telegram")
+            self._message_items[sent_message.message_id] = tweet["item_id"]
+            logger.info(f"Sent tweet {tweet['item_id']} to Telegram")
             return sent_message.message_id
         except Exception as e:
-            logger.error(f"Error sending tweet {tweet['tweet_id']} to Telegram: {e}")
+            logger.error(f"Error sending tweet {tweet['item_id']} to Telegram: {e}")
             return None
 
     @staticmethod
     def _make_tweet_buttons(
-        tweet_id: str,
+        item_id: str,
         username: Optional[str],
         fav_label: str = "⭐ Author",
         mute_label: str = "🔇 Mute",
     ) -> InlineKeyboardMarkup:
         """Vote row (🔥 👍 👎) plus author controls when a username is known."""
-        return vote_buttons(tweet_id, username, fav_label=fav_label, mute_label=mute_label)
+        return vote_buttons(item_id, username, fav_label=fav_label, mute_label=mute_label)
 
     # ------------------------------------------------------------ vote flow
 
     def _link(self, item: dict) -> str:
         """Tracking link for an item when configured, else its real URL."""
-        return redirect_url(self.redirect_base_url, item["tweet_id"]) or item["url"]
+        return redirect_url(self.redirect_base_url, item["item_id"]) or item["url"]
 
     async def _item_for_message(self, message_id: int) -> Optional[str]:
         item_id = self._message_items.get(message_id)
@@ -1682,9 +1746,9 @@ class TelegramCurator:
             logger.warning(f"Message lookup failed for {message_id}: {e}")
             return None
         if item:
-            self._message_items[message_id] = item["tweet_id"]
-            self._tweet_authors.setdefault(item["tweet_id"], item.get("author_username"))
-            return item["tweet_id"]
+            self._message_items[message_id] = item["item_id"]
+            self._tweet_authors.setdefault(item["item_id"], item.get("author_username"))
+            return item["item_id"]
         return None
 
     async def _send_liked_item(self, item_id: str, message: str) -> bool:
@@ -1731,7 +1795,7 @@ class TelegramCurator:
             if self.feedback_callback:
                 try:
                     await self.feedback_callback(
-                        tweet_id=item_id,
+                        item_id=item_id,
                         vote=vote.vote,
                         telegram_message_id=message_id,
                         notes=notes,
@@ -2024,7 +2088,7 @@ class TelegramCurator:
             delay_seconds: Delay between messages (default 1s)
 
         Returns:
-            Flat list of (tweet, message_id) tuples for mark_tweet_sent.
+            Flat list of (tweet, message_id) tuples for mark_item_sent.
         """
         total_tweets = sum(len(g) for g in tweet_groups)
         if not total_tweets:

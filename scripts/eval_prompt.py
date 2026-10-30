@@ -136,7 +136,7 @@ def summarize(rows: list[dict], threshold: int) -> dict:
 
 def load_labeled(db, limit: int | None, seed: int) -> list[dict]:
     items = db.get_labeled_items()
-    items.sort(key=lambda i: i["tweet_id"])
+    items.sort(key=lambda i: i["item_id"])
     if limit and limit < len(items):
         rng = random.Random(seed)
         items = rng.sample(items, limit)
@@ -145,7 +145,7 @@ def load_labeled(db, limit: int | None, seed: int) -> list[dict]:
 
 def score_items(claude, items: list[dict], neighbors: dict, profile: str | None,
                 workers: int) -> dict[str, dict]:
-    """Score all items in parallel batches. Returns tweet_id -> {score, reason}."""
+    """Score all items in parallel batches. Returns item_id -> {score, reason}."""
     batches = [items[i : i + claude.batch_size] for i in range(0, len(items), claude.batch_size)]
     out: dict[str, dict] = {}
 
@@ -157,7 +157,7 @@ def score_items(claude, items: list[dict], neighbors: dict, profile: str | None,
     with ThreadPoolExecutor(max_workers=workers) as pool:
         for scores in pool.map(_run, enumerate(batches)):
             for s in scores:
-                out[s["tweet_id"]] = s
+                out[s["item_id"]] = s
     return out
 
 
@@ -190,8 +190,8 @@ def run_eval(args) -> Path:
         )
         # Voted items were embedded when voted, so read those vectors back
         # instead of paying to re-embed; only embed whatever is missing.
-        vectors = db.get_embeddings([it["tweet_id"] for it in items])
-        missing = [it for it in items if it["tweet_id"] not in vectors]
+        vectors = db.get_embeddings([it["item_id"] for it in items])
+        missing = [it for it in items if it["item_id"] not in vectors]
         logger.info(f"Stored embeddings for {len(vectors)}/{len(items)} items")
         if missing and emb.enabled:
             try:
@@ -208,9 +208,9 @@ def run_eval(args) -> Path:
 
     rows = []
     for it in items:
-        s = scores.get(it["tweet_id"])
+        s = scores.get(it["item_id"])
         rows.append({
-            "tweet_id": it["tweet_id"],
+            "item_id": it["item_id"],
             "vote": it["user_vote"],
             "reason": it.get("vote_reason"),
             "exploration": bool(it.get("exploration")),

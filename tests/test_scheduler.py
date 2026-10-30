@@ -15,6 +15,7 @@ def components():
     telegram = AsyncMock()
     db = MagicMock()
     db.get_scored_ids.return_value = set()
+    db.get_latest_profiles.return_value = {}
     return twitter, claude, telegram, db
 
 
@@ -48,21 +49,21 @@ def curator(components):
 class TestDeduplicateTweets:
     def test_skip_already_scored(self, curator):
         curator.db.get_scored_ids.return_value = {"1"}
-        assert curator._deduplicate_tweets([{"tweet_id": "1", "text": "old"}]) == []
+        assert curator._deduplicate_tweets([{"item_id": "1", "text": "old"}]) == []
 
     def test_keep_new_tweet(self, curator):
         curator.db.get_scored_ids.return_value = set()
-        result = curator._deduplicate_tweets([{"tweet_id": "1", "text": "new"}])
-        assert [t["tweet_id"] for t in result] == ["1"]
+        result = curator._deduplicate_tweets([{"item_id": "1", "text": "new"}])
+        assert [t["item_id"] for t in result] == ["1"]
 
     def test_mixed_new_and_old_single_query(self, curator):
         curator.db.get_scored_ids.return_value = {"old"}
         tweets = [
-            {"tweet_id": "old", "text": "already scored"},
-            {"tweet_id": "new", "text": "fresh"},
+            {"item_id": "old", "text": "already scored"},
+            {"item_id": "new", "text": "fresh"},
         ]
         result = curator._deduplicate_tweets(tweets)
-        assert [t["tweet_id"] for t in result] == ["new"]
+        assert [t["item_id"] for t in result] == ["new"]
         curator.db.get_scored_ids.assert_called_once_with(["old", "new"])
 
     def test_empty(self, curator):
@@ -85,9 +86,9 @@ class TestRunDailyCuration:
     @pytest.mark.asyncio
     async def test_full_workflow_with_author_tiers(self, curator):
         tweets = [
-            {"tweet_id": "1", "author_username": "fav_author", "text": "a", "is_retweet": False},
-            {"tweet_id": "2", "author_username": "normal_author", "text": "b", "is_retweet": False},
-            {"tweet_id": "3", "author_username": "muted_author", "text": "c", "is_retweet": False},
+            {"item_id": "1", "author_username": "fav_author", "text": "a", "is_retweet": False},
+            {"item_id": "2", "author_username": "normal_author", "text": "b", "is_retweet": False},
+            {"item_id": "3", "author_username": "muted_author", "text": "c", "is_retweet": False},
         ]
         curator.twitter.fetch_timeline.return_value = tweets
         curator.twitter.fetch_user_tweets.return_value = []
@@ -119,9 +120,9 @@ class TestRunDailyCuration:
     @pytest.mark.asyncio
     async def test_retweet_skipping(self, curator):
         tweets = [
-            {"tweet_id": "1", "author_username": "normal", "text": "RT something", "is_retweet": True},
-            {"tweet_id": "2", "author_username": "fav", "text": "RT something else", "is_retweet": True},
-            {"tweet_id": "3", "author_username": "normal", "text": "original", "is_retweet": False},
+            {"item_id": "1", "author_username": "normal", "text": "RT something", "is_retweet": True},
+            {"item_id": "2", "author_username": "fav", "text": "RT something else", "is_retweet": True},
+            {"item_id": "3", "author_username": "normal", "text": "original", "is_retweet": False},
         ]
         curator.twitter.fetch_timeline.return_value = tweets
         curator.twitter.fetch_user_tweets.return_value = []
@@ -150,7 +151,7 @@ class TestRunDailyCuration:
 
     @pytest.mark.asyncio
     async def test_all_duplicates(self, curator):
-        tweets = [{"tweet_id": "1", "author_username": "a", "text": "x", "is_retweet": False}]
+        tweets = [{"item_id": "1", "author_username": "a", "text": "x", "is_retweet": False}]
         curator.twitter.fetch_timeline.return_value = tweets
         curator.twitter.fetch_user_tweets.return_value = []
         curator.db.get_favorite_authors.return_value = []
@@ -166,23 +167,13 @@ class TestRunDailyCuration:
 
 class TestFeedbackHandler:
     @pytest.mark.asyncio
-    async def test_delegates_to_db(self):
+    async def test_writes_vote_signal(self):
         db = MagicMock()
 
         await feedback_handler(
-            db=db,
-            tweet_id="123",
-            vote="up",
-            telegram_message_id=42,
-            notes="great content",
+            db=db, item_id="123", vote="up", telegram_message_id=42, notes="great content",
         )
 
-        db.save_feedback.assert_called_once_with(
-            tweet_id="123",
-            vote="up",
-            telegram_message_id=42,
-            notes="great content",
-        )
         db.save_signal.assert_called_once_with(
             item_id="123", kind="vote", value="up", strength=1,
             reason="great content", source="button", telegram_message_id=42,
@@ -192,47 +183,36 @@ class TestFeedbackHandler:
     async def test_strength_and_source_passed_to_signal(self):
         db = MagicMock()
         await feedback_handler(
-            db=db, tweet_id="1", vote="up", telegram_message_id=7,
+            db=db, item_id="1", vote="up", telegram_message_id=7,
             strength=2, source="reaction",
         )
         kwargs = db.save_signal.call_args[1]
         assert kwargs["strength"] == 2 and kwargs["source"] == "reaction"
 
     @pytest.mark.asyncio
-    async def test_signal_failure_keeps_feedback(self):
+    async def test_error_does_not_raise(self, mock_embedding_manager):
         db = MagicMock()
-        db.save_signal.side_effect = RuntimeError("no table yet")
-        await feedback_handler(db=db, tweet_id="1", vote="down", telegram_message_id=7)
-        db.save_feedback.assert_called_once()
+        db.save_signal.side_effect = Exception("DB error")
 
-    @pytest.mark.asyncio
-    async def test_error_does_not_raise(self):
-        db = MagicMock()
-        db.save_feedback.side_effect = Exception("DB error")
-
-        # Should not raise — just logs
         await feedback_handler(
-            db=db,
-            tweet_id="123",
-            vote="up",
-            telegram_message_id=42,
+            db=db, item_id="123", vote="up", telegram_message_id=42,
+            embedding_manager=mock_embedding_manager,
         )
+        # No embedding attempted when the vote itself failed
+        mock_embedding_manager.generate_embedding.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_embeds_tweet_on_feedback(self, mock_embedding_manager):
+    async def test_embeds_item_on_feedback(self, mock_embedding_manager):
         db = MagicMock()
         db.has_embedding.return_value = False
-        db.get_tweet_by_id.return_value = {"tweet_id": "123", "text": "great content"}
+        db.get_item.return_value = {"item_id": "123", "text": "great content"}
 
         await feedback_handler(
-            db=db,
-            tweet_id="123",
-            vote="up",
-            telegram_message_id=42,
+            db=db, item_id="123", vote="up", telegram_message_id=42,
             embedding_manager=mock_embedding_manager,
         )
 
-        db.save_feedback.assert_called_once()
+        db.save_signal.assert_called_once()
         mock_embedding_manager.generate_embedding.assert_called_once_with("great content")
         db.save_embedding.assert_called_once_with("123", [0.1] * 1536)
 
@@ -242,10 +222,7 @@ class TestFeedbackHandler:
         db.has_embedding.return_value = True
 
         await feedback_handler(
-            db=db,
-            tweet_id="123",
-            vote="up",
-            telegram_message_id=42,
+            db=db, item_id="123", vote="up", telegram_message_id=42,
             embedding_manager=mock_embedding_manager,
         )
 
@@ -257,16 +234,12 @@ class TestFeedbackHandler:
         db = MagicMock()
         db.has_embedding.side_effect = Exception("DB error")
 
-        # Feedback should still be saved
         await feedback_handler(
-            db=db,
-            tweet_id="123",
-            vote="up",
-            telegram_message_id=42,
+            db=db, item_id="123", vote="up", telegram_message_id=42,
             embedding_manager=mock_embedding_manager,
         )
 
-        db.save_feedback.assert_called_once()
+        db.save_signal.assert_called_once()
 
 
 class TestPickExploration:
@@ -281,22 +254,22 @@ class TestPickExploration:
     def test_picks_only_scored_non_passed(self, components):
         curator = self._curator(components, 5)
         scored = [
-            {"tweet_id": "pass", "filter_score": 90, "filter_reason": "x"},
-            {"tweet_id": "low", "filter_score": 30, "filter_reason": "x"},
-            {"tweet_id": "unscored", "filter_score": 0, "filter_reason": "Not scored by Claude"},
-            {"tweet_id": "none"},
+            {"item_id": "pass", "filter_score": 90, "filter_reason": "x"},
+            {"item_id": "low", "filter_score": 30, "filter_reason": "x"},
+            {"item_id": "unscored", "filter_score": 0, "filter_reason": "Not scored by Claude"},
+            {"item_id": "none"},
         ]
         picked = curator._pick_exploration(scored, [scored[0]])
-        assert [t["tweet_id"] for t in picked] == ["low"]
+        assert [t["item_id"] for t in picked] == ["low"]
 
     def test_respects_limit(self, components):
         curator = self._curator(components, 2)
-        scored = [{"tweet_id": str(i), "filter_score": 10, "filter_reason": "x"} for i in range(10)]
+        scored = [{"item_id": str(i), "filter_score": 10, "filter_reason": "x"} for i in range(10)]
         assert len(curator._pick_exploration(scored, [])) == 2
 
     def test_disabled(self, components):
         curator = self._curator(components, 0)
-        scored = [{"tweet_id": "1", "filter_score": 10, "filter_reason": "x"}]
+        scored = [{"item_id": "1", "filter_score": 10, "filter_reason": "x"}]
         assert curator._pick_exploration(scored, []) == []
 
     @pytest.mark.asyncio
@@ -304,8 +277,8 @@ class TestPickExploration:
         twitter, claude, telegram, db = components
         curator = self._curator(components, 1)
         tweets = [
-            {"tweet_id": "1", "author_username": "dev", "text": "good", "is_retweet": False},
-            {"tweet_id": "2", "author_username": "dev", "text": "meh", "is_retweet": False},
+            {"item_id": "1", "author_username": "dev", "text": "good", "is_retweet": False},
+            {"item_id": "2", "author_username": "dev", "text": "meh", "is_retweet": False},
         ]
         twitter.fetch_timeline.return_value = tweets
         twitter.fetch_user_tweets.return_value = []
@@ -328,9 +301,9 @@ class TestPickExploration:
         assert stats["filtered"] == 2
         sent = [t for g in telegram.send_daily_digest.call_args[0][0] for t in g]
         flagged = [t for t in sent if t.get("exploration")]
-        assert [t["tweet_id"] for t in flagged] == ["2"]
-        saved = db.save_tweets.call_args[0][0]
-        assert any(t.get("exploration") for t in saved if t["tweet_id"] == "2")
+        assert [t["item_id"] for t in flagged] == ["2"]
+        saved = db.save_items.call_args[0][0]
+        assert any(t.get("exploration") for t in saved if t["item_id"] == "2")
 
 
 class TestRagInPipeline:
@@ -346,7 +319,7 @@ class TestRagInPipeline:
         )
 
         tweets = [
-            {"tweet_id": "1", "author_username": "dev", "text": "rollup stuff", "is_retweet": False},
+            {"item_id": "1", "author_username": "dev", "text": "rollup stuff", "is_retweet": False},
         ]
         twitter.fetch_timeline.return_value = tweets
         twitter.fetch_user_tweets.return_value = []
@@ -354,7 +327,7 @@ class TestRagInPipeline:
         db.get_muted_authors.return_value = []
 
         mock_embedding_manager.find_neighbors.return_value = {
-            "1": [{"tweet_id": "x", "text": "liked tweet", "author_username": "a", "vote": "up", "similarity": 0.9}],
+            "1": [{"item_id": "x", "text": "liked tweet", "author_username": "a", "vote": "up", "similarity": 0.9}],
         }
 
         scored = [dict(tweets[0], filter_score=80, filter_reason="good", filtered=True)]
@@ -378,7 +351,7 @@ class TestRagInPipeline:
             filter_threshold=70, favorite_threshold_offset=20,
             muted_threshold_offset=15, embedding_manager=mock_embedding_manager,
         )
-        tweets = [{"tweet_id": "1", "author_username": "dev", "text": "x", "is_retweet": False}]
+        tweets = [{"item_id": "1", "author_username": "dev", "text": "x", "is_retweet": False}]
         twitter.fetch_timeline.return_value = tweets
         twitter.fetch_user_tweets.return_value = []
         db.get_favorite_authors.return_value = []
@@ -402,7 +375,7 @@ class TestRagInPipeline:
         )
 
         tweets = [
-            {"tweet_id": "1", "author_username": "dev", "text": "stuff", "is_retweet": False},
+            {"item_id": "1", "author_username": "dev", "text": "stuff", "is_retweet": False},
         ]
         twitter.fetch_timeline.return_value = tweets
         twitter.fetch_user_tweets.return_value = []

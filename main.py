@@ -16,6 +16,8 @@ from src.embeddings import EmbeddingManager
 from src.scheduler import DailyCurator, feedback_handler
 from src.blog_fetcher import BlogFetcher
 from src.error_logger import attach_db_error_handler
+from src.capture import minimal_url_item, text_item
+from src.profile_compiler import render_preferences_md, scoring_profile
 
 # Configure logging with colored console output
 class ColorFormatter(logging.Formatter):
@@ -80,6 +82,18 @@ def parse_args() -> argparse.Namespace:
         "--bot-only",
         action="store_true",
         help="Run only the Telegram bot (for receiving feedback)",
+    )
+    parser.add_argument(
+        "--compile-profile",
+        action="store_true",
+        help="Recompile preference profiles from recorded signals and exit",
+    )
+    parser.add_argument(
+        "--export-preferences",
+        type=str,
+        default=None,
+        metavar="PATH",
+        help="Write the latest compiled profiles as Markdown to PATH (e.g. PREFERENCES.md) and exit",
     )
     parser.add_argument(
         "--error-report",
@@ -152,11 +166,11 @@ def init_components(settings, num_tweets=None, hours=None):
 
     # Create feedback callback
     async def on_feedback(
-        tweet_id: str, vote: str, telegram_message_id: int, notes: str = None,
+        item_id: str, vote: str, telegram_message_id: int, notes: str = None,
         strength: int = 1, source: str = "button",
     ):
         await feedback_handler(
-            db, tweet_id, vote, telegram_message_id,
+            db, item_id, vote, telegram_message_id,
             notes=notes, embedding_manager=embedding_manager,
             strength=strength, source=source,
         )
@@ -164,7 +178,7 @@ def init_components(settings, num_tweets=None, hours=None):
     # Model-proposed reason for a vote (runs blocking calls in a thread)
     async def on_reason(item_id: str, vote: str, strength: int) -> str | None:
         def _propose():
-            item = db.get_tweet_by_id(item_id)
+            item = db.get_item(item_id)
             if not item:
                 return None
             neighbors = None
@@ -178,7 +192,7 @@ def init_components(settings, num_tweets=None, hours=None):
                     if neighbors:
                         past_reasons = [
                             r["reason"] for r in db.get_recent_reasons(
-                                [n["tweet_id"] for n in neighbors]
+                                [n["item_id"] for n in neighbors]
                             ) if r.get("reason")
                         ]
                 except Exception as e:
@@ -201,7 +215,7 @@ def init_components(settings, num_tweets=None, hours=None):
 
     async def on_open(item_id: str) -> str | None:
         def _resolve():
-            item = db.get_tweet_by_id(item_id)
+            item = db.get_item(item_id)
             if not item or not item.get("url"):
                 return None
             try:
@@ -212,7 +226,7 @@ def init_components(settings, num_tweets=None, hours=None):
         return await asyncio.to_thread(_resolve)
 
     async def on_lookup_message(telegram_message_id: int) -> dict | None:
-        return await asyncio.to_thread(db.get_tweet_by_message_id, telegram_message_id)
+        return await asyncio.to_thread(db.get_item_by_message_id, telegram_message_id)
 
     redirect_base_url = settings.redirect_base_url
     if redirect_base_url is None and not settings.development_mode:
@@ -237,20 +251,20 @@ def init_components(settings, num_tweets=None, hours=None):
     # Create like tweet callback.
     # Runs the blocking Twitter HTTP call in a worker thread so a slow/hung
     # request can't freeze the Telegram bot's event loop.
-    async def on_like_tweet(tweet_id: str) -> dict | None:
-        tweet = db.get_tweet_by_id(tweet_id)
+    async def on_like_tweet(item_id: str) -> dict | None:
+        tweet = db.get_item(item_id)
         if tweet:
             return tweet
-        tweet = await asyncio.to_thread(twitter.fetch_tweet, tweet_id)
+        tweet = await asyncio.to_thread(twitter.fetch_tweet, item_id)
         if tweet:
-            db.save_tweets([tweet])
+            db.save_items([tweet])
         return tweet
 
     # Create thread callback
-    async def on_fetch_thread(tweet_id: str) -> list[dict] | None:
-        tweets = await asyncio.to_thread(twitter.fetch_thread, tweet_id)
+    async def on_fetch_thread(item_id: str) -> list[dict] | None:
+        tweets = await asyncio.to_thread(twitter.fetch_thread, item_id)
         if tweets:
-            db.save_tweets(tweets)
+            db.save_items(tweets)
         return tweets
 
     # Initialize blog fetcher
@@ -274,9 +288,22 @@ def init_components(settings, num_tweets=None, hours=None):
     def _score_and_save(content: list[dict]) -> list[dict]:
         """Score items (no threshold) with their neighbours and persist them."""
         neighbors = _neighbors_for(content)
-        claude.filter_tweets(content, threshold=0, neighbors=neighbors)
-        db.save_tweets(content)
+        claude.filter_tweets(
+            content, threshold=0, neighbors=neighbors,
+            profile=curator_profile(),
+        )
+        db.save_items(content)
         return content
+
+    def curator_profile() -> str | None:
+        """Compiled profile text (or None → baseline), same as the daily run."""
+        if settings.profile_source != "compiled":
+            return None
+        try:
+            profiles = db.get_latest_profiles()
+        except Exception:
+            return None
+        return scoring_profile(profiles, claude.profile) if profiles else None
 
     # Create blog post like callback
     async def on_like_blog(url: str) -> dict | None:
@@ -285,6 +312,25 @@ def init_components(settings, num_tweets=None, hours=None):
             return None
         await asyncio.to_thread(_score_and_save, [post])
         return post
+
+    # Capture: any URL or text the user sends becomes an item (+ implied like)
+    async def on_capture_url(url: str) -> dict | None:
+        def _capture():
+            existing = db.get_item_by_url(url)
+            if existing:
+                return existing
+            post = blog_fetcher.fetch_blog_post(url)
+            if not post:
+                post = minimal_url_item(url)
+            post["source"] = "telegram"
+            return _score_and_save([post])[0]
+        return await asyncio.to_thread(_capture)
+
+    async def on_capture_text(text: str, origin: dict | None = None) -> dict | None:
+        def _capture():
+            item = text_item(text, origin)
+            return _score_and_save([item])[0]
+        return await asyncio.to_thread(_capture)
 
     # Create newsletter callback
     async def on_newsletter(url: str, ignored_sections: list[str] | None = None) -> list[dict]:
@@ -337,6 +383,8 @@ def init_components(settings, num_tweets=None, hours=None):
         add_blocked_keyword_callback=on_add_blocked_keyword,
         list_blocked_keywords_callback=on_list_blocked_keywords,
         remove_blocked_keyword_callback=on_remove_blocked_keyword,
+        capture_url_callback=on_capture_url,
+        capture_text_callback=on_capture_text,
         reason_callback=on_reason,
         reason_confirm_callback=on_reason_confirm,
         retract_vote_callback=on_retract_vote,
@@ -362,6 +410,7 @@ def init_components(settings, num_tweets=None, hours=None):
         rag_enabled=settings.rag_enabled,
         neighbors_per_item=settings.rag_similarity_limit,
         exploration_per_run=settings.exploration_per_run,
+        profile_source=settings.profile_source,
     )
 
     logger.info(f"All components initialized (max_tweets={max_tweets}, fetch_hours={fetch_hours})")
@@ -415,6 +464,12 @@ async def run_scheduled(
         skip_weekdays=[
             d.strip() for d in settings.schedule_skip_weekdays.split(",") if d.strip()
         ],
+    )
+    curator.schedule_weekly_profile(
+        settings.profile_compile_weekday,
+        hour=settings.schedule_hour,
+        minute=30,
+        timezone=settings.schedule_timezone,
     )
 
     if run_once_on_startup:
@@ -529,7 +584,32 @@ def main() -> int:
         return 1
 
     try:
-        if args.error_report:
+        if args.compile_profile:
+            _, _, telegram, db, curator, blog_fetcher = init_components(settings)
+            try:
+                async def _compile():
+                    await telegram.initialize()
+                    try:
+                        written = await curator.compile_profiles()
+                    finally:
+                        await telegram.shutdown()
+                    return written
+                written = asyncio.run(_compile())
+                logger.info(f"Compiled: {', '.join(written) if written else 'nothing'}")
+            finally:
+                blog_fetcher.close()
+            return 0
+        elif args.export_preferences:
+            db = DatabaseClient(url=settings.supabase_url, key=settings.supabase_key)
+            profiles = db.get_latest_profiles()
+            if not profiles:
+                logger.error("No compiled profiles yet. Run --compile-profile first.")
+                return 1
+            with open(args.export_preferences, "w") as fh:
+                fh.write(render_preferences_md(profiles))
+            logger.info(f"Wrote {args.export_preferences} ({len(profiles)} sections)")
+            return 0
+        elif args.error_report:
             from scripts.error_report import run_error_report
             db = DatabaseClient(url=settings.supabase_url, key=settings.supabase_key)
             run_error_report(db, args.error_report)

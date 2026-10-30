@@ -33,7 +33,7 @@ def twitter_client():
 
 
 def _make_tweet(
-    tweet_id=1,
+    item_id=1,
     text="hello",
     author_id="100",
     created_at=None,
@@ -44,7 +44,7 @@ def _make_tweet(
 ):
     """Create a tweet dict matching XDK response format."""
     return {
-        "id": str(tweet_id),
+        "id": str(item_id),
         "text": text,
         "author_id": str(author_id),
         "created_at": created_at,
@@ -74,7 +74,7 @@ def _make_page(data=None, includes=None, meta=None):
 class TestNormalizeTweet:
     def test_basic_field_mapping(self, twitter_client):
         tweet = _make_tweet(
-            tweet_id=42,
+            item_id=42,
             text="Test tweet",
             author_id="100",
             created_at="2025-01-15T10:00:00+00:00",
@@ -84,7 +84,7 @@ class TestNormalizeTweet:
 
         result = twitter_client._normalize_tweet(tweet, author)
 
-        assert result["tweet_id"] == "42"
+        assert result["item_id"] == "42"
         assert result["author_username"] == "alice"
         assert result["author_name"] == "Alice"
         assert result["text"] == "Test tweet"
@@ -123,13 +123,13 @@ class TestNormalizeTweet:
 
     def test_quoted_tweet_attached(self, twitter_client):
         tweet = _make_tweet(
-            tweet_id=42,
+            item_id=42,
             text="Great thread!",
             author_id="100",
             referenced_tweets=[{"type": "quoted", "id": "999"}],
         )
         author = _make_user(user_id="100", username="alice", name="Alice")
-        ref_tweet = _make_tweet(tweet_id=999, text="Original content here", author_id="200")
+        ref_tweet = _make_tweet(item_id=999, text="Original content here", author_id="200")
         ref_author = _make_user(user_id="200", username="bob", name="Bob")
         ref_map = {"999": ref_tweet}
         users = {"100": author, "200": ref_author}
@@ -139,18 +139,18 @@ class TestNormalizeTweet:
         assert result["quoted_tweet"] is not None
         assert result["quoted_tweet"]["author_username"] == "bob"
         assert result["quoted_tweet"]["text"] == "Original content here"
-        assert result["quoted_tweet"]["tweet_id"] == "999"
+        assert result["quoted_tweet"]["item_id"] == "999"
         assert result["is_retweet"] is False
 
     def test_retweeted_tweet_attached(self, twitter_client):
         tweet = _make_tweet(
-            tweet_id=42,
+            item_id=42,
             text="RT @bob: Original content",
             author_id="100",
             referenced_tweets=[{"type": "retweeted", "id": "999"}],
         )
         author = _make_user(user_id="100", username="alice", name="Alice")
-        ref_tweet = _make_tweet(tweet_id=999, text="Original content", author_id="200")
+        ref_tweet = _make_tweet(item_id=999, text="Original content", author_id="200")
         ref_author = _make_user(user_id="200", username="bob", name="Bob")
         ref_map = {"999": ref_tweet}
         users = {"100": author, "200": ref_author}
@@ -166,19 +166,19 @@ class TestNormalizeTweet:
         assert result["retweeted_from"] is not None
         assert result["retweeted_from"]["author_username"] == "bob"
         assert result["retweeted_from"]["author_name"] == "Bob"
-        assert result["retweeted_from"]["tweet_id"] == "999"
+        assert result["retweeted_from"]["item_id"] == "999"
         assert result["raw_data"]["retweeted_from"]["author_username"] == "bob"
 
     def test_retweeted_tweet_uses_original_note_tweet(self, twitter_client):
         """Retweets of long posts should pull the original's note_tweet full text."""
         tweet = _make_tweet(
-            tweet_id=42,
+            item_id=42,
             text="RT @bob: long preview...",
             author_id="100",
             referenced_tweets=[{"type": "retweeted", "id": "999"}],
         )
         author = _make_user(user_id="100", username="alice", name="Alice")
-        ref_tweet = _make_tweet(tweet_id=999, text="short preview", author_id="200")
+        ref_tweet = _make_tweet(item_id=999, text="short preview", author_id="200")
         ref_tweet["note_tweet"] = {"text": "Full long-form original content."}
         ref_author = _make_user(user_id="200", username="bob", name="Bob")
 
@@ -190,7 +190,7 @@ class TestNormalizeTweet:
 
     def test_referenced_tweet_not_in_includes(self, twitter_client):
         tweet = _make_tweet(
-            tweet_id=42,
+            item_id=42,
             text="Quote tweet",
             author_id="100",
             referenced_tweets=[{"type": "quoted", "id": "999"}],
@@ -203,7 +203,7 @@ class TestNormalizeTweet:
 
     def test_no_ref_map_defaults_none(self, twitter_client):
         tweet = _make_tweet(
-            tweet_id=42,
+            item_id=42,
             text="Normal tweet",
             author_id="100",
         )
@@ -258,7 +258,7 @@ class TestFetchTimeline:
 
     def test_single_page(self, twitter_client):
         tweet = _make_tweet(
-            tweet_id=1, text="hello", author_id="100",
+            item_id=1, text="hello", author_id="100",
             created_at="2025-01-15T10:00:00+00:00",
         )
         user = _make_user(user_id="100", username="alice", name="Alice")
@@ -275,17 +275,17 @@ class TestFetchTimeline:
         result = twitter_client.fetch_timeline(max_results=5)
 
         assert len(result) == 1
-        assert result[0]["tweet_id"] == "1"
+        assert result[0]["item_id"] == "1"
         assert result[0]["author_username"] == "alice"
         assert result[0]["quoted_tweet"] is None
 
     def test_single_page_with_quoted_tweet(self, twitter_client):
         tweet = _make_tweet(
-            tweet_id=1, text="Great!", author_id="100",
+            item_id=1, text="Great!", author_id="100",
             created_at="2025-01-15T10:00:00+00:00",
             referenced_tweets=[{"type": "quoted", "id": "50"}],
         )
-        ref_tweet = _make_tweet(tweet_id=50, text="Original post", author_id="200")
+        ref_tweet = _make_tweet(item_id=50, text="Original post", author_id="200")
         user = _make_user(user_id="100", username="alice", name="Alice")
         ref_user = _make_user(user_id="200", username="bob", name="Bob")
 
@@ -307,11 +307,11 @@ class TestFetchTimeline:
 
     def test_pagination(self, twitter_client):
         tweet1 = _make_tweet(
-            tweet_id=1, text="first", author_id="100",
+            item_id=1, text="first", author_id="100",
             created_at="2025-01-15T10:00:00+00:00",
         )
         tweet2 = _make_tweet(
-            tweet_id=2, text="second", author_id="100",
+            item_id=2, text="second", author_id="100",
             created_at="2025-01-15T10:00:00+00:00",
         )
         user = _make_user(user_id="100", username="alice", name="Alice")
@@ -334,8 +334,8 @@ class TestFetchTimeline:
         result = twitter_client.fetch_timeline(max_results=5)
 
         assert len(result) == 2
-        assert result[0]["tweet_id"] == "1"
-        assert result[1]["tweet_id"] == "2"
+        assert result[0]["item_id"] == "1"
+        assert result[1]["item_id"] == "2"
 
 
 # --- fetch_tweet ---
@@ -343,7 +343,7 @@ class TestFetchTimeline:
 class TestFetchTweet:
     def test_returns_normalized_tweet(self, twitter_client):
         tweet = _make_tweet(
-            tweet_id=42, text="Hello world", author_id="100",
+            item_id=42, text="Hello world", author_id="100",
             created_at="2025-01-15T10:00:00+00:00",
         )
         user = _make_user(user_id="100", username="alice", name="Alice")
@@ -357,7 +357,7 @@ class TestFetchTweet:
         result = twitter_client.fetch_tweet("42")
 
         assert result is not None
-        assert result["tweet_id"] == "42"
+        assert result["item_id"] == "42"
         assert result["author_username"] == "alice"
         assert result["text"] == "Hello world"
         assert result["url"] == "https://twitter.com/alice/status/42"
@@ -376,7 +376,7 @@ class TestFetchTweet:
         assert result is None
 
     def test_returns_none_when_no_author(self, twitter_client):
-        tweet = _make_tweet(tweet_id=42, author_id="999")
+        tweet = _make_tweet(item_id=42, author_id="999")
         user = _make_user(user_id="100", username="alice", name="Alice")
 
         mock_resp = SimpleNamespace(
@@ -390,7 +390,7 @@ class TestFetchTweet:
 
     def test_skips_tweet_without_author(self, twitter_client):
         tweet = _make_tweet(
-            tweet_id=1, text="hello", author_id="999",
+            item_id=1, text="hello", author_id="999",
             created_at="2025-01-15T10:00:00+00:00",
         )
         user = _make_user(user_id="100", username="alice", name="Alice")
@@ -411,13 +411,13 @@ class TestFetchTweet:
 # --- fetch_thread ---
 
 class TestFetchThread:
-    def _make_normalized_tweet(self, tweet_id, text="hello", author="alice", replied_to_id=None):
+    def _make_normalized_tweet(self, item_id, text="hello", author="alice", replied_to_id=None):
         """Create a normalized tweet dict with optional replied_to reference."""
         ref_tweets = None
         if replied_to_id:
             ref_tweets = [{"type": "replied_to", "id": str(replied_to_id)}]
         return {
-            "tweet_id": str(tweet_id),
+            "item_id": str(item_id),
             "author_username": author,
             "author_name": author.title(),
             "text": text,
@@ -425,9 +425,9 @@ class TestFetchThread:
             "is_retweet": False,
             "quoted_tweet": None,
             "metrics": {"likes": 0, "retweets": 0, "replies": 0, "views": 0},
-            "url": f"https://twitter.com/{author}/status/{tweet_id}",
+            "url": f"https://twitter.com/{author}/status/{item_id}",
             "raw_data": {
-                "id": str(tweet_id),
+                "id": str(item_id),
                 "text": text,
                 "author_id": "100",
                 "created_at": "2025-01-15T10:00:00+00:00",
@@ -449,9 +449,9 @@ class TestFetchThread:
 
         assert result is not None
         assert len(result) == 3
-        assert result[0]["tweet_id"] == "1"
-        assert result[1]["tweet_id"] == "2"
-        assert result[2]["tweet_id"] == "3"
+        assert result[0]["item_id"] == "1"
+        assert result[1]["item_id"] == "2"
+        assert result[2]["item_id"] == "3"
 
     def test_stops_at_root(self, twitter_client):
         """Should stop when reaching a tweet with no replied_to."""
@@ -464,8 +464,8 @@ class TestFetchThread:
 
         assert result is not None
         assert len(result) == 2
-        assert result[0]["tweet_id"] == "1"
-        assert result[1]["tweet_id"] == "2"
+        assert result[0]["item_id"] == "1"
+        assert result[1]["item_id"] == "2"
 
     def test_returns_none_when_start_not_found(self, twitter_client):
         """Should return None if starting tweet doesn't exist."""
@@ -484,12 +484,12 @@ class TestFetchThread:
 
         assert result is not None
         assert len(result) == 1
-        assert result[0]["tweet_id"] == "1"
+        assert result[0]["item_id"] == "1"
 
     def test_stops_at_max_tweets(self, twitter_client):
         """Should respect the max_tweets safety cap."""
-        def make_tweet_with_parent(tweet_id_str):
-            tid = int(tweet_id_str)
+        def make_tweet_with_parent(item_id_str):
+            tid = int(item_id_str)
             if tid > 1:
                 return self._make_normalized_tweet(tid, f"tweet {tid}", replied_to_id=tid - 1)
             return self._make_normalized_tweet(tid, f"tweet {tid}")

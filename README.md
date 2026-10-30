@@ -1,14 +1,19 @@
-# Content Curator
+# Preference Curator
 
-AI-powered content curation that filters your Twitter timeline and blog posts using Claude and delivers relevant content to Telegram.
+A personal preference store with a Twitter curator on top. Claude filters your
+timeline and delivers the good parts to Telegram; everything you vote on, react
+to, send in, or import becomes a signal. Those signals are compiled into a
+preference profile that drives the filter, and that any agent can read over MCP.
 
 ## Features
 
-- **Smart Filtering**: Claude AI scores tweets and blog posts based on your interests (blockchain research, Ethereum scaling, smart contract security)
-- **Telegram Delivery**: Filtered content sent to your Telegram with engagement metrics
-- **Blog Post Support**: Like individual blog posts or parse entire newsletters to score and review all articles
-- **Feedback Loop**: Thumbs up/down buttons to improve future curation via RAG
-- **Persistent Storage**: All tweets, blog posts, and feedback stored in Supabase
+- **Smart filtering**: Claude scores tweets 0-100 against your compiled preference profile, seeing each item's nearest past votes. Strict tool-use output, no JSON parsing.
+- **Telegram delivery** with 🔥/👍/👎 buttons, emoji reactions as votes, model-proposed reasons you confirm in one tap, reply-to-note, and click tracking.
+- **Capture anything**: send the bot a URL, a forwarded post, or a paragraph of text and it is stored as a liked item in the same store.
+- **Imports**: Raindrop, Readwise, generic CSV, or your Twitter archive's likes.
+- **Compiled profiles**: a weekly job turns votes, reasons and notes into per-domain Markdown profiles (`PREFERENCES.md`), versioned in the database.
+- **Agent access**: an MCP server exposes `get_profile`, `search_liked`, `score_items`, `record_signal`.
+- **Measurable**: offline eval against all votes, plus daily exploration items so recall below the threshold is measured too.
 
 ## Prerequisites
 
@@ -66,12 +71,12 @@ cp .env.example .env
 ### 5. Supabase Database
 
 1. Go to [Supabase](https://supabase.com/) and create a project
-2. Go to SQL Editor and run the schema:
-  ```bash
-   python scripts/setup_database.py
-  ```
-   Copy the printed SQL and paste into Supabase SQL Editor.
-   If you've previously run this script, re-run it now to add the `error_log` table introduced for persistent error tracking. All DDL is idempotent (`IF NOT EXISTS`); wrap any `CREATE POLICY "anon_all"` lines in `DROP POLICY IF EXISTS ...;` if the policy was already created.
+2. Go to SQL Editor and run the schema.
+   - **Fresh install**: `python scripts/setup_database.py` prints the full schema; paste it into the SQL Editor.
+   - **Existing deployment**: run the files in `scripts/migrations/` in date order instead. They add
+     `items`, `signals`, `item_embeddings`, `preference_profiles` and copy your `tweets`,
+     `feedback` and `tweet_embeddings` rows into them. The legacy tables are left in place; drop
+     them yourself once you are happy. All migrations are idempotent.
 3. Get your credentials from Settings > API:
   - `SUPABASE_URL`: Project URL
   - `SUPABASE_KEY`: anon/public key
@@ -162,19 +167,63 @@ python main.py --bot-only
 | Command | Description |
 | --- | --- |
 | `/star username` | Toggle starred status for an author. Accepts username, @mention, or profile/tweet URL. |
-| `/like url` | Upvote a tweet or blog post with a reason category. Accepts tweet URLs, blog post URLs, or numeric tweet IDs. |
-| `/newsletter url` | Parse a newsletter, score all articles with Claude, and send them for review. On first use of a domain, prompts to select sections to ignore. |
-| `/newsletter_prefs domain_or_url` | Edit ignored sections for a newsletter. Accepts a domain name or a full URL to re-extract sections. |
-| `/thread tweet_url` | Fetch a full thread and display it as a single compiled message. Give it the last tweet in the thread. |
+| `/like url` | Upvote a tweet, article or any URL. Accepts tweet URLs, other URLs, or numeric tweet IDs. |
+| `/newsletter url` | Parse a newsletter, score all articles with Claude, and send them for review. |
+| `/newsletter_prefs domain_or_url` | Edit ignored sections for a newsletter. |
+| `/thread tweet_url` | Fetch a full thread and display it as a single compiled message. |
 | `/starred` | List all currently starred authors. |
-| `/blockword` | Block keyword(s) from the pipeline. Paste one per line or comma-separated. Whole-word, case-insensitive. Starred authors are exempt. |
+| `/blockword` | Block keyword(s) from the pipeline. Whole-word, case-insensitive. Starred authors are exempt. |
 | `/blockwords` | List blocked keywords; tap a keyword to remove it. |
 | `/stats` | Show author performance stats (paginated). |
 | `/help` | Show help message with available commands. |
 
-Inline buttons on delivered content allow thumbs up/down voting with reason categories, starring/muting authors, and undoing recent votes.
+**You rarely need commands.** Anything you send is captured:
 
-**Shortcut**: you can omit the command and just send a message — tweet URLs, blog URLs, and numeric tweet IDs are treated as `/like`, while profile URLs, `@mentions`, and plain usernames are treated as `/star`. Mixed tokens in one message are dispatched accordingly.
+| You send | What happens |
+| --- | --- |
+| A tweet URL or numeric id | Fetched, scored, stored, upvoted |
+| Any other URL | Page fetched, scored, stored, upvoted (falls back to a bare-URL item if the page can't be fetched) |
+| A forwarded post (channel, user) | Stored as an item with the origin, upvoted |
+| A paragraph of text (20+ chars) | Stored as a note item, upvoted |
+| `@handle` or a profile URL | Author starred |
+| A reply to a delivered item | Saved as a note on that item |
+
+After every upvote the bot proposes a reason and you confirm or edit it.
+
+### Importing what you already liked
+
+```bash
+python scripts/import_items.py raindrop raindrop.csv
+python scripts/import_items.py readwise reader.csv
+python scripts/import_items.py csv likes.csv --name pocket         # any CSV with a url column
+python scripts/import_items.py twitter-archive data/like.js --username you
+python scripts/import_items.py raindrop raindrop.csv --dry-run     # parse only
+```
+
+Each row becomes an item plus an upvote (`source = import:<name>`) and an embedding when
+`OPENAI_API_KEY` is set (otherwise run `scripts/backfill_embeddings.py` later).
+Add `--tag-domains` to have Claude assign domains during import.
+
+### Compiled preference profiles
+
+Votes, reasons and notes are compiled per domain (`ethereum-protocol`, `crypto`, `software`,
+`ai`, `science`, `economics`, `politics`, `culture`, `life`, `other`) into Markdown profiles.
+The scoring prompt injects the latest profiles (`PROFILE_SOURCE=compiled`); the static baseline
+in `src/claude_filter.py` is only the fallback.
+
+```bash
+python main.py --compile-profile                    # recompile now (also runs weekly in --schedule mode)
+python main.py --export-preferences PREFERENCES.md  # write the latest profiles as one Markdown file
+```
+
+### Agent access (MCP)
+
+```bash
+claude mcp add preferences -- "$PWD/.venv/bin/python" -m src.mcp_server
+```
+
+Tools: `get_profile`, `search_liked`, `score_items`, `record_signal`, `list_domains`.
+See [docs/mcp.md](docs/mcp.md).
 
 ### Count Timeline Tweets
 
@@ -244,10 +293,16 @@ twitter-curator/
 │   └── settings.py         # Environment config with validation
 ├── src/
 │   ├── twitter_client.py   # Twitter API v2 client
+│   ├── capture.py                 # Classify sent messages, build items from URLs/text
 │   ├── claude_filter.py    # Claude AI filtering
 │   ├── telegram_bot.py     # Telegram bot with feedback buttons
 │   ├── database.py         # Supabase operations
-│   ├── embeddings.py       # RAG embeddings for feedback-driven curation
+│   ├── embeddings.py
+│   ├── feedback_flow.py           # Reactions, vote buttons, reason prompts (pure helpers)
+│   ├── mcp_server.py              # MCP server over the preference store
+│   ├── preference_api.py          # Agent-facing API (used by MCP)
+│   ├── profile_compiler.py        # Signals → per-domain Markdown profiles
+│   ├── webhook_server.py          # Telegram webhook + /r/<id> click tracking       # RAG embeddings for feedback-driven curation
 │   ├── scheduler.py        # Daily curation orchestration
 │   ├── content.py          # Content ID utilities (blog ID generation, URL detection)
 │   ├── keyword_filter.py   # Pre-LLM blocklist filter (whole-word, case-insensitive)
@@ -267,7 +322,8 @@ twitter-curator/
 ├── scripts/
 │   ├── setup_database.py          # Database schema SQL
 │   ├── eval_prompt.py             # Offline prompt/model evaluation against votes
-│   ├── migrations/                # Incremental SQL to run in Supabase
+│   ├── import_items.py            # Import Raindrop/Readwise/CSV/Twitter-archive likes
+│   ├── migrations/                # Incremental SQL to run in Supabase (existing deployments)
 │   ├── error_report.py            # Monthly error log report
 │   ├── test_components.py         # Integration testing (live APIs)
 │   └── count_twitter_timeline.py  # Count tweets from Twitter
@@ -279,21 +335,28 @@ twitter-curator/
 
 ## How It Works
 
-### Tweets
-1. **Fetch**: Pulls tweets from your home timeline (last 24 hours)
-2. **Pre-filter**: Items containing blocked keywords (managed via `/blockword`) are dropped before Claude scoring. Matching is whole-word, case-insensitive, across tweet text, X Article title/body, and quoted-tweet text. Content from starred authors is currently exempt from the blocklist.
-3. **Neighbours**: Each tweet is embedded and its 3 most similar past votes are looked up in pgvector
-4. **Filter**: Claude scores each tweet 0-100 against your profile, seeing each tweet's own past-vote neighbours. Output is a strict tool-use schema, no JSON parsing.
-5. **Send**: Tweets scoring ≥70 are sent to Telegram with 🔥/👍/👎 buttons (emoji reactions work too), plus 2 random below-threshold items marked 🎲 (exploration) so your votes also measure what the filter misses
-6. **Store**: All tweets and feedback saved to Supabase
-7. **Learn**: Every vote becomes a neighbour for future scoring and a label for `scripts/eval_prompt.py`
+### Data model
 
-### Blog Posts
-1. **Like**: Send `/like <blog_url>` to fetch, score, and save a blog post you enjoyed
-2. **Newsletter**: Send `/newsletter <url>` to parse a newsletter — all articles are scored and sent for review (no filtering threshold, all are shown)
-3. **Section Filtering**: On first use of a newsletter domain, you're prompted to select sections to ignore (e.g. Regulation, Sponsor). Preferences are saved per domain. Edit later with `/newsletter_prefs`.
-4. **Feedback**: Vote on blog posts just like tweets to train the system
-5. **Store**: Blog posts stored alongside tweets with `content_type='blog_post'`
+| Table | Holds |
+| --- | --- |
+| `items` | Anything from any source: tweets, articles, forwarded posts, notes, imports. Carries the LLM-assigned `domain`, score, and delivery state. |
+| `signals` | Every preference event: `vote` (up/down, strength 1 or 2, reason), `note`, `open`. With `source` (button, reaction, like_cmd, reply, redirect, telegram, import:x, agent). |
+| `item_embeddings` | pgvector embeddings for voted items, used for per-item neighbours and `search_liked`. |
+| `preference_profiles` | Versioned compiled Markdown profiles per domain plus `overall`. |
+
+### Daily run
+1. **Fetch**: Pulls tweets from your home timeline (last 24 hours) plus starred authors' timelines
+2. **Pre-filter**: Retweets from non-starred authors and blocked keywords are dropped before scoring
+3. **Neighbours**: Each tweet is embedded and its 3 most similar past votes are looked up in pgvector
+4. **Score**: Claude scores each tweet 0-100 against the compiled profile, seeing each tweet's own past-vote neighbours, and tags its domain
+5. **Send**: Tweets at or above the threshold (per-author tiers apply) go to Telegram, plus 2 random below-threshold items marked 🎲 (exploration)
+6. **Store**: Every scored item is saved; every vote, reaction, reason, note and link open becomes a signal
+7. **Learn**: Signals feed neighbours immediately and the compiled profile weekly; the eval script measures the effect
+
+### Captured content
+`/like`, plain URLs, forwarded posts and free text go through the same scorer (threshold 0, so
+they always get a score and a domain), are saved as items, and receive an upvote with an undo
+window and a model-proposed reason.
 
 ## Filtering Criteria
 
@@ -414,11 +477,7 @@ Logs are written to `curator.log` and stdout for day-to-day curation stats. WARN
 
 ## Roadmap
 
-- Phase 1: Core MVP (fetch, filter, send, feedback buttons)
-- Phase 2: RAG with embeddings (use feedback to improve filtering)
-- Phase 3: Blog post and newsletter support
-- Phase 4: LLM-based blog post filtering (once enough feedback is accumulated)
-- Phase 5: RSS feed support, analytics dashboard, multi-account support
+See [ROADMAP.md](ROADMAP.md). Next: RSS feeds and LLM-based newsletter extraction (phase 4).
 
 ## License
 

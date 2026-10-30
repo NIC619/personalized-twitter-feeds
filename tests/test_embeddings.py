@@ -93,7 +93,7 @@ class TestGenerateEmbedding:
 
 class TestEmbedTweetBatch:
     def test_returns_empty_when_disabled(self, manager):
-        assert manager.embed_tweet_batch([{"tweet_id": "1", "text": "hi"}]) == {}
+        assert manager.embed_tweet_batch([{"item_id": "1", "text": "hi"}]) == {}
 
     def test_returns_empty_for_empty_input(self, mock_openai_manager):
         assert mock_openai_manager.embed_tweet_batch([]) == {}
@@ -108,8 +108,8 @@ class TestEmbedTweetBatch:
         mock_openai_manager._client.embeddings.create.return_value = mock_response
 
         tweets = [
-            {"tweet_id": "a", "text": "first"},
-            {"tweet_id": "b", "text": "second"},
+            {"item_id": "a", "text": "first"},
+            {"item_id": "b", "text": "second"},
         ]
         result = mock_openai_manager.embed_tweet_batch(tweets)
 
@@ -122,7 +122,7 @@ class TestEmbedTweetBatch:
 
 class TestFindNeighbors:
     def test_returns_empty_when_disabled(self, manager):
-        assert manager.find_neighbors([{"tweet_id": "1", "text": "hi"}]) == {}
+        assert manager.find_neighbors([{"item_id": "1", "text": "hi"}]) == {}
 
     def test_returns_empty_for_empty_input(self, mock_openai_manager):
         mock_openai_manager.db = MagicMock()
@@ -139,25 +139,25 @@ class TestFindNeighbors:
         def fake_lookup(embedding, limit):
             if embedding == [0.1]:
                 return [
-                    {"tweet_id": "1", "text": "itself", "author_username": "a", "vote": "up", "similarity": 1.0},
-                    {"tweet_id": "x", "text": "liked", "author_username": "a", "vote": "up", "similarity": 0.9},
-                    {"tweet_id": "y", "text": "disliked", "author_username": "b", "vote": "down", "similarity": 0.8},
+                    {"item_id": "1", "text": "itself", "author_username": "a", "vote": "up", "similarity": 1.0},
+                    {"item_id": "x", "text": "liked", "author_username": "a", "vote": "up", "similarity": 0.9},
+                    {"item_id": "y", "text": "disliked", "author_username": "b", "vote": "down", "similarity": 0.8},
                 ]
             return []
 
-        mock_openai_manager.db.find_similar_tweets.side_effect = fake_lookup
+        mock_openai_manager.db.find_similar_voted.side_effect = fake_lookup
 
         tweets = [
-            {"tweet_id": "1", "text": "new tweet 1"},
-            {"tweet_id": "2", "text": "new tweet 2"},
+            {"item_id": "1", "text": "new tweet 1"},
+            {"item_id": "2", "text": "new tweet 2"},
         ]
         result = mock_openai_manager.find_neighbors(tweets, k=2, workers=1)
 
         # Item 1 gets its own neighbours (self excluded), item 2 has none
         assert set(result) == {"1"}
-        assert [n["tweet_id"] for n in result["1"]] == ["x", "y"]
+        assert [n["item_id"] for n in result["1"]] == ["x", "y"]
         # Asked for k+1 so excluding self still yields k
-        mock_openai_manager.db.find_similar_tweets.assert_any_call([0.1], limit=3)
+        mock_openai_manager.db.find_similar_voted.assert_any_call([0.1], limit=3)
 
     def test_embed_text_includes_quote_and_article(self):
         text = EmbeddingManager._embed_text({

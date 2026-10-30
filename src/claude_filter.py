@@ -52,7 +52,24 @@ Skip (0-49):
 - Drama, gossip"""
 
 
-SCORING_PROMPT = """You score content for one specific reader. Score each item 0-100 for how much this reader would want to read it.
+# Topic domains the model tags every item with. Profiles are compiled per
+# domain, so keep this list short and stable.
+DOMAINS = [
+    "ethereum-protocol",  # L1/L2 research, MEV, AA, DA, ZK, security
+    "crypto",             # the rest of crypto: markets, products, governance
+    "software",           # engineering, tooling, systems, open source
+    "ai",                 # models, agents, ML research and products
+    "science",            # physics, biology, math, hard science
+    "economics",          # macro, mechanism design, finance (non-crypto)
+    "politics",           # politics, policy, geopolitics, society
+    "culture",            # film, books, music, art, sport
+    "life",               # health, productivity, career, personal growth
+    "other",
+]
+
+SCORING_PROMPT = """You score content for one specific reader. Score each item 0-100 for how much this reader would want to read it, and tag its topic domain.
+
+Domains: {domains}
 
 ## Reader profile
 {profile}
@@ -63,7 +80,7 @@ Some items include `similar_past_votes`: the reader's most similar past votes, w
 ## Items
 {items_json}
 
-Score every item exactly once using the submit_scores tool. Keep each reason to one short sentence naming the deciding factor."""
+Score every item exactly once using the submit_scores tool. Keep each reason to one short sentence naming the deciding factor. Pick the single closest domain for each item."""
 
 
 SCORE_TOOL = {
@@ -77,11 +94,12 @@ SCORE_TOOL = {
                 "items": {
                     "type": "object",
                     "properties": {
-                        "tweet_id": {"type": "string"},
+                        "item_id": {"type": "string"},
                         "score": {"type": "integer", "minimum": 0, "maximum": 100},
                         "reason": {"type": "string"},
+                        "domain": {"type": "string", "enum": DOMAINS},
                     },
-                    "required": ["tweet_id", "score", "reason"],
+                    "required": ["item_id", "score", "reason", "domain"],
                 },
             }
         },
@@ -172,14 +190,16 @@ class ClaudeFilter:
             return []
 
         scores = self.score_tweets(tweets, neighbors=neighbors, profile=profile)
-        score_map = {s["tweet_id"]: s for s in scores}
+        score_map = {s["item_id"]: s for s in scores}
 
         passed = []
         for tweet in tweets:
-            score_data = score_map.get(tweet["tweet_id"])
+            score_data = score_map.get(tweet["item_id"])
             if score_data:
                 tweet["filter_score"] = score_data["score"]
                 tweet["filter_reason"] = score_data["reason"]
+                if score_data.get("domain"):
+                    tweet["domain"] = score_data["domain"]
             else:
                 tweet["filter_score"] = 0
                 tweet["filter_reason"] = "Not scored by Claude"
@@ -202,7 +222,7 @@ class ClaudeFilter:
         """Score items without thresholding.
 
         Returns:
-            List of dicts with tweet_id, score, reason (one per scored item;
+            List of dicts with item_id, score, reason (one per scored item;
             items the model skipped are absent).
         """
         if not tweets:
@@ -266,7 +286,7 @@ class ClaudeFilter:
     ) -> dict:
         """Build the JSON entry the model sees for one item."""
         entry = {
-            "tweet_id": tweet["tweet_id"],
+            "item_id": tweet["item_id"],
             "author": tweet.get("author_username", "unknown"),
             "text": tweet.get("text", ""),
             "likes": tweet.get("metrics", {}).get("likes", 0),
@@ -306,9 +326,10 @@ class ClaudeFilter:
         """Render the scoring prompt for a batch (exposed for eval/debugging)."""
         neighbors = neighbors or {}
         entries = [
-            self.build_item_entry(t, neighbors.get(t["tweet_id"])) for t in tweets
+            self.build_item_entry(t, neighbors.get(t["item_id"])) for t in tweets
         ]
         return SCORING_PROMPT.format(
+            domains=", ".join(DOMAINS),
             profile=profile or self.profile,
             items_json=json.dumps(entries, indent=2, ensure_ascii=False),
         )
@@ -330,9 +351,9 @@ class ClaudeFilter:
             logger.error(f"Error scoring items: {e}")
             raise
 
-        valid_ids = {t["tweet_id"] for t in tweets}
+        valid_ids = {t["item_id"] for t in tweets}
         scores = self._extract_scores(response, valid_ids)
-        missing = valid_ids - {s["tweet_id"] for s in scores}
+        missing = valid_ids - {s["item_id"] for s in scores}
         if missing:
             logger.warning(f"{len(missing)} items not scored by model: {sorted(missing)[:5]}...")
         return scores
@@ -354,18 +375,20 @@ class ClaudeFilter:
         for item in tool_input.get("scores", []) or []:
             if not isinstance(item, dict):
                 continue
-            tweet_id = str(item.get("tweet_id", ""))
-            if tweet_id not in valid_ids or tweet_id in seen:
+            item_id = str(item.get("item_id", ""))
+            if item_id not in valid_ids or item_id in seen:
                 continue
             try:
                 score = int(item.get("score", 0))
             except (TypeError, ValueError):
                 continue
-            seen.add(tweet_id)
+            seen.add(item_id)
+            domain = item.get("domain")
             validated.append({
-                "tweet_id": tweet_id,
+                "item_id": item_id,
                 "score": max(0, min(100, score)),
                 "reason": str(item.get("reason") or "No reason provided"),
+                "domain": domain if domain in DOMAINS else "other",
             })
         return validated
 

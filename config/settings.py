@@ -48,6 +48,17 @@ class Settings(BaseSettings):
         description="Number of random below-threshold items to send per run for recall measurement",
     )
 
+    # Preference profiles compiled from signals
+    profile_compile_weekday: str = Field(
+        default="sunday",
+        description="Weekday to recompile preference profiles in scheduled mode (empty disables)",
+    )
+    profile_source: str = Field(
+        default="compiled",
+        description="'compiled' injects the latest compiled profiles into scoring "
+                    "(falls back to the static baseline when none exist); 'static' always uses the baseline",
+    )
+
     # Environment / deployment
     development_mode: bool = Field(
         default=False,

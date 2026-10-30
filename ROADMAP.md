@@ -84,12 +84,21 @@
 - [x] Model-proposed vote reason with ✅ / ✏️ confirm (replaced fixed reason buttons)
 - [x] Click tracking via /r/<item_id> redirect → `open` signals
 
+## Phase 4: General preference store ✅ (2026-10-31)
+
+- [x] `items` / `signals` / `item_embeddings` / `preference_profiles` schema with migration from legacy tables
+- [x] LLM domain tagging on every scored item
+- [x] Capture by sending: URLs, forwarded posts, free text → liked items
+- [x] Import scripts: Raindrop, Readwise, generic CSV, Twitter archive likes
+- [x] Weekly compiled per-domain profiles injected into scoring; `--export-preferences PREFERENCES.md`
+- [x] MCP server: get_profile, search_liked, score_items, record_signal
+
 ## Future Ideas
 
 - [x] Migrate from tweepy to official X SDK (xdk) - see `docs/xdk-migration-notes.md`
 - [ ] Multi-account support (curate multiple Twitter accounts)
 - [ ] Topic clustering (group similar tweets together)
-- [ ] Export to Notion/Obsidian
+- [x] Export: `--export-preferences PREFERENCES.md` (Notion/Obsidian can ingest Markdown)
 - [ ] Web dashboard for analytics
 - [x] A/B test different prompts
 - [ ] Auto-adjust threshold based on feedback ratio

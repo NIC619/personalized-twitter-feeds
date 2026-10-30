@@ -1,7 +1,8 @@
-"""Database client for Supabase operations."""
+"""Supabase database client: items, signals, embeddings, profiles."""
 
+import json
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
 from supabase import create_client, Client
@@ -9,8 +10,12 @@ from supabase import create_client, Client
 logger = logging.getLogger(__name__)
 
 
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
 class DatabaseClient:
-    """Supabase database client for items, feedback, and embeddings."""
+    """Supabase database client for the preference store."""
 
     def __init__(self, url: str, key: str):
         """Initialize Supabase client.
@@ -22,97 +27,177 @@ class DatabaseClient:
         self.client: Client = create_client(url, key)
         logger.info("Database client initialized")
 
-    def save_tweets(self, tweets: list[dict]) -> list[dict]:
-        """Bulk upsert tweets to database.
+    # ================================================================ items
 
-        Args:
-            tweets: List of tweet dictionaries with:
-                - tweet_id: Twitter ID
-                - author_username: Author's username
-                - author_name: Author's display name
-                - text: Tweet text
-                - created_at: Tweet creation time
-                - metrics: Dict of likes, retweets, replies
-                - url: Tweet URL
-                - raw_data: Full tweet object
-                - filtered: Whether tweet passed filter
-                - filter_score: Claude's score
-                - filter_reason: Reason for score
+    @staticmethod
+    def _item_record(item: dict) -> dict:
+        """Map an in-memory item dict onto the items table."""
+        content_type = item.get("content_type", "tweet")
+        source = item.get("source")
+        if not source:
+            if content_type == "tweet":
+                source = "twitter"
+            else:
+                source = (item.get("raw_data") or {}).get("source") or "blog"
+        title = item.get("title")
+        if not title and item.get("article"):
+            title = item["article"].get("title")
+        return {
+            "item_id": item["item_id"],
+            "source": source,
+            "content_type": content_type,
+            "url": item.get("url"),
+            "title": title,
+            "author_username": item.get("author_username"),
+            "author_name": item.get("author_name"),
+            "text": item.get("text") or "",
+            "created_at": item.get("created_at"),
+            "metrics": item.get("metrics"),
+            "raw_data": item.get("raw_data"),
+            "is_retweet": bool(item.get("is_retweet", False)),
+            "domain": item.get("domain"),
+            "filtered": bool(item.get("filtered", False)),
+            "filter_score": item.get("filter_score"),
+            "filter_reason": item.get("filter_reason"),
+            "exploration": bool(item.get("exploration", False)),
+        }
+
+    def save_items(self, items: list[dict]) -> list[dict]:
+        """Bulk upsert items (tweets, blog posts, notes, imports).
 
         Returns:
-            List of saved tweet records
+            List of saved records
         """
-        if not tweets:
-            logger.warning("No tweets to save")
+        if not items:
+            logger.warning("No items to save")
             return []
 
-        records = []
-        for tweet in tweets:
-            record = {
-                "tweet_id": tweet["tweet_id"],
-                "author_username": tweet["author_username"],
-                "author_name": tweet["author_name"],
-                "text": tweet["text"],
-                "created_at": tweet["created_at"],
-                "metrics": tweet.get("metrics"),
-                "url": tweet["url"],
-                "raw_data": tweet.get("raw_data"),
-                "is_retweet": tweet.get("is_retweet", False),
-                "filtered": tweet.get("filtered", False),
-                "filter_score": tweet.get("filter_score"),
-                "filter_reason": tweet.get("filter_reason"),
-                "content_type": tweet.get("content_type", "tweet"),
-                "exploration": bool(tweet.get("exploration", False)),
-            }
-            records.append(record)
-
+        records = [self._item_record(i) for i in items]
         try:
             result = (
-                self.client.table("tweets")
-                .upsert(records, on_conflict="tweet_id")
+                self.client.table("items")
+                .upsert(records, on_conflict="item_id")
                 .execute()
             )
             logger.info(f"Saved {len(result.data)} items to database")
             return result.data
         except Exception as e:
-            logger.error(f"Error saving tweets: {e}")
+            logger.error(f"Error saving items: {e}")
             raise
 
-    def save_feedback(
-        self,
-        tweet_id: str,
-        vote: str,
-        telegram_message_id: Optional[int] = None,
-        notes: Optional[str] = None,
-    ) -> dict:
-        """Store user feedback for a tweet.
-
-        Args:
-            tweet_id: Twitter ID of the tweet
-            vote: 'up' or 'down'
-            telegram_message_id: Telegram message ID for reference
-            notes: Optional user notes
-
-        Returns:
-            Saved feedback record
-        """
-        if vote not in ("up", "down"):
-            raise ValueError(f"Invalid vote: {vote}. Must be 'up' or 'down'")
-
-        record = {
-            "tweet_id": tweet_id,
-            "user_vote": vote,
-            "telegram_message_id": telegram_message_id,
-            "notes": notes,
-        }
-
+    def get_item(self, item_id: str) -> Optional[dict]:
+        """Get an item by id."""
         try:
-            result = self.client.table("feedback").insert(record).execute()
-            logger.info(f"Saved feedback for tweet {tweet_id}: {vote}")
-            return result.data[0] if result.data else {}
+            result = (
+                self.client.table("items")
+                .select("*")
+                .eq("item_id", item_id)
+                .execute()
+            )
+            return result.data[0] if result.data else None
         except Exception as e:
-            logger.error(f"Error saving feedback: {e}")
+            logger.error(f"Error getting item: {e}")
             raise
+
+    def get_item_by_url(self, url: str) -> Optional[dict]:
+        """Get an item by exact URL."""
+        try:
+            result = (
+                self.client.table("items")
+                .select("*")
+                .eq("url", url)
+                .limit(1)
+                .execute()
+            )
+            return result.data[0] if result.data else None
+        except Exception as e:
+            logger.error(f"Error getting item by url: {e}")
+            return None
+
+    def get_items(self, item_ids: list[str], chunk_size: int = 200) -> dict[str, dict]:
+        """Fetch many items by id → {item_id: item}."""
+        out: dict[str, dict] = {}
+        ids = list(dict.fromkeys(item_ids))
+        for i in range(0, len(ids), chunk_size):
+            chunk = ids[i : i + chunk_size]
+            try:
+                result = (
+                    self.client.table("items").select("*").in_("item_id", chunk).execute()
+                )
+            except Exception as e:
+                logger.error(f"Error fetching items: {e}")
+                raise
+            for row in result.data or []:
+                out[row["item_id"]] = row
+        return out
+
+    def get_scored_ids(self, item_ids: list[str], chunk_size: int = 200) -> set[str]:
+        """Return the subset of ``item_ids`` that already have a filter score.
+
+        One ``IN`` query per chunk instead of one round trip per item.
+        """
+        scored: set[str] = set()
+        ids = list(dict.fromkeys(item_ids))
+        for i in range(0, len(ids), chunk_size):
+            chunk = ids[i : i + chunk_size]
+            try:
+                result = (
+                    self.client.table("items")
+                    .select("item_id")
+                    .in_("item_id", chunk)
+                    .not_.is_("filter_score", "null")
+                    .execute()
+                )
+            except Exception as e:
+                logger.error(f"Error checking scored ids: {e}")
+                raise
+            scored.update(row["item_id"] for row in result.data or [])
+        return scored
+
+    def mark_item_sent(self, item_id: str, telegram_message_id: int) -> None:
+        """Mark an item as sent to Telegram."""
+        try:
+            self.client.table("items").update(
+                {"sent_to_telegram": _now(), "telegram_message_id": telegram_message_id}
+            ).eq("item_id", item_id).execute()
+            logger.info(f"Marked item {item_id} as sent")
+        except Exception as e:
+            logger.error(f"Error marking item as sent: {e}")
+            raise
+
+    def get_item_by_message_id(self, telegram_message_id: int) -> Optional[dict]:
+        """Find the item that was sent as a given Telegram message."""
+        try:
+            result = (
+                self.client.table("items")
+                .select("*")
+                .eq("telegram_message_id", telegram_message_id)
+                .limit(1)
+                .execute()
+            )
+            return result.data[0] if result.data else None
+        except Exception as e:
+            logger.error(f"Error looking up item by message id: {e}")
+            return None
+
+    def search_items_text(self, query: str, limit: int = 20, domain: Optional[str] = None) -> list[dict]:
+        """Case-insensitive substring search over item text/title (fallback search)."""
+        try:
+            q = (
+                self.client.table("items")
+                .select("*")
+                .or_(f"text.ilike.%{query}%,title.ilike.%{query}%")
+                .order("created_at", desc=True)
+                .limit(limit)
+            )
+            if domain:
+                q = q.eq("domain", domain)
+            return q.execute().data or []
+        except Exception as e:
+            logger.error(f"Error searching items: {e}")
+            return []
+
+    # ============================================================== signals
 
     def save_signal(
         self,
@@ -123,6 +208,7 @@ class DatabaseClient:
         reason: Optional[str] = None,
         source: Optional[str] = None,
         telegram_message_id: Optional[int] = None,
+        created_at: Optional[str] = None,
     ) -> dict:
         """Append a preference signal (vote / note / open) for an item."""
         record = {
@@ -134,6 +220,8 @@ class DatabaseClient:
             "source": source,
             "telegram_message_id": telegram_message_id,
         }
+        if created_at:
+            record["created_at"] = created_at
         try:
             result = self.client.table("signals").insert(record).execute()
             logger.info(f"Saved signal {kind}={value} for item {item_id}")
@@ -142,91 +230,55 @@ class DatabaseClient:
             logger.error(f"Error saving signal: {e}")
             raise
 
+    def save_signals(self, records: list[dict]) -> int:
+        """Bulk insert signals (used by imports). Records use save_signal's keys."""
+        if not records:
+            return 0
+        try:
+            result = self.client.table("signals").insert(records).execute()
+            return len(result.data or [])
+        except Exception as e:
+            logger.error(f"Error saving signals: {e}")
+            raise
+
+    def _latest_vote_id(self, item_id: str) -> Optional[int]:
+        sig = (
+            self.client.table("signals")
+            .select("id")
+            .eq("item_id", item_id)
+            .eq("kind", "vote")
+            .order("created_at", desc=True)
+            .limit(1)
+            .execute()
+        )
+        return sig.data[0]["id"] if sig.data else None
+
     def update_latest_vote_reason(self, item_id: str, reason: str) -> bool:
         """Attach a reason to the most recent vote on an item.
-
-        Updates both the legacy ``feedback.notes`` and ``signals.reason``.
 
         Returns:
             True if a vote existed to update.
         """
-        updated = False
         try:
-            fb = (
-                self.client.table("feedback")
-                .select("id")
-                .eq("tweet_id", item_id)
-                .order("voted_at", desc=True)
-                .limit(1)
-                .execute()
-            )
-            if fb.data:
-                self.client.table("feedback").update({"notes": reason}).eq(
-                    "id", fb.data[0]["id"]
-                ).execute()
-                updated = True
-            sig = (
-                self.client.table("signals")
-                .select("id")
-                .eq("item_id", item_id)
-                .eq("kind", "vote")
-                .order("created_at", desc=True)
-                .limit(1)
-                .execute()
-            )
-            if sig.data:
-                self.client.table("signals").update({"reason": reason}).eq(
-                    "id", sig.data[0]["id"]
-                ).execute()
-                updated = True
+            vote_id = self._latest_vote_id(item_id)
+            if vote_id is None:
+                return False
+            self.client.table("signals").update({"reason": reason}).eq("id", vote_id).execute()
+            return True
         except Exception as e:
             logger.error(f"Error updating vote reason: {e}")
             raise
-        return updated
 
     def delete_latest_vote(self, item_id: str) -> None:
         """Remove the most recent vote on an item (reaction retracted)."""
         try:
-            fb = (
-                self.client.table("feedback")
-                .select("id")
-                .eq("tweet_id", item_id)
-                .order("voted_at", desc=True)
-                .limit(1)
-                .execute()
-            )
-            if fb.data:
-                self.client.table("feedback").delete().eq("id", fb.data[0]["id"]).execute()
-            sig = (
-                self.client.table("signals")
-                .select("id")
-                .eq("item_id", item_id)
-                .eq("kind", "vote")
-                .order("created_at", desc=True)
-                .limit(1)
-                .execute()
-            )
-            if sig.data:
-                self.client.table("signals").delete().eq("id", sig.data[0]["id"]).execute()
-            logger.info(f"Deleted latest vote for item {item_id}")
+            vote_id = self._latest_vote_id(item_id)
+            if vote_id is not None:
+                self.client.table("signals").delete().eq("id", vote_id).execute()
+                logger.info(f"Deleted latest vote for item {item_id}")
         except Exception as e:
             logger.error(f"Error deleting vote: {e}")
             raise
-
-    def get_tweet_by_message_id(self, telegram_message_id: int) -> Optional[dict]:
-        """Find the item that was sent as a given Telegram message."""
-        try:
-            result = (
-                self.client.table("tweets")
-                .select("*")
-                .eq("telegram_message_id", telegram_message_id)
-                .limit(1)
-                .execute()
-            )
-            return result.data[0] if result.data else None
-        except Exception as e:
-            logger.error(f"Error looking up item by message id: {e}")
-            return None
 
     def get_recent_reasons(self, item_ids: list[str], limit: int = 20) -> list[dict]:
         """Confirmed reasons on the given items (for proposing new reasons)."""
@@ -248,371 +300,74 @@ class DatabaseClient:
             logger.error(f"Error loading reasons: {e}")
             return []
 
-    def get_feedback_examples(
-        self, vote_type: Optional[str] = None, limit: int = 10
-    ) -> list[dict]:
-        """Retrieve tweets user voted on for RAG.
-
-        Args:
-            vote_type: Filter by 'up' or 'down', or None for all
-            limit: Maximum number of examples to retrieve
-
-        Returns:
-            List of tweet records with feedback
-        """
-        try:
-            query = (
-                self.client.table("feedback")
-                .select("*, tweets(*)")
-                .order("voted_at", desc=True)
-                .limit(limit)
-            )
-
-            if vote_type:
-                query = query.eq("user_vote", vote_type)
-
-            result = query.execute()
-            logger.info(f"Retrieved {len(result.data)} feedback examples")
-            return result.data
-        except Exception as e:
-            logger.error(f"Error getting feedback examples: {e}")
-            raise
-
-    def get_unprocessed_tweets(self, limit: int = 100) -> list[dict]:
-        """Get tweets not yet sent to Telegram.
-
-        Args:
-            limit: Maximum number of tweets to retrieve
-
-        Returns:
-            List of unprocessed tweet records
-        """
-        try:
-            result = (
-                self.client.table("tweets")
-                .select("*")
-                .eq("filtered", True)
-                .is_("sent_to_telegram", "null")
-                .order("created_at", desc=True)
-                .limit(limit)
-                .execute()
-            )
-            logger.info(f"Retrieved {len(result.data)} unprocessed tweets")
-            return result.data
-        except Exception as e:
-            logger.error(f"Error getting unprocessed tweets: {e}")
-            raise
-
-    def mark_tweet_sent(self, tweet_id: str, telegram_message_id: int) -> None:
-        """Mark a tweet as sent to Telegram.
-
-        Args:
-            tweet_id: Twitter ID of the tweet
-            telegram_message_id: Telegram message ID
-        """
-        try:
-            self.client.table("tweets").update(
-                {"sent_to_telegram": datetime.utcnow().isoformat(), "telegram_message_id": telegram_message_id}
-            ).eq("tweet_id", tweet_id).execute()
-            logger.info(f"Marked tweet {tweet_id} as sent")
-        except Exception as e:
-            logger.error(f"Error marking tweet as sent: {e}")
-            raise
-
-    def update_tweet_filter_results(
-        self, tweet_id: str, score: float, reason: str
-    ) -> None:
-        """Update tweet with filter results.
-
-        Args:
-            tweet_id: Twitter ID of the tweet
-            score: Claude's score for the tweet
-            reason: Reason for the score
-        """
-        filtered = score >= 70  # Threshold from settings
-
-        try:
-            self.client.table("tweets").update(
-                {
-                    "filtered": filtered,
-                    "filter_score": score,
-                    "filter_reason": reason,
-                }
-            ).eq("tweet_id", tweet_id).execute()
-            logger.info(f"Updated filter results for tweet {tweet_id}: score={score}")
-        except Exception as e:
-            logger.error(f"Error updating tweet filter results: {e}")
-            raise
-
-    def get_tweet_by_id(self, tweet_id: str) -> Optional[dict]:
-        """Get a tweet by its Twitter ID.
-
-        Args:
-            tweet_id: Twitter ID of the tweet
-
-        Returns:
-            Tweet record or None if not found
-        """
-        try:
-            result = (
-                self.client.table("tweets")
-                .select("*")
-                .eq("tweet_id", tweet_id)
-                .execute()
-            )
-            return result.data[0] if result.data else None
-        except Exception as e:
-            logger.error(f"Error getting tweet: {e}")
-            raise
-
-    def get_scored_ids(self, tweet_ids: list[str], chunk_size: int = 200) -> set[str]:
-        """Return the subset of ``tweet_ids`` that already have a filter score.
-
-        One ``IN`` query per chunk instead of one round trip per item.
-        """
-        scored: set[str] = set()
-        ids = list(dict.fromkeys(tweet_ids))
-        for i in range(0, len(ids), chunk_size):
-            chunk = ids[i : i + chunk_size]
-            try:
-                result = (
-                    self.client.table("tweets")
-                    .select("tweet_id")
-                    .in_("tweet_id", chunk)
-                    .not_.is_("filter_score", "null")
-                    .execute()
-                )
-            except Exception as e:
-                logger.error(f"Error checking scored ids: {e}")
-                raise
-            scored.update(row["tweet_id"] for row in result.data or [])
-        return scored
-
-    def get_labeled_items(self, page_size: int = 1000) -> list[dict]:
-        """All voted items joined with their content, for offline evaluation.
-
-        Returns:
-            List of item dicts (tweets-table columns) each carrying
-            ``user_vote``, ``vote_reason`` and ``voted_at``. If an item was
-            voted more than once the latest vote wins.
-        """
+    def _vote_rows(self, page_size: int = 1000, select: str = "*") -> list[dict]:
+        """All vote signals, oldest first (paginated past PostgREST's cap)."""
         rows: list[dict] = []
         offset = 0
         while True:
-            try:
-                result = (
-                    self.client.table("feedback")
-                    .select("tweet_id,user_vote,notes,voted_at,tweets(*)")
-                    .order("voted_at")
-                    .range(offset, offset + page_size - 1)
-                    .execute()
-                )
-            except Exception as e:
-                logger.error(f"Error loading labeled items: {e}")
-                raise
+            result = (
+                self.client.table("signals")
+                .select(select)
+                .eq("kind", "vote")
+                .in_("value", ["up", "down"])
+                .order("created_at")
+                .range(offset, offset + page_size - 1)
+                .execute()
+            )
             page = result.data or []
             rows.extend(page)
             if len(page) < page_size:
                 break
             offset += page_size
+        return rows
+
+    def get_labeled_items(self, page_size: int = 1000) -> list[dict]:
+        """All voted items joined with their content, for offline evaluation.
+
+        Returns:
+            Item dicts each carrying ``user_vote``, ``vote_strength``,
+            ``vote_reason`` and ``voted_at``. The latest vote per item wins.
+        """
+        try:
+            rows = self._vote_rows(
+                page_size,
+                select="item_id,value,strength,reason,created_at,items(*)",
+            )
+        except Exception as e:
+            logger.error(f"Error loading labeled items: {e}")
+            raise
 
         by_id: dict[str, dict] = {}
-        for row in rows:  # ordered by voted_at asc, so later rows overwrite
-            tweet = row.get("tweets")
-            if not tweet:
+        for row in rows:  # oldest first, so later rows overwrite
+            item = row.get("items")
+            if not item:
                 continue
-            item = dict(tweet)
-            item["user_vote"] = row["user_vote"]
-            item["vote_reason"] = row.get("notes")
-            item["voted_at"] = row.get("voted_at")
-            by_id[item["tweet_id"]] = item
+            labeled = dict(item)
+            labeled["user_vote"] = row["value"]
+            labeled["vote_strength"] = row.get("strength", 1)
+            labeled["vote_reason"] = row.get("reason")
+            labeled["voted_at"] = row.get("created_at")
+            by_id[labeled["item_id"]] = labeled
         return list(by_id.values())
 
-    def save_favorite_author(self, username: str) -> dict:
-        """Save an author as a favorite.
-
-        Args:
-            username: Twitter username (without @)
-
-        Returns:
-            Saved favorite author record
-        """
-        username = username.lower().lstrip("@")
-
-        record = {
-            "username": username,
-        }
-
+    def get_signals_for_profile(self, limit: int = 4000) -> list[dict]:
+        """Votes and notes with item text/domain, newest first, for profile compilation."""
         try:
             result = (
-                self.client.table("favorite_authors")
-                .upsert(record, on_conflict="username")
+                self.client.table("signals")
+                .select("item_id,kind,value,strength,reason,created_at,items(text,title,author_username,domain,url,content_type)")
+                .in_("kind", ["vote", "note"])
+                .order("created_at", desc=True)
+                .limit(limit)
                 .execute()
             )
-            logger.info(f"Saved favorite author: @{username}")
-            return result.data[0] if result.data else {}
+            return result.data or []
         except Exception as e:
-            logger.error(f"Error saving favorite author: {e}")
+            logger.error(f"Error loading signals for profile: {e}")
             raise
-
-    def get_favorite_authors(self) -> list[str]:
-        """Get list of favorite author usernames.
-
-        Returns:
-            List of usernames
-        """
-        try:
-            result = (
-                self.client.table("favorite_authors")
-                .select("username")
-                .execute()
-            )
-            return [r["username"] for r in result.data]
-        except Exception as e:
-            logger.error(f"Error getting favorite authors: {e}")
-            raise
-
-    def is_favorite_author(self, username: str) -> bool:
-        """Check if an author is a favorite.
-
-        Args:
-            username: Twitter username
-
-        Returns:
-            True if author is a favorite
-        """
-        username = username.lower().lstrip("@")
-        try:
-            result = (
-                self.client.table("favorite_authors")
-                .select("username")
-                .eq("username", username)
-                .execute()
-            )
-            return len(result.data) > 0
-        except Exception as e:
-            logger.error(f"Error checking favorite author: {e}")
-            return False
-
-    def remove_favorite_author(self, username: str) -> None:
-        """Remove an author from favorites.
-
-        Args:
-            username: Twitter username (without @)
-        """
-        username = username.lower().lstrip("@")
-        try:
-            self.client.table("favorite_authors").delete().eq(
-                "username", username
-            ).execute()
-            logger.info(f"Removed favorite author: @{username}")
-        except Exception as e:
-            logger.error(f"Error removing favorite author: {e}")
-            raise
-
-    def save_muted_author(self, username: str) -> dict:
-        """Save an author as muted.
-
-        Args:
-            username: Twitter username (without @)
-
-        Returns:
-            Saved muted author record
-        """
-        username = username.lower().lstrip("@")
-        record = {"username": username}
-        try:
-            result = (
-                self.client.table("muted_authors")
-                .upsert(record, on_conflict="username")
-                .execute()
-            )
-            logger.info(f"Saved muted author: @{username}")
-            return result.data[0] if result.data else {}
-        except Exception as e:
-            logger.error(f"Error saving muted author: {e}")
-            raise
-
-    def get_muted_authors(self) -> list[str]:
-        """Get list of muted author usernames.
-
-        Returns:
-            List of usernames
-        """
-        try:
-            result = (
-                self.client.table("muted_authors")
-                .select("username")
-                .execute()
-            )
-            return [r["username"] for r in result.data]
-        except Exception as e:
-            logger.error(f"Error getting muted authors: {e}")
-            raise
-
-    def is_muted_author(self, username: str) -> bool:
-        """Check if an author is muted.
-
-        Args:
-            username: Twitter username
-
-        Returns:
-            True if author is muted
-        """
-        username = username.lower().lstrip("@")
-        try:
-            result = (
-                self.client.table("muted_authors")
-                .select("username")
-                .eq("username", username)
-                .execute()
-            )
-            return len(result.data) > 0
-        except Exception as e:
-            logger.error(f"Error checking muted author: {e}")
-            return False
-
-    def remove_muted_author(self, username: str) -> None:
-        """Remove an author from muted list.
-
-        Args:
-            username: Twitter username (without @)
-        """
-        username = username.lower().lstrip("@")
-        try:
-            self.client.table("muted_authors").delete().eq(
-                "username", username
-            ).execute()
-            logger.info(f"Removed muted author: @{username}")
-        except Exception as e:
-            logger.error(f"Error removing muted author: {e}")
-            raise
-
-    def toggle_favorite(self, username: str) -> str:
-        """Toggle favorite status for an author.
-
-        If muted: remove mute, reset to default.
-        If default: promote to favorite.
-        If already favorite: no-op (stays favorite).
-
-        Args:
-            username: Twitter username
-
-        Returns:
-            New state: "favorited" or "unfavorited" (removed mute)
-        """
-        username = username.lower().lstrip("@")
-        if self.is_muted_author(username):
-            self.remove_muted_author(username)
-            logger.info(f"Unmuted @{username} → default")
-            return "unmuted"
-        else:
-            self.save_favorite_author(username)
-            logger.info(f"Favorited @{username}")
-            return "favorited"
 
     def get_author_stats(self) -> list[dict]:
-        """Get aggregated author performance stats from feedback data.
+        """Aggregate author performance from votes.
 
         Returns:
             List of author stat dicts sorted by weighted score desc, each with:
@@ -620,62 +375,51 @@ class DatabaseClient:
                   weighted_score, avg_filter_score, total_votes, is_favorite, is_muted
         """
         try:
-            result = (
-                self.client.table("feedback")
-                .select("*, tweets(*)")
-                .execute()
+            rows = self._vote_rows(
+                select="id,item_id,value,strength,items(author_username,is_retweet,filter_score)"
             )
         except Exception as e:
-            logger.error(f"Error fetching feedback for stats: {e}")
+            logger.error(f"Error fetching votes for stats: {e}")
             raise
 
         favorites = set(self.get_favorite_authors())
         muted = set(self.get_muted_authors())
 
         authors: dict[str, dict] = {}
-        for row in result.data:
-            tweet = row.get("tweets")
-            if not tweet:
-                logger.warning(f"Orphaned feedback (no tweet): feedback id={row.get('id')}")
+        for row in rows:
+            item = row.get("items")
+            if not item or not item.get("author_username"):
+                logger.warning(f"Orphaned vote (no item/author): signal id={row.get('id')}")
                 continue
 
-            username = tweet["author_username"].lower()
-            if username not in authors:
-                authors[username] = {
-                    "author_username": username,
-                    "up": 0,
-                    "down": 0,
-                    "weighted_up": 0.0,
-                    "weighted_down": 0.0,
-                    "filter_score_sum": 0.0,
-                    "filter_score_count": 0,
-                }
-
-            entry = authors[username]
-            weight = 0.5 if tweet.get("is_retweet") else 1.0
-            vote = row["user_vote"]
-
-            if vote == "up":
+            username = item["author_username"].lower()
+            entry = authors.setdefault(username, {
+                "author_username": username,
+                "up": 0,
+                "down": 0,
+                "weighted_up": 0.0,
+                "weighted_down": 0.0,
+                "filter_score_sum": 0.0,
+                "filter_score_count": 0,
+            })
+            weight = 0.5 if item.get("is_retweet") else 1.0
+            if row["value"] == "up":
                 entry["up"] += 1
                 entry["weighted_up"] += weight
-            elif vote == "down":
+            elif row["value"] == "down":
                 entry["down"] += 1
                 entry["weighted_down"] += weight
-
-            if tweet.get("filter_score") is not None:
-                entry["filter_score_sum"] += tweet["filter_score"]
+            if item.get("filter_score") is not None:
+                entry["filter_score_sum"] += item["filter_score"]
                 entry["filter_score_count"] += 1
 
         stats = []
         for entry in authors.values():
             total_weighted = entry["weighted_up"] + entry["weighted_down"]
-            weighted_score = (
-                entry["weighted_up"] / total_weighted if total_weighted > 0 else 0.0
-            )
+            weighted_score = entry["weighted_up"] / total_weighted if total_weighted > 0 else 0.0
             avg_filter = (
                 entry["filter_score_sum"] / entry["filter_score_count"]
-                if entry["filter_score_count"] > 0
-                else 0.0
+                if entry["filter_score_count"] > 0 else 0.0
             )
             stats.append({
                 "author_username": entry["author_username"],
@@ -693,66 +437,229 @@ class DatabaseClient:
         stats.sort(key=lambda s: (-s["weighted_score"], -s["total_votes"]))
         return stats
 
-    def save_embedding(self, tweet_id: str, embedding: list[float]) -> None:
-        """Upsert a tweet embedding into tweet_embeddings.
+    # ============================================================ profiles
 
-        Args:
-            tweet_id: Twitter ID of the tweet
-            embedding: Embedding vector
-        """
+    def save_profile(self, domain: str, content: str, stats: Optional[dict] = None) -> dict:
+        """Store a new version of a compiled preference profile."""
         try:
-            self.client.table("tweet_embeddings").upsert(
-                {"tweet_id": tweet_id, "embedding": embedding},
-                on_conflict="tweet_id",
+            latest = (
+                self.client.table("preference_profiles")
+                .select("version")
+                .eq("domain", domain)
+                .order("version", desc=True)
+                .limit(1)
+                .execute()
+            )
+            version = (latest.data[0]["version"] + 1) if latest.data else 1
+            result = self.client.table("preference_profiles").insert({
+                "domain": domain,
+                "version": version,
+                "content": content,
+                "stats": stats,
+            }).execute()
+            logger.info(f"Saved profile {domain} v{version}")
+            return result.data[0] if result.data else {}
+        except Exception as e:
+            logger.error(f"Error saving profile: {e}")
+            raise
+
+    def get_latest_profiles(self) -> dict[str, dict]:
+        """Latest version of every domain profile → {domain: row}."""
+        try:
+            result = (
+                self.client.table("preference_profiles")
+                .select("*")
+                .order("version", desc=True)
+                .execute()
+            )
+        except Exception as e:
+            logger.error(f"Error loading profiles: {e}")
+            return {}
+        latest: dict[str, dict] = {}
+        for row in result.data or []:
+            latest.setdefault(row["domain"], row)  # first seen = highest version
+        return latest
+
+    # ============================================================= authors
+
+    def save_favorite_author(self, username: str) -> dict:
+        """Save an author as a favorite."""
+        username = username.lower().lstrip("@")
+        try:
+            result = (
+                self.client.table("favorite_authors")
+                .upsert({"username": username}, on_conflict="username")
+                .execute()
+            )
+            logger.info(f"Saved favorite author: @{username}")
+            return result.data[0] if result.data else {}
+        except Exception as e:
+            logger.error(f"Error saving favorite author: {e}")
+            raise
+
+    def get_favorite_authors(self) -> list[str]:
+        """Get list of favorite author usernames."""
+        try:
+            result = self.client.table("favorite_authors").select("username").execute()
+            return [r["username"] for r in result.data]
+        except Exception as e:
+            logger.error(f"Error getting favorite authors: {e}")
+            raise
+
+    def is_favorite_author(self, username: str) -> bool:
+        """Check if an author is a favorite."""
+        username = username.lower().lstrip("@")
+        try:
+            result = (
+                self.client.table("favorite_authors")
+                .select("username")
+                .eq("username", username)
+                .execute()
+            )
+            return len(result.data) > 0
+        except Exception as e:
+            logger.error(f"Error checking favorite author: {e}")
+            return False
+
+    def remove_favorite_author(self, username: str) -> None:
+        """Remove an author from favorites."""
+        username = username.lower().lstrip("@")
+        try:
+            self.client.table("favorite_authors").delete().eq("username", username).execute()
+            logger.info(f"Removed favorite author: @{username}")
+        except Exception as e:
+            logger.error(f"Error removing favorite author: {e}")
+            raise
+
+    def save_muted_author(self, username: str) -> dict:
+        """Save an author as muted."""
+        username = username.lower().lstrip("@")
+        try:
+            result = (
+                self.client.table("muted_authors")
+                .upsert({"username": username}, on_conflict="username")
+                .execute()
+            )
+            logger.info(f"Saved muted author: @{username}")
+            return result.data[0] if result.data else {}
+        except Exception as e:
+            logger.error(f"Error saving muted author: {e}")
+            raise
+
+    def get_muted_authors(self) -> list[str]:
+        """Get list of muted author usernames."""
+        try:
+            result = self.client.table("muted_authors").select("username").execute()
+            return [r["username"] for r in result.data]
+        except Exception as e:
+            logger.error(f"Error getting muted authors: {e}")
+            raise
+
+    def is_muted_author(self, username: str) -> bool:
+        """Check if an author is muted."""
+        username = username.lower().lstrip("@")
+        try:
+            result = (
+                self.client.table("muted_authors")
+                .select("username")
+                .eq("username", username)
+                .execute()
+            )
+            return len(result.data) > 0
+        except Exception as e:
+            logger.error(f"Error checking muted author: {e}")
+            return False
+
+    def remove_muted_author(self, username: str) -> None:
+        """Remove an author from muted list."""
+        username = username.lower().lstrip("@")
+        try:
+            self.client.table("muted_authors").delete().eq("username", username).execute()
+            logger.info(f"Removed muted author: @{username}")
+        except Exception as e:
+            logger.error(f"Error removing muted author: {e}")
+            raise
+
+    def toggle_favorite(self, username: str) -> str:
+        """Toggle favorite status: muted → default, default/favorite → favorite."""
+        username = username.lower().lstrip("@")
+        if self.is_muted_author(username):
+            self.remove_muted_author(username)
+            logger.info(f"Unmuted @{username} → default")
+            return "unmuted"
+        self.save_favorite_author(username)
+        logger.info(f"Favorited @{username}")
+        return "favorited"
+
+    def toggle_mute(self, username: str) -> str:
+        """Toggle mute status: favorite → default, default/muted → muted."""
+        username = username.lower().lstrip("@")
+        if self.is_favorite_author(username):
+            self.remove_favorite_author(username)
+            logger.info(f"Unfavorited @{username} → default")
+            return "unfavorited"
+        self.save_muted_author(username)
+        logger.info(f"Muted @{username}")
+        return "muted"
+
+    # ========================================================== embeddings
+
+    def save_embedding(self, item_id: str, embedding: list[float]) -> None:
+        """Upsert an item embedding."""
+        try:
+            self.client.table("item_embeddings").upsert(
+                {"item_id": item_id, "embedding": embedding},
+                on_conflict="item_id",
             ).execute()
-            logger.info(f"Saved embedding for tweet {tweet_id}")
+            logger.info(f"Saved embedding for item {item_id}")
         except Exception as e:
             logger.error(f"Error saving embedding: {e}")
             raise
 
-    def find_similar_tweets(
-        self, embedding: list[float], limit: int = 5
-    ) -> list[dict]:
-        """Find similar voted tweets using pgvector cosine similarity.
+    def save_embeddings(self, embeddings: dict[str, list[float]]) -> int:
+        """Bulk upsert embeddings → count saved."""
+        if not embeddings:
+            return 0
+        records = [{"item_id": k, "embedding": v} for k, v in embeddings.items()]
+        try:
+            result = (
+                self.client.table("item_embeddings")
+                .upsert(records, on_conflict="item_id")
+                .execute()
+            )
+            return len(result.data or [])
+        except Exception as e:
+            logger.error(f"Error saving embeddings: {e}")
+            raise
 
-        Queries tweet_embeddings joined with feedback and tweets to return
-        similar tweets the user has voted on.
-
-        Args:
-            embedding: Query embedding vector
-            limit: Maximum number of results
+    def find_similar_voted(self, embedding: list[float], limit: int = 5) -> list[dict]:
+        """Nearest voted items by cosine similarity.
 
         Returns:
-            List of dicts with: tweet_id, text, author_username, vote, similarity
+            List of dicts with item_id, text, author_username, domain, vote,
+            strength, reason, similarity
         """
         try:
             result = self.client.rpc(
-                "match_voted_tweets",
-                {
-                    "query_embedding": embedding,
-                    "match_count": limit,
-                },
+                "match_voted_items",
+                {"query_embedding": embedding, "match_count": limit},
             ).execute()
             return result.data if result.data else []
         except Exception as e:
-            logger.error(f"Error finding similar tweets: {e}")
+            logger.error(f"Error finding similar items: {e}")
             return []
 
-    def get_embeddings(
-        self, tweet_ids: list[str], chunk_size: int = 100
-    ) -> dict[str, list[float]]:
+    def get_embeddings(self, item_ids: list[str], chunk_size: int = 100) -> dict[str, list[float]]:
         """Read stored embedding vectors for the given ids (missing ids omitted)."""
-        import json
-
         out: dict[str, list[float]] = {}
-        ids = list(dict.fromkeys(tweet_ids))
+        ids = list(dict.fromkeys(item_ids))
         for i in range(0, len(ids), chunk_size):
             chunk = ids[i : i + chunk_size]
             try:
                 result = (
-                    self.client.table("tweet_embeddings")
-                    .select("tweet_id,embedding")
-                    .in_("tweet_id", chunk)
+                    self.client.table("item_embeddings")
+                    .select("item_id,embedding")
+                    .in_("item_id", chunk)
                     .execute()
                 )
             except Exception as e:
@@ -763,23 +670,16 @@ class DatabaseClient:
                 if isinstance(vec, str):  # PostgREST serialises vector as text
                     vec = json.loads(vec)
                 if vec:
-                    out[row["tweet_id"]] = vec
+                    out[row["item_id"]] = vec
         return out
 
-    def has_embedding(self, tweet_id: str) -> bool:
-        """Check if an embedding exists for a tweet.
-
-        Args:
-            tweet_id: Twitter ID of the tweet
-
-        Returns:
-            True if embedding exists
-        """
+    def has_embedding(self, item_id: str) -> bool:
+        """Check if an embedding exists for an item."""
         try:
             result = (
-                self.client.table("tweet_embeddings")
-                .select("tweet_id")
-                .eq("tweet_id", tweet_id)
+                self.client.table("item_embeddings")
+                .select("item_id")
+                .eq("item_id", item_id)
                 .execute()
             )
             return len(result.data) > 0
@@ -787,15 +687,23 @@ class DatabaseClient:
             logger.error(f"Error checking embedding: {e}")
             return False
 
+    def get_voted_items_without_embeddings(self) -> list[dict]:
+        """Voted items that still need an embedding (for backfill)."""
+        try:
+            rows = self._vote_rows(select="item_id,items(item_id,text,title)")
+        except Exception as e:
+            logger.error(f"Error loading voted items: {e}")
+            raise
+        items = {r["item_id"]: r["items"] for r in rows if r.get("items")}
+        if not items:
+            return []
+        have = set(self.get_embeddings(list(items)).keys())
+        return [it for iid, it in items.items() if iid not in have]
+
+    # ======================================================== newsletters
+
     def get_newsletter_preferences(self, domain: str) -> dict | None:
-        """Get newsletter section preferences for a domain.
-
-        Args:
-            domain: Newsletter domain (e.g. 'etherealnews.substack.com')
-
-        Returns:
-            Preferences dict with ignored_sections and all_sections, or None if not set
-        """
+        """Get newsletter section preferences for a domain."""
         try:
             result = (
                 self.client.table("newsletter_preferences")
@@ -811,21 +719,12 @@ class DatabaseClient:
     def save_newsletter_preferences(
         self, domain: str, ignored_sections: list[str], all_sections: list[str]
     ) -> dict:
-        """Save newsletter section preferences for a domain.
-
-        Args:
-            domain: Newsletter domain
-            ignored_sections: List of section names to skip
-            all_sections: List of all section names found in the newsletter
-
-        Returns:
-            Saved preferences record
-        """
+        """Save newsletter section preferences for a domain."""
         record = {
             "domain": domain,
             "ignored_sections": ignored_sections,
             "all_sections": all_sections,
-            "updated_at": datetime.utcnow().isoformat(),
+            "updated_at": _now(),
         }
         try:
             result = (
@@ -839,24 +738,17 @@ class DatabaseClient:
             logger.error(f"Error saving newsletter preferences for {domain}: {e}")
             raise
 
+    # ============================================================ keywords
+
     def save_blocked_keyword(self, keyword: str) -> dict:
-        """Save a keyword to the block list.
-
-        Args:
-            keyword: Keyword or phrase to block (matched whole-word, case-insensitive)
-
-        Returns:
-            Saved record
-        """
+        """Save a keyword to the block list (whole-word, case-insensitive)."""
         keyword = keyword.strip().lower()
         if not keyword:
             raise ValueError("Keyword cannot be empty")
-
-        record = {"keyword": keyword}
         try:
             result = (
                 self.client.table("blocked_keywords")
-                .upsert(record, on_conflict="keyword")
+                .upsert({"keyword": keyword}, on_conflict="keyword")
                 .execute()
             )
             logger.info(f"Saved blocked keyword: '{keyword}'")
@@ -866,11 +758,7 @@ class DatabaseClient:
             raise
 
     def get_blocked_keywords(self) -> list[str]:
-        """Get all blocked keywords (lowercased).
-
-        Returns:
-            List of keyword strings
-        """
+        """Get all blocked keywords (lowercased)."""
         try:
             result = (
                 self.client.table("blocked_keywords")
@@ -884,20 +772,16 @@ class DatabaseClient:
             raise
 
     def remove_blocked_keyword(self, keyword: str) -> None:
-        """Remove a keyword from the block list.
-
-        Args:
-            keyword: Keyword to remove (case-insensitive)
-        """
+        """Remove a keyword from the block list."""
         keyword = keyword.strip().lower()
         try:
-            self.client.table("blocked_keywords").delete().eq(
-                "keyword", keyword
-            ).execute()
+            self.client.table("blocked_keywords").delete().eq("keyword", keyword).execute()
             logger.info(f"Removed blocked keyword: '{keyword}'")
         except Exception as e:
             logger.error(f"Error removing blocked keyword: {e}")
             raise
+
+    # =========================================================== error log
 
     def save_error_log(
         self,
@@ -911,26 +795,15 @@ class DatabaseClient:
         No internal logging calls: this is invoked from a logging handler,
         and calling `logger.*` here could loop back through the handler.
         """
-        record = {
+        self.client.table("error_log").insert({
             "source": source,
             "level": level,
             "error_type": error_type,
             "message": message,
-        }
-        self.client.table("error_log").insert(record).execute()
+        }).execute()
 
-    def get_error_logs_in_range(
-        self, start: datetime, end: datetime
-    ) -> list[dict]:
-        """Fetch error log rows between [start, end).
-
-        Args:
-            start: Inclusive lower bound (UTC-aware or naive UTC)
-            end: Exclusive upper bound
-
-        Returns:
-            List of rows: {id, logged_at, source, level, error_type, message}
-        """
+    def get_error_logs_in_range(self, start: datetime, end: datetime) -> list[dict]:
+        """Fetch error log rows between [start, end)."""
         try:
             result = (
                 self.client.table("error_log")
@@ -944,26 +817,3 @@ class DatabaseClient:
         except Exception as e:
             logger.error(f"Error fetching error logs: {e}")
             raise
-
-    def toggle_mute(self, username: str) -> str:
-        """Toggle mute status for an author.
-
-        If favorited: remove star, reset to default.
-        If default: demote to muted.
-        If already muted: no-op (stays muted).
-
-        Args:
-            username: Twitter username
-
-        Returns:
-            New state: "muted" or "unmuted" (removed star)
-        """
-        username = username.lower().lstrip("@")
-        if self.is_favorite_author(username):
-            self.remove_favorite_author(username)
-            logger.info(f"Unfavorited @{username} → default")
-            return "unfavorited"
-        else:
-            self.save_muted_author(username)
-            logger.info(f"Muted @{username}")
-            return "muted"

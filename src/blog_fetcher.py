@@ -66,7 +66,7 @@ class BlogFetcher:
             text += f"\n\n{body_truncated[:500]}"
 
         return {
-            "tweet_id": generate_blog_id(url),
+            "item_id": generate_blog_id(url),
             "author_username": domain,
             "author_name": author or domain,
             "text": text,
@@ -429,7 +429,7 @@ class BlogFetcher:
             text += f"\n\n{description[:200]}"
 
         return {
-            "tweet_id": generate_blog_id(resolved_url),
+            "item_id": generate_blog_id(resolved_url),
             "author_username": domain,
             "author_name": author or domain,
             "text": text,

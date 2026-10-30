@@ -68,7 +68,7 @@ class TestFormatTweetMessage:
 
     def test_html_escaping_in_text(self, bot):
         tweet = {
-            "tweet_id": "1",
+            "item_id": "1",
             "author_username": "test",
             "text": "x < y & y > z",
             "url": "https://twitter.com/test/status/1",
@@ -86,7 +86,7 @@ class TestFormatTweetMessage:
 
     def test_large_metric_formatting(self, bot):
         tweet = {
-            "tweet_id": "1",
+            "item_id": "1",
             "author_username": "test",
             "text": "hi",
             "url": "https://twitter.com/test/status/1",
@@ -111,7 +111,7 @@ class TestFormatTweetMessage:
 
     def test_quoted_tweet_html_escaped(self, bot):
         tweet = {
-            "tweet_id": "1",
+            "item_id": "1",
             "author_username": "test",
             "text": "Quote this",
             "url": "https://twitter.com/test/status/1",
@@ -120,7 +120,7 @@ class TestFormatTweetMessage:
                 "author_username": "original",
                 "author_name": "Original",
                 "text": "x < y & y > z",
-                "tweet_id": "2",
+                "item_id": "2",
             },
         }
         msg = bot._format_tweet_message(tweet)
@@ -128,7 +128,7 @@ class TestFormatTweetMessage:
 
     def test_quoted_tweet_multiline_all_prefixed(self, bot):
         tweet = {
-            "tweet_id": "1",
+            "item_id": "1",
             "author_username": "test",
             "text": "Interesting",
             "url": "https://twitter.com/test/status/1",
@@ -137,7 +137,7 @@ class TestFormatTweetMessage:
                 "author_username": "original",
                 "author_name": "Original",
                 "text": "Line one\nLine two\nLine three",
-                "tweet_id": "2",
+                "item_id": "2",
             },
         }
         msg = bot._format_tweet_message(tweet)
@@ -145,7 +145,7 @@ class TestFormatTweetMessage:
 
     def test_score_and_reason_omitted(self, bot):
         tweet = {
-            "tweet_id": "1",
+            "item_id": "1",
             "author_username": "test",
             "text": "hello",
             "url": "https://twitter.com/test/status/1",
@@ -271,35 +271,35 @@ class TestExtractUsername:
         assert TelegramCurator._extract_username("ALICE") == "alice"
 
 
-# --- _extract_tweet_id ---
+# --- _extract_item_id ---
 
 class TestExtractTweetId:
     def test_twitter_url(self):
-        assert TelegramCurator._extract_tweet_id(
+        assert TelegramCurator._extract_item_id(
             "https://twitter.com/alice/status/123456789"
         ) == "123456789"
 
     def test_x_url(self):
-        assert TelegramCurator._extract_tweet_id(
+        assert TelegramCurator._extract_item_id(
             "https://x.com/bob_dev/status/987654321"
         ) == "987654321"
 
     def test_www_prefix(self):
-        assert TelegramCurator._extract_tweet_id(
+        assert TelegramCurator._extract_item_id(
             "https://www.twitter.com/alice/status/111"
         ) == "111"
 
     def test_raw_numeric_id(self):
-        assert TelegramCurator._extract_tweet_id("123456789") == "123456789"
+        assert TelegramCurator._extract_item_id("123456789") == "123456789"
 
     def test_invalid_input_returns_none(self):
-        assert TelegramCurator._extract_tweet_id("not_a_tweet") is None
+        assert TelegramCurator._extract_item_id("not_a_tweet") is None
 
     def test_profile_url_returns_none(self):
-        assert TelegramCurator._extract_tweet_id("https://twitter.com/alice") is None
+        assert TelegramCurator._extract_item_id("https://twitter.com/alice") is None
 
     def test_empty_string_returns_none(self):
-        assert TelegramCurator._extract_tweet_id("") is None
+        assert TelegramCurator._extract_item_id("") is None
 
 
 # --- vote flow ---
@@ -500,11 +500,11 @@ class TestReactions:
     @pytest.mark.asyncio
     async def test_unknown_message_falls_back_to_lookup(self, vote_bot):
         vote_bot.lookup_message_callback = AsyncMock(
-            return_value={"tweet_id": "77", "author_username": "bob"}
+            return_value={"item_id": "77", "author_username": "bob"}
         )
         await vote_bot._handle_reaction(self._reaction_update(900, ["👍"], []), MagicMock())
         vote_bot.lookup_message_callback.assert_awaited_once_with(900)
-        assert vote_bot.feedback_callback.call_args[1]["tweet_id"] == "77"
+        assert vote_bot.feedback_callback.call_args[1]["item_id"] == "77"
 
     @pytest.mark.asyncio
     async def test_other_chat_ignored(self, vote_bot):
@@ -517,13 +517,13 @@ class TestReactions:
 
 class TestTrackingLinks:
     def test_direct_link_without_redirect_base(self, bot):
-        assert bot._link({"tweet_id": "42", "url": "https://x.com/a/status/42"}) == "https://x.com/a/status/42"
+        assert bot._link({"item_id": "42", "url": "https://x.com/a/status/42"}) == "https://x.com/a/status/42"
 
     def test_redirect_link_when_configured(self):
         tracked = TelegramCurator(
             bot_token="fake:token", chat_id="1", redirect_base_url="https://app.example"
         )
-        assert tracked._link({"tweet_id": "42", "url": "https://x.com/a/status/42"}) == "https://app.example/r/42"
+        assert tracked._link({"item_id": "42", "url": "https://x.com/a/status/42"}) == "https://app.example/r/42"
 
 
 # --- _format_thread_message ---
@@ -533,7 +533,7 @@ class TestFormatThreadMessage:
         """Generate n tweet dicts for a thread."""
         return [
             {
-                "tweet_id": str(i),
+                "item_id": str(i),
                 "author_username": "alice",
                 "author_name": "Alice",
                 "text": f"Tweet number {i}",

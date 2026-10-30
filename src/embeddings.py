@@ -54,7 +54,7 @@ class EmbeddingManager:
             texts = [self._embed_text(t) for t in chunk]
             response = self._client.embeddings.create(model=self.model, input=texts)
             for t, emb in zip(chunk, response.data):
-                result[t["tweet_id"]] = emb.embedding
+                result[t["item_id"]] = emb.embedding
         return result
 
     @staticmethod
@@ -85,7 +85,7 @@ class EmbeddingManager:
                 back from the database). When given, no OpenAI call is made.
 
         Returns:
-            Map item_id -> list of dicts with tweet_id, text, author_username,
+            Map item_id -> list of dicts with item_id, text, author_username,
             vote, similarity (descending). Items with no matches are absent.
         """
         if not self.db or not tweets or k <= 0:
@@ -102,17 +102,17 @@ class EmbeddingManager:
         fetch = k + 1 if exclude_self else k
 
         def _lookup(item):
-            tweet_id, embedding = item
-            matches = self.db.find_similar_tweets(embedding, limit=fetch)
+            item_id, embedding = item
+            matches = self.db.find_similar_voted(embedding, limit=fetch)
             if exclude_self:
-                matches = [m for m in matches if m.get("tweet_id") != tweet_id]
-            return tweet_id, matches[:k]
+                matches = [m for m in matches if m.get("item_id") != item_id]
+            return item_id, matches[:k]
 
         neighbors: dict[str, list[dict]] = {}
         with ThreadPoolExecutor(max_workers=workers) as pool:
-            for tweet_id, matches in pool.map(_lookup, embeddings.items()):
+            for item_id, matches in pool.map(_lookup, embeddings.items()):
                 if matches:
-                    neighbors[tweet_id] = matches
+                    neighbors[item_id] = matches
         return neighbors
 
     def cosine_similarity(self, vec1: list[float], vec2: list[float]) -> float:

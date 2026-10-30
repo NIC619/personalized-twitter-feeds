@@ -83,27 +83,27 @@ class TestFilterBlockedKeywords:
 
     def test_splits_by_keyword_match(self):
         items = [
-            {"tweet_id": "1", "text": "Client diversity is low", "author_username": "a"},
-            {"tweet_id": "2", "text": "Rollup sequencer deep dive", "author_username": "b"},
+            {"item_id": "1", "text": "Client diversity is low", "author_username": "a"},
+            {"item_id": "2", "text": "Rollup sequencer deep dive", "author_username": "b"},
         ]
         kept, blocked = filter_blocked_keywords(items, ["Client diversity"])
-        assert [t["tweet_id"] for t in kept] == ["2"]
-        assert [t["tweet_id"] for t in blocked] == ["1"]
+        assert [t["item_id"] for t in kept] == ["2"]
+        assert [t["item_id"] for t in blocked] == ["1"]
         assert blocked[0]["blocked_keyword"] == "Client diversity"
 
     def test_exempt_authors_always_kept(self):
         items = [
-            {"tweet_id": "1", "text": "Client diversity snippet", "author_username": "starred"},
-            {"tweet_id": "2", "text": "Client diversity snippet", "author_username": "other"},
+            {"item_id": "1", "text": "Client diversity snippet", "author_username": "starred"},
+            {"item_id": "2", "text": "Client diversity snippet", "author_username": "other"},
         ]
         kept, blocked = filter_blocked_keywords(
             items, ["client diversity"], exempt_authors={"starred"},
         )
-        assert [t["tweet_id"] for t in kept] == ["1"]
-        assert [t["tweet_id"] for t in blocked] == ["2"]
+        assert [t["item_id"] for t in kept] == ["1"]
+        assert [t["item_id"] for t in blocked] == ["2"]
 
     def test_exempt_authors_case_insensitive(self):
-        items = [{"tweet_id": "1", "text": "Client diversity", "author_username": "StarredUser"}]
+        items = [{"item_id": "1", "text": "Client diversity", "author_username": "StarredUser"}]
         kept, blocked = filter_blocked_keywords(
             items, ["client diversity"], exempt_authors={"starreduser"},
         )
@@ -112,7 +112,7 @@ class TestFilterBlockedKeywords:
 
     def test_substring_inside_word_not_blocked(self):
         # "staking" must not match inside "restaking"
-        items = [{"tweet_id": "1", "text": "Restaking protocols hit $20B", "author_username": "a"}]
+        items = [{"item_id": "1", "text": "Restaking protocols hit $20B", "author_username": "a"}]
         kept, blocked = filter_blocked_keywords(items, ["staking"])
         assert len(kept) == 1
         assert len(blocked) == 0

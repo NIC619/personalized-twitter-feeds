@@ -47,7 +47,7 @@ class TestIsBlogContent:
     def test_blog_id(self):
         assert is_blog_content("blog_a1b2c3d4e5f67890") is True
 
-    def test_tweet_id(self):
+    def test_item_id(self):
         assert is_blog_content("1234567890") is False
 
     def test_empty(self):
@@ -114,7 +114,7 @@ class TestBlogFetcher:
         post = fetcher.fetch_blog_post("https://ethresear.ch/t/test-post/123")
 
         assert post is not None
-        assert post["tweet_id"].startswith("blog_")
+        assert post["item_id"].startswith("blog_")
         assert post["content_type"] == "blog_post"
         assert post["article"]["title"] == "Test Blog Post Title"
         assert post["author_name"] == "Alice"
@@ -177,7 +177,7 @@ class TestBlogFetcher:
         assert len(posts) == 2
         assert posts[0]["article"]["title"] == "First Article Title Here"
         assert posts[0]["content_type"] == "blog_post"
-        assert posts[0]["tweet_id"].startswith("blog_")
+        assert posts[0]["item_id"].startswith("blog_")
         assert posts[1]["article"]["title"] == "Second Article Title Here"
 
     @patch("src.blog_fetcher.httpx.Client")
@@ -239,9 +239,9 @@ class TestBlogFetcher:
         fetcher = BlogFetcher()
         post = fetcher.fetch_blog_post("https://example.com/post")
 
-        # These fields are required by save_tweets() in database.py
+        # These fields are required by save_items() in database.py
         required_fields = [
-            "tweet_id", "author_username", "author_name",
+            "item_id", "author_username", "author_name",
             "text", "created_at", "metrics", "url",
             "raw_data", "is_retweet", "content_type",
         ]

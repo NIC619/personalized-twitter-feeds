@@ -14,6 +14,7 @@ from src.telegram_bot import TelegramCurator
 from src.database import DatabaseClient
 from src.embeddings import EmbeddingManager
 from src.keyword_filter import filter_blocked_keywords
+from src.profile_compiler import ProfileCompiler, scoring_profile
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +38,7 @@ class DailyCurator:
         rag_enabled: bool = True,
         neighbors_per_item: int = 3,
         exploration_per_run: int = 2,
+        profile_source: str = "compiled",
     ):
         """Initialize daily curator with all components.
 
@@ -56,6 +58,8 @@ class DailyCurator:
             neighbors_per_item: Nearest voted neighbours attached to each item
             exploration_per_run: Random below-threshold items sent per run
                 (marked 🎲) so recall below the threshold can be measured
+            profile_source: 'compiled' loads the latest compiled profiles
+                for the scoring prompt, 'static' uses the built-in baseline
         """
         self.twitter = twitter
         self.claude = claude
@@ -73,6 +77,7 @@ class DailyCurator:
         self.rag_enabled = rag_enabled
         self.neighbors_per_item = neighbors_per_item
         self.exploration_per_run = exploration_per_run
+        self.profile_source = profile_source
         logger.info(
             f"DailyCurator initialized (thresholds: favorite={self.favorite_author_threshold}, "
             f"default={self.default_threshold}, muted={self.muted_author_threshold})"
@@ -122,13 +127,13 @@ class DailyCurator:
                 )
                 stats["starred_fetched"] = len(starred_tweets)
 
-                # Merge and deduplicate by tweet_id
-                seen_ids = {t["tweet_id"] for t in tweets}
+                # Merge and deduplicate by item_id
+                seen_ids = {t["item_id"] for t in tweets}
                 new_from_starred = 0
                 for st in starred_tweets:
-                    if st["tweet_id"] not in seen_ids:
+                    if st["item_id"] not in seen_ids:
                         tweets.append(st)
-                        seen_ids.add(st["tweet_id"])
+                        seen_ids.add(st["item_id"])
                         new_from_starred += 1
 
                 stats["starred_new"] = new_from_starred
@@ -219,10 +224,12 @@ class DailyCurator:
 
             # Step 2: Score tweets with Claude (floor threshold gets all 50+ tweets)
             logger.info("Step 2: Scoring tweets with Claude...")
+            profile = self.load_scoring_profile()
             scored_tweets = self.claude.filter_tweets(
                 tweets_for_filtering,
                 threshold=self.filter_threshold,
                 neighbors=neighbors or None,
+                profile=profile,
             )
 
             # Step 2b: Apply per-author thresholds
@@ -275,11 +282,11 @@ class DailyCurator:
             # Step 3: Save all tweets to database (including non-filtered)
             logger.info("Step 3: Saving tweets to database...")
             # Update original tweets with filter results
-            tweet_map = {t["tweet_id"]: t for t in new_tweets}
+            tweet_map = {t["item_id"]: t for t in new_tweets}
             for ft in filtered_tweets:
-                tweet_map[ft["tweet_id"]] = ft
+                tweet_map[ft["item_id"]] = ft
 
-            self.db.save_tweets(list(tweet_map.values()))
+            self.db.save_items(list(tweet_map.values()))
             logger.info(f"Saved {len(tweet_map)} tweets to database")
 
             # Step 4: Group by thread and send filtered tweets to Telegram
@@ -298,7 +305,7 @@ class DailyCurator:
                 # Mark tweets as sent
                 for tweet, msg_id in sent_pairs:
                     if msg_id:
-                        self.db.mark_tweet_sent(tweet["tweet_id"], msg_id)
+                        self.db.mark_item_sent(tweet["item_id"], msg_id)
             else:
                 logger.info("No filtered tweets to send")
 
@@ -319,16 +326,55 @@ class DailyCurator:
 
             return stats
 
+    def load_scoring_profile(self) -> Optional[str]:
+        """Profile text for the scoring prompt (compiled when available)."""
+        if self.profile_source != "compiled":
+            return None
+        try:
+            profiles = self.db.get_latest_profiles()
+        except Exception as e:
+            logger.warning(f"Could not load compiled profiles, using baseline: {e}")
+            return None
+        if not isinstance(profiles, dict) or not profiles:
+            return None
+        text = scoring_profile(profiles, self.claude.profile)
+        logger.info(
+            f"Using compiled profile ({len(profiles)} sections, {len(text)} chars) for scoring"
+        )
+        return text
+
+    async def compile_profiles(self) -> dict[str, str]:
+        """Recompile preference profiles from signals (weekly job / CLI)."""
+        compiler = ProfileCompiler(self.claude.client, self.claude.model, self.db)
+        try:
+            written = await asyncio.to_thread(compiler.compile_all)
+        except Exception as e:
+            logger.error(f"Profile compilation failed: {e}", exc_info=True)
+            try:
+                await self.telegram.send_error_notification(f"Profile compilation failed: {e}")
+            except Exception:
+                pass
+            return {}
+        if written:
+            logger.info(f"Compiled profiles: {', '.join(written)}")
+            try:
+                await self.telegram.send_profile_update(written)
+            except Exception as e:
+                logger.warning(f"Could not announce profile update: {e}")
+        else:
+            logger.info("Profile compilation wrote nothing (not enough votes per domain)")
+        return written
+
     def _pick_exploration(
         self, scored: list[dict], passed: list[dict]
     ) -> list[dict]:
         """Pick random below-threshold items to send as exploration."""
         if self.exploration_per_run <= 0:
             return []
-        passed_ids = {t["tweet_id"] for t in passed}
+        passed_ids = {t["item_id"] for t in passed}
         candidates = [
             t for t in scored
-            if t["tweet_id"] not in passed_ids
+            if t["item_id"] not in passed_ids
             and t.get("filter_score") is not None
             and t.get("filter_reason") != "Not scored by Claude"
         ]
@@ -342,7 +388,7 @@ class DailyCurator:
 
         Tweets sharing a conversation_id are grouped together and sorted
         chronologically.  A tweet whose conversation_id equals its own
-        tweet_id and has no siblings in the batch stays as a single-item group.
+        item_id and has no siblings in the batch stays as a single-item group.
 
         Args:
             tweets: Filtered tweet list (each must have raw_data with
@@ -355,7 +401,7 @@ class DailyCurator:
 
         groups: OrderedDict[str, list[dict]] = OrderedDict()
         for tweet in tweets:
-            conv_id = tweet.get("raw_data", {}).get("conversation_id", tweet["tweet_id"])
+            conv_id = tweet.get("raw_data", {}).get("conversation_id", tweet["item_id"])
             groups.setdefault(conv_id, []).append(tweet)
 
         result: list[list[dict]] = []
@@ -373,8 +419,30 @@ class DailyCurator:
         """
         if not tweets:
             return []
-        scored_ids = self.db.get_scored_ids([t["tweet_id"] for t in tweets])
-        return [t for t in tweets if t["tweet_id"] not in scored_ids]
+        scored_ids = self.db.get_scored_ids([t["item_id"] for t in tweets])
+        return [t for t in tweets if t["item_id"] not in scored_ids]
+
+    def schedule_weekly_profile(
+        self, weekday: str, hour: int = 9, minute: int = 30,
+        timezone: Optional[str] = None,
+    ) -> None:
+        """Recompile profiles once a week (after that day's digest)."""
+        weekday = (weekday or "").strip().lower()
+        if not weekday:
+            logger.info("Weekly profile compilation disabled")
+            return
+        every = getattr(schedule.every(), weekday, None)
+        if every is None:
+            raise ValueError(f"Unknown weekday for profile compilation: {weekday!r}")
+        time_str = f"{hour:02d}:{minute:02d}"
+
+        def _launch() -> None:
+            task = asyncio.create_task(self.compile_profiles())
+            task.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
+
+        job = every.at(time_str, timezone) if timezone else every.at(time_str)
+        job.do(_launch)
+        logger.info(f"Scheduled weekly profile compilation on {weekday} at {time_str}")
 
     def schedule_daily(
         self,
@@ -445,7 +513,7 @@ class DailyCurator:
 
 async def feedback_handler(
     db: DatabaseClient,
-    tweet_id: str,
+    item_id: str,
     vote: str,
     telegram_message_id: int,
     notes: str = None,
@@ -455,12 +523,11 @@ async def feedback_handler(
 ) -> None:
     """Handle a vote from Telegram (button, reaction or /like).
 
-    Writes the legacy ``feedback`` row, appends a ``signals`` row, and
-    embeds the item for future neighbour lookups.
+    Appends a vote signal and embeds the item for future neighbour lookups.
 
     Args:
         db: Database client
-        tweet_id: Item ID
+        item_id: Item ID
         vote: 'up' or 'down'
         telegram_message_id: Telegram message ID
         notes: Optional reason for the vote
@@ -469,23 +536,8 @@ async def feedback_handler(
         source: 'button' | 'reaction' | 'like_cmd'
     """
     try:
-        db.save_feedback(
-            tweet_id=tweet_id,
-            vote=vote,
-            telegram_message_id=telegram_message_id,
-            notes=notes,
-        )
-        logger.info(
-            f"Saved feedback: tweet={tweet_id}, vote={vote}, strength={strength}, "
-            f"source={source}, notes={notes}"
-        )
-    except Exception as e:
-        logger.error(f"Error saving feedback: {e}")
-        return
-
-    try:
         db.save_signal(
-            item_id=tweet_id,
+            item_id=item_id,
             kind="vote",
             value=vote,
             strength=strength,
@@ -493,18 +545,23 @@ async def feedback_handler(
             source=source,
             telegram_message_id=telegram_message_id,
         )
+        logger.info(
+            f"Saved vote: item={item_id}, vote={vote}, strength={strength}, "
+            f"source={source}, notes={notes}"
+        )
     except Exception as e:
-        logger.warning(f"Signal save failed (feedback row kept): {e}")
+        logger.error(f"Error saving vote: {e}")
+        return
 
     # Embed the item for RAG (skip if already embedded)
     if embedding_manager and embedding_manager.enabled:
         try:
-            if not db.has_embedding(tweet_id):
-                tweet = db.get_tweet_by_id(tweet_id)
-                if tweet and tweet.get("text"):
-                    embedding = embedding_manager.generate_embedding(tweet["text"])
+            if not db.has_embedding(item_id):
+                item = db.get_item(item_id)
+                if item and item.get("text"):
+                    embedding = embedding_manager.generate_embedding(item["text"])
                     if embedding:
-                        db.save_embedding(tweet_id, embedding)
-                        logger.info(f"Embedded voted tweet {tweet_id} for RAG")
+                        db.save_embedding(item_id, embedding)
+                        logger.info(f"Embedded voted item {item_id} for RAG")
         except Exception as e:
-            logger.warning(f"Failed to embed voted tweet {tweet_id}: {e}")
+            logger.warning(f"Failed to embed voted item {item_id}: {e}")
