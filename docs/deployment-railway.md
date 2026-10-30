@@ -41,6 +41,7 @@ This project deploys as a single always-on **Web** service on Railway. One proce
 - `FAVORITE_THRESHOLD_OFFSET`, `MUTED_THRESHOLD_OFFSET`, `STARRED_AUTHOR_MAX_TWEETS`
 - `RAG_ENABLED`, `EMBEDDING_MODEL`, `RAG_SIMILARITY_LIMIT` (neighbours per item)
 - `EXPLORATION_PER_RUN`, `CLAUDE_MODEL`
+- `FEED_MAX_ENTRIES_PER_RUN` (default `10`)
 - `PROFILE_SOURCE` (default `compiled`), `PROFILE_COMPILE_WEEKDAY` (default `sunday`, runs at `SCHEDULE_HOUR`:30)
 - `REDIRECT_BASE_URL` (defaults to `WEBHOOK_URL`) — base for `/r/<item_id>` click-tracking links served by the bot's own HTTP server, which also serves the Telegram webhook at `/<token>` and `/health`
 - Removed (ignored if still set): `CONTROL_PROMPT`, `AB_TEST_ENABLED`, `AB_TEST_EXPERIMENT_ID`, `AB_TEST_CHALLENGER_PROMPT`
@@ -63,7 +64,7 @@ Before deploying a version that needs new tables, run the matching file(s) in
 `scripts/migrations/` in the Supabase SQL Editor, in date order. They are
 idempotent. Phase 3 (`2026-10-31_phase3_items.sql`) creates `items`, `signals`,
 `item_embeddings`, `preference_profiles` and copies the legacy tables into them;
-the code only reads the new tables from that version on.
+the code only reads the new tables from that version on. Phase 4 (`2026-10-31_phase4_feeds.sql`) adds the `feeds` table.
 
 ## Operational notes
 

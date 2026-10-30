@@ -393,3 +393,77 @@ class TestRagInPipeline:
         # Should work fine with no RAG
         call_args = claude.filter_tweets.call_args
         assert call_args[1].get("neighbors") is None
+
+
+# --- feeds in the daily run ---
+
+class TestFeedItems:
+    def _curator(self, components, feed_fetcher):
+        twitter, claude, telegram, db = components
+        return DailyCurator(
+            twitter=twitter, claude=claude, telegram=telegram, db=db,
+            filter_threshold=70, favorite_threshold_offset=20, muted_threshold_offset=15,
+            feed_fetcher=feed_fetcher, feed_max_entries=5, exploration_per_run=0,
+        )
+
+    def test_no_fetcher(self, components):
+        twitter, claude, telegram, db = components
+        curator = DailyCurator(twitter=twitter, claude=claude, telegram=telegram, db=db)
+        assert curator._fetch_feed_items() == []
+
+    def test_only_unscored_entries_become_items(self, components):
+        from src.blog_fetcher import BlogFetcher
+        twitter, claude, telegram, db = components
+        fetcher = MagicMock()
+        fetcher.blog_fetcher.build_post = BlogFetcher.build_post
+        fetcher.fetch_entries.return_value = [
+            {"url": "https://x.example/new", "title": "New"},
+            {"url": "https://x.example/old", "title": "Old"},
+        ]
+        old_id = BlogFetcher.build_post(url="https://x.example/old", title="Old")["item_id"]
+        db.get_feeds.return_value = [{"url": "https://x.example/feed", "title": "X"}]
+        db.get_scored_ids.return_value = {old_id}
+        fetcher.entries_to_items.side_effect = lambda feed, entries, max_items: [
+            {"item_id": "n", "url": e["url"]} for e in entries
+        ]
+        curator = self._curator(components, fetcher)
+
+        items = curator._fetch_feed_items()
+
+        assert [i["url"] for i in items] == ["https://x.example/new"]
+        fetcher.entries_to_items.assert_called_once()
+        assert fetcher.entries_to_items.call_args[1]["max_items"] == 5
+        db.update_feed_state.assert_called_once_with("https://x.example/feed")
+
+    def test_feed_error_recorded_and_non_fatal(self, components):
+        twitter, claude, telegram, db = components
+        fetcher = MagicMock()
+        fetcher.fetch_entries.side_effect = RuntimeError("timeout")
+        db.get_feeds.return_value = [{"url": "https://bad.example/feed"}]
+        curator = self._curator(components, fetcher)
+
+        assert curator._fetch_feed_items() == []
+        db.update_feed_state.assert_called_once_with("https://bad.example/feed", error="timeout")
+
+    @pytest.mark.asyncio
+    async def test_feed_items_join_scoring_batch(self, components):
+        twitter, claude, telegram, db = components
+        tweets = [{"item_id": "1", "author_username": "dev", "text": "t", "is_retweet": False}]
+        twitter.fetch_timeline.return_value = tweets
+        twitter.fetch_user_tweets.return_value = []
+        db.get_favorite_authors.return_value = []
+        db.get_muted_authors.return_value = []
+        fetcher = MagicMock()
+        curator = self._curator(components, fetcher)
+        curator._fetch_feed_items = MagicMock(return_value=[
+            {"item_id": "blog_1", "author_username": "x.example", "text": "post", "is_retweet": False},
+        ])
+        claude.filter_tweets.return_value = []
+
+        stats = await curator.run_daily_curation()
+
+        scored_input = claude.filter_tweets.call_args[0][0]
+        assert [i["item_id"] for i in scored_input] == ["1", "blog_1"]
+        assert stats["feed_items"] == 1
+        saved_ids = {i["item_id"] for i in db.save_items.call_args[0][0]}
+        assert saved_ids == {"1", "blog_1"}

@@ -133,6 +133,43 @@ REASON_TOOL = {
 }
 
 
+EXTRACT_PROMPT = """Below is the visible text of a newsletter issue or link digest. Extract every distinct linked item (article, paper, thread, talk, release) it points the reader to. Skip navigation, sponsor blocks, subscribe prompts, footers and the newsletter's own self-links. Links appear inline as `anchor text <url>`.
+
+For each item return: title (as the newsletter names it, cleaned), url (the real destination; prefer non-tracking URLs), summary (the newsletter's one or two sentence description or your own from the surrounding text), author (if named), section (the heading it sits under, if any).
+
+Page title: {page_title}
+
+{page_text}
+
+Call extract_entries with the list, in page order."""
+
+
+EXTRACT_TOOL = {
+    "name": "extract_entries",
+    "description": "Return the linked items found in a newsletter page.",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "entries": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "title": {"type": "string"},
+                        "url": {"type": "string"},
+                        "summary": {"type": "string"},
+                        "author": {"type": "string"},
+                        "section": {"type": "string"},
+                    },
+                    "required": ["title", "url"],
+                },
+            }
+        },
+        "required": ["entries"],
+    },
+}
+
+
 class ClaudeFilter:
     """Claude-based content scorer."""
 
@@ -277,6 +314,44 @@ class ClaudeFilter:
                 reason = str(block.input.get("reason", "")).strip().rstrip(".")
                 return reason[:160] or None
         return None
+
+    def extract_newsletter_entries(self, page_title: str, page_text: str) -> list[dict]:
+        """Extract linked items from a newsletter page via one model call.
+
+        Returns:
+            List of {title, url, summary, author, section} with http(s) URLs.
+        """
+        prompt = EXTRACT_PROMPT.format(page_title=page_title, page_text=page_text)
+        try:
+            response = self.client.messages.create(
+                model=self.model,
+                max_tokens=8192,
+                temperature=0.0,
+                tools=[EXTRACT_TOOL],
+                tool_choice={"type": "tool", "name": "extract_entries"},
+                messages=[{"role": "user", "content": prompt}],
+            )
+        except Exception as e:
+            logger.error(f"Newsletter extraction failed: {e}")
+            raise
+        for block in getattr(response, "content", []) or []:
+            if getattr(block, "type", None) == "tool_use" and block.name == "extract_entries":
+                entries = []
+                seen: set[str] = set()
+                for e in block.input.get("entries", []) or []:
+                    url = str(e.get("url") or "").strip()
+                    if not url.startswith(("http://", "https://")) or url in seen:
+                        continue
+                    seen.add(url)
+                    entries.append({
+                        "title": str(e.get("title") or url).strip(),
+                        "url": url,
+                        "summary": str(e.get("summary") or "").strip(),
+                        "author": (str(e.get("author")).strip() or None) if e.get("author") else None,
+                        "section": (str(e.get("section")).strip() or None) if e.get("section") else None,
+                    })
+                return entries
+        return []
 
     # ----------------------------------------------------------------- helpers
 

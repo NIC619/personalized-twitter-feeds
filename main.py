@@ -15,6 +15,7 @@ from src.database import DatabaseClient
 from src.embeddings import EmbeddingManager
 from src.scheduler import DailyCurator, feedback_handler
 from src.blog_fetcher import BlogFetcher
+from src.feeds import FeedFetcher
 from src.error_logger import attach_db_error_handler
 from src.capture import minimal_url_item, text_item
 from src.profile_compiler import render_preferences_md, scoring_profile
@@ -267,8 +268,9 @@ def init_components(settings, num_tweets=None, hours=None):
             db.save_items(tweets)
         return tweets
 
-    # Initialize blog fetcher
+    # Initialize blog + feed fetchers
     blog_fetcher = BlogFetcher()
+    feed_fetcher = FeedFetcher(blog_fetcher=blog_fetcher)
 
     # RAG setup
     rag_enabled = settings.rag_enabled and embedding_manager.enabled
@@ -332,27 +334,56 @@ def init_components(settings, num_tweets=None, hours=None):
             return _score_and_save([item])[0]
         return await asyncio.to_thread(_capture)
 
-    # Create newsletter callback
-    async def on_newsletter(url: str, ignored_sections: list[str] | None = None) -> list[dict]:
-        posts = await asyncio.to_thread(
-            blog_fetcher.parse_newsletter, url, ignored_sections=ignored_sections
-        )
-        if not posts:
-            return []
-        await asyncio.to_thread(_score_and_save, posts)
-        return posts
+    # Newsletter: LLM extracts the linked items, they are scored like anything else
+    async def on_newsletter(url: str) -> dict:
+        def _run():
+            page = blog_fetcher.fetch_page(url)
+            if not page:
+                return {"entries": 0, "items": []}
+            entries = claude.extract_newsletter_entries(page["title"], page["text"])
+            if not entries:
+                return {"entries": 0, "items": []}
+            items = []
+            for e in entries:
+                post = blog_fetcher.build_post(
+                    url=e["url"], title=e["title"], body=e.get("summary") or "",
+                    author=e.get("author"), source="newsletter",
+                    original_url=url,
+                    extra_raw={"newsletter_url": url, "newsletter_title": page["title"],
+                               "section": e.get("section")},
+                )
+                items.append(post)
+            # Skip ones already scored (same link in several issues)
+            already = db.get_scored_ids([i["item_id"] for i in items])
+            fresh = [i for i in items if i["item_id"] not in already]
+            if fresh:
+                _score_and_save(fresh)
+            scored = {i["item_id"]: i for i in fresh}
+            known = db.get_items([i["item_id"] for i in items if i["item_id"] in already])
+            ordered = [scored.get(i["item_id"]) or known.get(i["item_id"]) for i in items]
+            good = [
+                i for i in ordered
+                if i and (i.get("filter_score") or 0) >= settings.filter_threshold
+            ]
+            return {"entries": len(entries), "items": good}
+        return await asyncio.to_thread(_run)
 
-    # Create newsletter preferences callbacks
-    async def on_get_newsletter_prefs(domain: str) -> dict | None:
-        return db.get_newsletter_preferences(domain)
+    # Feeds
+    async def on_feed_add(url: str) -> dict | None:
+        def _add():
+            found = feed_fetcher.discover_feed(url)
+            if not found:
+                return None
+            row = db.save_feed(found["feed_url"], title=found.get("title"), site_url=found.get("site_url"))
+            row["entries"] = len(found.get("entries") or [])
+            return row
+        return await asyncio.to_thread(_add)
 
-    async def on_save_newsletter_prefs(
-        domain: str, ignored_sections: list[str], all_sections: list[str],
-    ) -> dict:
-        return db.save_newsletter_preferences(domain, ignored_sections, all_sections)
+    async def on_feed_list() -> list[dict]:
+        return await asyncio.to_thread(db.get_feeds)
 
-    async def on_extract_sections(url: str) -> list[str]:
-        return await asyncio.to_thread(blog_fetcher.extract_sections, url)
+    async def on_feed_remove(url: str) -> None:
+        await asyncio.to_thread(db.remove_feed, url)
 
     # Blocked keyword callbacks
     async def on_add_blocked_keyword(keyword: str) -> dict:
@@ -377,9 +408,9 @@ def init_components(settings, num_tweets=None, hours=None):
         thread_callback=on_fetch_thread,
         like_blog_callback=on_like_blog,
         newsletter_callback=on_newsletter,
-        get_newsletter_prefs_callback=on_get_newsletter_prefs,
-        save_newsletter_prefs_callback=on_save_newsletter_prefs,
-        extract_sections_callback=on_extract_sections,
+        feed_add_callback=on_feed_add,
+        feed_list_callback=on_feed_list,
+        feed_remove_callback=on_feed_remove,
         add_blocked_keyword_callback=on_add_blocked_keyword,
         list_blocked_keywords_callback=on_list_blocked_keywords,
         remove_blocked_keyword_callback=on_remove_blocked_keyword,
@@ -411,6 +442,8 @@ def init_components(settings, num_tweets=None, hours=None):
         neighbors_per_item=settings.rag_similarity_limit,
         exploration_per_run=settings.exploration_per_run,
         profile_source=settings.profile_source,
+        feed_fetcher=feed_fetcher,
+        feed_max_entries=settings.feed_max_entries_per_run,
     )
 
     logger.info(f"All components initialized (max_tweets={max_tweets}, fetch_hours={fetch_hours})")

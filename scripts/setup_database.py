@@ -196,18 +196,20 @@ ALTER TABLE public.error_log ENABLE ROW LEVEL SECURITY;
 DROP POLICY IF EXISTS "anon_all" ON public.error_log;
 CREATE POLICY "anon_all" ON public.error_log FOR ALL TO anon USING (true) WITH CHECK (true);
 
--- --------------------------------------------- newsletter preferences
--- (legacy; removed in phase 4)
-CREATE TABLE IF NOT EXISTS public.newsletter_preferences (
-    domain TEXT PRIMARY KEY,
-    ignored_sections JSONB NOT NULL DEFAULT '[]'::jsonb,
-    all_sections JSONB NOT NULL DEFAULT '[]'::jsonb,
-    created_at TIMESTAMPTZ DEFAULT NOW(),
-    updated_at TIMESTAMPTZ DEFAULT NOW()
+-- --------------------------------------------------------------- feeds
+CREATE TABLE IF NOT EXISTS public.feeds (
+    url TEXT PRIMARY KEY,
+    title TEXT,
+    site_url TEXT,
+    active BOOLEAN NOT NULL DEFAULT TRUE,
+    added_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    last_fetched_at TIMESTAMPTZ,
+    last_error TEXT,
+    error_count INTEGER NOT NULL DEFAULT 0
 );
-ALTER TABLE public.newsletter_preferences ENABLE ROW LEVEL SECURITY;
-DROP POLICY IF EXISTS "anon_all" ON public.newsletter_preferences;
-CREATE POLICY "anon_all" ON public.newsletter_preferences FOR ALL TO anon USING (true) WITH CHECK (true);
+ALTER TABLE public.feeds ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS "anon_all" ON public.feeds;
+CREATE POLICY "anon_all" ON public.feeds FOR ALL TO anon USING (true) WITH CHECK (true);
 """
 
 
@@ -225,7 +227,7 @@ def print_schema():
     print()
     print("After running the SQL:")
     print("1. Go to Supabase Dashboard > Table Editor")
-    print("2. Verify tables exist: items, signals, item_embeddings, preference_profiles")
+    print("2. Verify tables exist: items, signals, item_embeddings, preference_profiles, feeds")
     print("3. Check that pgvector extension is enabled")
     print()
     print("Upgrading an existing deployment? Run scripts/migrations/*.sql in date order instead.")

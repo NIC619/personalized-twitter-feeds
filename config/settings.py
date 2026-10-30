@@ -48,6 +48,11 @@ class Settings(BaseSettings):
         description="Number of random below-threshold items to send per run for recall measurement",
     )
 
+    # RSS/Atom feeds polled in the daily run
+    feed_max_entries_per_run: int = Field(
+        default=10, description="Newest entries fetched per feed per run"
+    )
+
     # Preference profiles compiled from signals
     profile_compile_weekday: str = Field(
         default="sunday",

@@ -168,8 +168,8 @@ python main.py --bot-only
 | --- | --- |
 | `/star username` | Toggle starred status for an author. Accepts username, @mention, or profile/tweet URL. |
 | `/like url` | Upvote a tweet, article or any URL. Accepts tweet URLs, other URLs, or numeric tweet IDs. |
-| `/newsletter url` | Parse a newsletter, score all articles with Claude, and send them for review. |
-| `/newsletter_prefs domain_or_url` | Edit ignored sections for a newsletter. |
+| `/newsletter url` | Read a newsletter issue, let Claude extract every linked item, score them, send the ones above the threshold. |
+| `/feed add url` | Subscribe to a site or feed (RSS/Atom discovered automatically). `/feed list`, `/feed remove N`. |
 | `/thread tweet_url` | Fetch a full thread and display it as a single compiled message. |
 | `/starred` | List all currently starred authors. |
 | `/blockword` | Block keyword(s) from the pipeline. Whole-word, case-insensitive. Starred authors are exempt. |
@@ -189,6 +189,24 @@ python main.py --bot-only
 | A reply to a delivered item | Saved as a note on that item |
 
 After every upvote the bot proposes a reason and you confirm or edit it.
+
+### Newsletters and feeds
+
+The old approach parsed Substack section headings with HTML heuristics and scored
+title-plus-blurb. It is gone. Now:
+
+- **`/feed add <site or feed URL>`** subscribes to the underlying blog. New entries are fetched
+  in full text during the daily run and scored exactly like tweets (threshold, exploration,
+  neighbours, votes all apply). Most newsletters are digests of a handful of blogs; follow
+  those directly and you get the articles a day earlier, with full text.
+- **`/newsletter <issue URL>`** for digests you can't follow by feed. One model call extracts
+  every linked item from the page text (title, destination URL, blurb, section); each becomes
+  an item, is scored, and the ones above the threshold are sent with vote buttons.
+
+```bash
+# Feeds table (existing deployments)
+scripts/migrations/2026-10-31_phase4_feeds.sql
+```
 
 ### Importing what you already liked
 
@@ -288,48 +306,40 @@ python main.py --error-report last     # Error log report for previous month
 ## Project Structure
 
 ```
-twitter-curator/
-├── config/
-│   └── settings.py         # Environment config with validation
+personalized-twitter-feeds/
+├── config/settings.py             # pydantic settings (env vars)
 ├── src/
-│   ├── twitter_client.py   # Twitter API v2 client
-│   ├── capture.py                 # Classify sent messages, build items from URLs/text
-│   ├── claude_filter.py    # Claude AI filtering
-│   ├── telegram_bot.py     # Telegram bot with feedback buttons
-│   ├── database.py         # Supabase operations
-│   ├── embeddings.py
-│   ├── feedback_flow.py           # Reactions, vote buttons, reason prompts (pure helpers)
-│   ├── mcp_server.py              # MCP server over the preference store
-│   ├── preference_api.py          # Agent-facing API (used by MCP)
-│   ├── profile_compiler.py        # Signals → per-domain Markdown profiles
-│   ├── webhook_server.py          # Telegram webhook + /r/<id> click tracking       # RAG embeddings for feedback-driven curation
-│   ├── scheduler.py        # Daily curation orchestration
-│   ├── content.py          # Content ID utilities (blog ID generation, URL detection)
-│   ├── keyword_filter.py   # Pre-LLM blocklist filter (whole-word, case-insensitive)
-│   ├── error_logger.py     # DatabaseErrorHandler: persists WARNING+ logs to Supabase
-│   └── blog_fetcher.py     # Blog post fetching and newsletter parsing
-├── tests/
-│   ├── conftest.py                # Shared test fixtures
-│   ├── test_claude_filter.py      # ClaudeFilter unit tests
-│   ├── test_database.py           # DatabaseClient unit tests
-│   ├── test_twitter_client.py     # TwitterClient unit tests
-│   ├── test_scheduler.py          # DailyCurator unit tests
-│   ├── test_telegram_bot.py       # TelegramCurator unit tests
-│   ├── test_embeddings.py         # EmbeddingManager unit tests
-│   ├── test_keyword_filter.py     # Keyword blocklist filter unit tests
-│   ├── test_error_logger.py       # Error logger + monthly report unit tests
-│   └── test_blog_fetcher.py       # BlogFetcher and content utils unit tests
+│   ├── scheduler.py               # DailyCurator: fetch → feeds → neighbours → score → exploration → send; weekly profile job
+│   ├── telegram_bot.py            # TelegramCurator: init, handlers, sending, polling/webhook
+│   ├── bot/                       # Bot mixins: feedback, capture, feeds, admin, formatting, constants
+│   ├── claude_filter.py           # Scoring prompt + tool schema, domain tagging, reason proposals, newsletter extraction
+│   ├── embeddings.py              # OpenAI embeddings + per-item pgvector neighbours
+│   ├── database.py                # Supabase client: items, signals, embeddings, profiles, feeds, authors, keywords
+│   ├── profile_compiler.py        # Signals → per-domain Markdown profiles (+ overall), scoring profile text
+│   ├── preference_api.py          # Agent-facing API (get_profile / search_liked / score_items / record_signal)
+│   ├── mcp_server.py              # MCP server over preference_api
+│   ├── capture.py                 # Classify sent messages, build items from URLs/text/forwards
+│   ├── feedback_flow.py           # Reactions → votes, vote/reason keyboards (pure helpers)
+│   ├── webhook_server.py          # Telegram webhook + /r/<item_id> click tracking + /health
+│   ├── feeds.py                   # RSS/Atom discovery, parsing, entries → items
+│   ├── blog_fetcher.py            # Article fetching, page text for LLM extraction
+│   ├── twitter_client.py          # X API client (xdk)
+│   ├── keyword_filter.py          # Pre-LLM keyword blocklist
+│   ├── content.py                 # Item id helpers, URL detection
+│   └── error_logger.py            # WARNING+ → error_log table
 ├── scripts/
-│   ├── setup_database.py          # Database schema SQL
+│   ├── setup_database.py          # Fresh-install schema SQL
+│   ├── migrations/                # Incremental SQL for existing deployments (run in date order)
 │   ├── eval_prompt.py             # Offline prompt/model evaluation against votes
 │   ├── import_items.py            # Import Raindrop/Readwise/CSV/Twitter-archive likes
-│   ├── migrations/                # Incremental SQL to run in Supabase (existing deployments)
+│   ├── backfill_embeddings.py     # Embed voted items that have no embedding
 │   ├── error_report.py            # Monthly error log report
 │   ├── test_components.py         # Integration testing (live APIs)
 │   └── count_twitter_timeline.py  # Count tweets from Twitter
-├── main.py                 # CLI entry point
+├── tests/                         # pytest suite (unit tests, no credentials needed)
+├── docs/                          # Railway deployment, MCP setup, xdk migration notes
+├── main.py                        # CLI entry point
 ├── requirements.txt
-├── requirements-dev.txt    # Test dependencies
 └── .env.example
 ```
 
@@ -357,6 +367,10 @@ twitter-curator/
 `/like`, plain URLs, forwarded posts and free text go through the same scorer (threshold 0, so
 they always get a score and a domain), are saved as items, and receive an upvote with an undo
 window and a model-proposed reason.
+
+### Feeds and newsletters
+Subscribed feeds are polled in step 1 of the daily run; unscored entries are fetched in full and
+join the tweet batch. `/newsletter` runs on demand: page text → LLM extraction → scoring → send.
 
 ## Filtering Criteria
 
@@ -430,6 +444,7 @@ The choices below reflect how I personally want this tool to behave. They are no
 | `RAG_ENABLED`       | true        | Attach voted neighbours to items when scoring |
 | `RAG_SIMILARITY_LIMIT` | 3        | Neighbours per item                     |
 | `EXPLORATION_PER_RUN` | 2         | Random below-threshold items sent per run (🎲) |
+| `FEED_MAX_ENTRIES_PER_RUN` | 10   | Newest entries fetched per feed per run |
 | `CLAUDE_MODEL`      | claude-sonnet-4-6 | Scoring model                     |
 | `REDIRECT_BASE_URL` | `WEBHOOK_URL` | Base URL for click-tracking links; unset in dev = direct links |
 

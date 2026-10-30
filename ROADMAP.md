@@ -93,6 +93,12 @@
 - [x] Weekly compiled per-domain profiles injected into scoring; `--export-preferences PREFERENCES.md`
 - [x] MCP server: get_profile, search_liked, score_items, record_signal
 
+## Phase 5: Feeds and newsletters ✅ (2026-10-31)
+
+- [x] `feeds` table, `/feed add|list|remove`, RSS/Atom discovery from a site URL
+- [x] Daily run polls feeds; new entries fetched in full and scored like tweets
+- [x] `/newsletter` = LLM extraction of linked items from page text (HTML section heuristics and `/newsletter_prefs` removed)
+
 ## Future Ideas
 
 - [x] Migrate from tweepy to official X SDK (xdk) - see `docs/xdk-migration-notes.md`
@@ -103,4 +109,5 @@
 - [x] A/B test different prompts
 - [ ] Auto-adjust threshold based on feedback ratio
 - [ ] Support for Twitter lists (not just home timeline)
+- [ ] Email ingestion for newsletters without feeds (IMAP or forward-to-address)
 - [ ] Keyword alerts (always show tweets mentioning X)

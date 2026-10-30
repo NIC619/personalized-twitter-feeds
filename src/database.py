@@ -700,43 +700,50 @@ class DatabaseClient:
         have = set(self.get_embeddings(list(items)).keys())
         return [it for iid, it in items.items() if iid not in have]
 
-    # ======================================================== newsletters
+    # =============================================================== feeds
 
-    def get_newsletter_preferences(self, domain: str) -> dict | None:
-        """Get newsletter section preferences for a domain."""
+    def save_feed(self, url: str, title: Optional[str] = None, site_url: Optional[str] = None) -> dict:
+        """Subscribe to a feed (idempotent)."""
+        record = {"url": url, "title": title, "site_url": site_url, "active": True}
         try:
-            result = (
-                self.client.table("newsletter_preferences")
-                .select("*")
-                .eq("domain", domain)
-                .execute()
-            )
-            return result.data[0] if result.data else None
+            result = self.client.table("feeds").upsert(record, on_conflict="url").execute()
+            logger.info(f"Saved feed {url}")
+            return result.data[0] if result.data else record
         except Exception as e:
-            logger.error(f"Error getting newsletter preferences for {domain}: {e}")
-            return None
-
-    def save_newsletter_preferences(
-        self, domain: str, ignored_sections: list[str], all_sections: list[str]
-    ) -> dict:
-        """Save newsletter section preferences for a domain."""
-        record = {
-            "domain": domain,
-            "ignored_sections": ignored_sections,
-            "all_sections": all_sections,
-            "updated_at": _now(),
-        }
-        try:
-            result = (
-                self.client.table("newsletter_preferences")
-                .upsert(record, on_conflict="domain")
-                .execute()
-            )
-            logger.info(f"Saved newsletter preferences for {domain}: ignoring {len(ignored_sections)} sections")
-            return result.data[0] if result.data else {}
-        except Exception as e:
-            logger.error(f"Error saving newsletter preferences for {domain}: {e}")
+            logger.error(f"Error saving feed: {e}")
             raise
+
+    def get_feeds(self, active_only: bool = True) -> list[dict]:
+        """Subscribed feeds, oldest first."""
+        try:
+            q = self.client.table("feeds").select("*").order("added_at")
+            if active_only:
+                q = q.eq("active", True)
+            return q.execute().data or []
+        except Exception as e:
+            logger.error(f"Error loading feeds: {e}")
+            raise
+
+    def remove_feed(self, url: str) -> None:
+        try:
+            self.client.table("feeds").delete().eq("url", url).execute()
+            logger.info(f"Removed feed {url}")
+        except Exception as e:
+            logger.error(f"Error removing feed: {e}")
+            raise
+
+    def update_feed_state(self, url: str, error: Optional[str] = None) -> None:
+        """Record a fetch attempt: clears or increments the error counter."""
+        try:
+            if error:
+                current = self.client.table("feeds").select("error_count").eq("url", url).execute()
+                count = (current.data[0]["error_count"] if current.data else 0) + 1
+                patch = {"last_fetched_at": _now(), "last_error": error[:500], "error_count": count}
+            else:
+                patch = {"last_fetched_at": _now(), "last_error": None, "error_count": 0}
+            self.client.table("feeds").update(patch).eq("url", url).execute()
+        except Exception as e:
+            logger.warning(f"Error updating feed state for {url}: {e}")
 
     # ============================================================ keywords
 

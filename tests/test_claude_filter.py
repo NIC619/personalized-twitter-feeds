@@ -197,3 +197,28 @@ class TestBuildItemEntry:
         n = entry["similar_past_votes"][0]
         assert len(n["text"]) == 200
         assert n["reason"] == "Event/promo"
+
+
+# --- extract_newsletter_entries ---
+
+class TestExtractNewsletterEntries:
+    def test_filters_and_dedupes(self, claude_filter):
+        block = SimpleNamespace(type="tool_use", name="extract_entries", input={"entries": [
+            {"title": "A", "url": "https://a.example/post", "summary": "s", "author": "", "section": "Research"},
+            {"title": "dup", "url": "https://a.example/post"},
+            {"title": "bad", "url": "mailto:x@y"},
+            {"title": "B", "url": "https://b.example"},
+        ]})
+        claude_filter.client.messages.create.return_value = SimpleNamespace(content=[block])
+
+        entries = claude_filter.extract_newsletter_entries("Issue 1", "page text")
+
+        assert [e["url"] for e in entries] == ["https://a.example/post", "https://b.example"]
+        assert entries[0]["author"] is None and entries[0]["section"] == "Research"
+        kwargs = claude_filter.client.messages.create.call_args[1]
+        assert kwargs["tool_choice"] == {"type": "tool", "name": "extract_entries"}
+        assert "Issue 1" in kwargs["messages"][0]["content"]
+
+    def test_no_tool_block(self, claude_filter):
+        claude_filter.client.messages.create.return_value = SimpleNamespace(content=[])
+        assert claude_filter.extract_newsletter_entries("t", "x") == []

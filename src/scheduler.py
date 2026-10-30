@@ -39,6 +39,8 @@ class DailyCurator:
         neighbors_per_item: int = 3,
         exploration_per_run: int = 2,
         profile_source: str = "compiled",
+        feed_fetcher=None,
+        feed_max_entries: int = 10,
     ):
         """Initialize daily curator with all components.
 
@@ -60,6 +62,9 @@ class DailyCurator:
                 (marked 🎲) so recall below the threshold can be measured
             profile_source: 'compiled' loads the latest compiled profiles
                 for the scoring prompt, 'static' uses the built-in baseline
+            feed_fetcher: Optional FeedFetcher; subscribed RSS/Atom feeds are
+                polled each run and their new entries scored like tweets
+            feed_max_entries: Newest entries fetched per feed per run
         """
         self.twitter = twitter
         self.claude = claude
@@ -78,6 +83,8 @@ class DailyCurator:
         self.neighbors_per_item = neighbors_per_item
         self.exploration_per_run = exploration_per_run
         self.profile_source = profile_source
+        self.feed_fetcher = feed_fetcher
+        self.feed_max_entries = feed_max_entries
         logger.info(
             f"DailyCurator initialized (thresholds: favorite={self.favorite_author_threshold}, "
             f"default={self.default_threshold}, muted={self.muted_author_threshold})"
@@ -207,6 +214,13 @@ class DailyCurator:
                 logger.info("No tweets remaining after keyword blocklist")
                 return stats
 
+            # Step 1e: New entries from subscribed feeds join the batch
+            feed_items = self._fetch_feed_items()
+            if feed_items:
+                stats["feed_items"] = len(feed_items)
+                tweets_for_filtering.extend(feed_items)
+                new_tweets.extend(feed_items)
+
             # Step 1d: Per-item nearest voted neighbours (RAG)
             neighbors: dict[str, list[dict]] = {}
             if self.rag_enabled and self.embedding_manager and self.embedding_manager.enabled:
@@ -325,6 +339,38 @@ class DailyCurator:
                 logger.error(f"Failed to send error notification: {notify_error}")
 
             return stats
+
+    def _fetch_feed_items(self) -> list[dict]:
+        """Unscored entries from active feeds, as pipeline items."""
+        if not self.feed_fetcher:
+            return []
+        try:
+            feeds = self.db.get_feeds()
+        except Exception as e:
+            logger.warning(f"Could not load feeds: {e}")
+            return []
+        if not feeds:
+            return []
+        logger.info(f"Step 1e: Polling {len(feeds)} feeds...")
+        items: list[dict] = []
+        for feed in feeds:
+            try:
+                entries = self.feed_fetcher.fetch_entries(feed["url"])
+                candidates = [e for e in entries if e.get("url")]
+                ids = [self.feed_fetcher.blog_fetcher.build_post(
+                    url=e["url"], title=e.get("title") or e["url"])["item_id"] for e in candidates]
+                scored = self.db.get_scored_ids(ids)
+                fresh = [e for e, iid in zip(candidates, ids) if iid not in scored]
+                new_items = self.feed_fetcher.entries_to_items(
+                    feed, fresh, max_items=self.feed_max_entries
+                )
+                items.extend(new_items)
+                self.db.update_feed_state(feed["url"])
+                logger.info(f"  {feed.get('title') or feed['url']}: {len(new_items)} new")
+            except Exception as e:
+                logger.warning(f"Feed {feed['url']} failed: {e}")
+                self.db.update_feed_state(feed["url"], error=str(e))
+        return items
 
     def load_scoring_profile(self) -> Optional[str]:
         """Profile text for the scoring prompt (compiled when available)."""
