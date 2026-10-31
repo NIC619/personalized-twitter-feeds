@@ -37,11 +37,23 @@ class TestSignalsForProfile:
         assert len(db.get_signals_for_profile(limit=300)) == 300
         assert q.range.call_args_list[0][0] == (0, 299)
 
-    def test_get_voted_ids(self, db):
-        q = db.client.table.return_value.select.return_value.eq.return_value.in_.return_value
-        q.execute.return_value = MagicMock(data=[{"item_id": "a"}])
-        assert db.get_voted_ids(["a", "b"]) == {"a"}
+    def test_get_voted_ids_paginates_many_votes_per_item(self, db):
+        q = db.client.table.return_value.select.return_value.eq.return_value.in_.return_value.order.return_value
+        pages = [[{"item_id": f"i{n % 150}"} for n in range(1000)], [{"item_id": "i199"}]]
+        q.range.return_value.execute.side_effect = [MagicMock(data=p) for p in pages]
+        voted = db.get_voted_ids([f"i{n}" for n in range(200)])
+        assert len(voted) == 151 and "i199" in voted
+        assert [c[0] for c in q.range.call_args_list] == [(0, 999), (1000, 1999)]
         assert db.get_voted_ids([]) == set()
+
+    def test_get_latest_profiles_paginates(self, db):
+        q = db.client.table.return_value.select.return_value.order.return_value.order.return_value
+        pages = [[{"id": 2000 - n, "domain": f"d{n % 12}", "version": 200 - n // 12} for n in range(1000)],
+                 [{"id": 1, "domain": "rare", "version": 1}]]
+        q.range.return_value.execute.side_effect = [MagicMock(data=p) for p in pages]
+        latest = db.get_latest_profiles()
+        assert "rare" in latest and len(latest) == 13
+        assert latest["d0"]["version"] == 200
 
 
 # --- save_items ---

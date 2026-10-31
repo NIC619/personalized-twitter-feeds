@@ -127,6 +127,24 @@ Also new in this round, worth a look:
 - `_call_tool` retries once when the model answers without the tool call.
 - Defaults: `claude-sonnet-5-5`, `FILTER_THRESHOLD=50`.
 
+## Changes since the second review (2026-10-31, later)
+
+1. Inbox acknowledges an email only after every above-threshold item was
+   delivered; retries send only items without `sent_to_telegram`
+   (`process_inbox`, `MailboxFetcher.acknowledge`; optional delete via
+   `EMAIL_DELETE_PROCESSED`).
+2. `_call_tool` raises `NoToolCallError` when the retry also lacks the tool
+   call. Scoring leaves that batch unscored (`filter_score=None`, not
+   persisted as scored, retried next run); extraction propagates so the
+   email stays unseen. Unscored items are skipped in the tier loop.
+3. `process_inbox` is serialised with an `asyncio.Lock`; an overlapping call
+   returns `{"busy": True}` and `/inbox` says so.
+4. Votes carry a generation counter; a proposal is dropped if the generation
+   changed before or after the prompt was sent (stale prompt deleted).
+5. `get_voted_ids` paginates within each id chunk; `get_latest_profiles`
+   paginates too.
+6. Webhook: a bounded set of recent `update_id`s drops Telegram retries.
+
 ## Questions a reviewer could answer
 
 - Any PostgREST limits the new queries will hit beyond the 1000-row

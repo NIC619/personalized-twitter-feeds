@@ -95,6 +95,7 @@ class DailyCurator:
         self.newsletter = newsletter
         self.mailbox = mailbox
         self.email_max_per_run = email_max_per_run
+        self._inbox_lock = asyncio.Lock()
         logger.info(
             f"DailyCurator initialized (thresholds: favorite={self.favorite_author_threshold}, "
             f"default={self.default_threshold}, muted={self.muted_author_threshold})"
@@ -289,7 +290,11 @@ class DailyCurator:
         tier_counts = {"favorite": 0, "muted": 0, "default": 0}
         for tweet in scored_tweets:
             author = tweet["author_username"].lower()
-            score = tweet.get("filter_score", 0)
+            score = tweet.get("filter_score")
+            if score is None:
+                tweet["filtered"] = False
+                logger.info(f"@{author} not scored; will be retried next run")
+                continue
 
             if author in muted_authors:
                 tier = "muted"
@@ -365,30 +370,53 @@ class DailyCurator:
         """Read unseen newsletter emails, extract and score their links, send
         the ones above the default threshold (one digest per issue).
 
+        An email is acknowledged (marked seen / deleted) only once every item
+        above the threshold was delivered; otherwise it stays unseen and the
+        next run re-sends just the items that did not go out. Runs are
+        serialised so /inbox cannot overlap the scheduled job.
+
         Returns:
-            {"emails": n, "entries": n, "sent": n}
+            {"emails": n, "entries": n, "sent": n} (+ "busy": True if skipped)
         """
         summary = {"emails": 0, "entries": 0, "sent": 0}
         if not (self.mailbox and self.newsletter):
             return summary
-        emails = await asyncio.to_thread(self.mailbox.fetch_unseen, self.email_max_per_run)
-        for mail in emails:
-            try:
-                result = await asyncio.to_thread(self.newsletter.from_email, mail)
-            except Exception as e:
-                logger.error(f"Newsletter email '{mail.get('subject')}' failed: {e}", exc_info=True)
-                continue  # stays unseen → retried next run
-            summary["emails"] += 1
-            summary["entries"] += result["entries"]
-            good = [
-                i for i in result["items"]
-                if (i.get("filter_score") or 0) >= self.default_threshold
-            ]
-            sent_pairs = await self.telegram.send_issue_digest(
-                result["title"], good, total=result["entries"],
-            )
-            summary["sent"] += len(sent_pairs)
-            await asyncio.to_thread(self.mailbox.mark_seen, mail["uid"])
+        if self._inbox_lock.locked():
+            logger.info("Inbox already being processed; skipping")
+            return {**summary, "busy": True}
+        async with self._inbox_lock:
+            emails = await asyncio.to_thread(self.mailbox.fetch_unseen, self.email_max_per_run)
+            for mail in emails:
+                try:
+                    result = await asyncio.to_thread(self.newsletter.from_email, mail)
+                except Exception as e:
+                    logger.error(f"Newsletter email '{mail.get('subject')}' failed: {e}", exc_info=True)
+                    continue  # stays unseen → retried next run
+                summary["emails"] += 1
+                summary["entries"] += result["entries"]
+                good = [
+                    i for i in result["items"]
+                    if i.get("filter_score") is not None
+                    and i["filter_score"] >= self.default_threshold
+                ]
+                pending = [i for i in good if not i.get("sent_to_telegram")]
+                if pending:
+                    sent_pairs = await self.telegram.send_issue_digest(
+                        result["title"], pending, total=result["entries"],
+                    )
+                    for item, msg_id in sent_pairs:
+                        try:
+                            self.db.mark_item_sent(item["item_id"], msg_id)
+                        except Exception as e:
+                            logger.warning(f"mark_item_sent failed for {item['item_id']}: {e}")
+                    summary["sent"] += len(sent_pairs)
+                    if len(sent_pairs) < len(pending):
+                        logger.warning(
+                            f"'{result['title']}': {len(pending) - len(sent_pairs)} items not "
+                            "delivered; email left unseen for retry"
+                        )
+                        continue
+                await asyncio.to_thread(self.mailbox.acknowledge, mail["uid"])
         if summary["emails"]:
             logger.info(f"Inbox: {summary}")
         return summary

@@ -359,6 +359,7 @@ def init_components(settings, num_tweets=None, hours=None):
         mailbox = MailboxFetcher(
             host=settings.email_imap_host, user=settings.email_imap_user,
             password=settings.email_imap_password, folder=settings.email_imap_folder,
+            delete_processed=settings.email_delete_processed,
         )
         logger.info(f"Email ingestion enabled: {settings.email_imap_user} / {settings.email_imap_folder}")
 

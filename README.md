@@ -470,6 +470,7 @@ The choices below reflect how I personally want this tool to behave. They are no
 | `EMAIL_IMAP_HOST` / `EMAIL_IMAP_USER` / `EMAIL_IMAP_PASSWORD` | (unset) | Mailbox for forwarded newsletters; all three enable email ingestion |
 | `EMAIL_IMAP_FOLDER` | INBOX       | Folder / Gmail label to read            |
 | `EMAIL_MAX_PER_RUN` | 10          | Max newsletter emails processed per run |
+| `EMAIL_DELETE_PROCESSED` | false  | Delete processed emails instead of marking them read |
 | `REDIRECT_BASE_URL` | `WEBHOOK_URL` | Base URL for click-tracking links; unset in dev = direct links |
 
 

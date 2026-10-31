@@ -149,6 +149,7 @@ class TelegramCurator(
         self._feed_list: dict[str, list[dict]] = {}  # chat_id → feeds shown by /feed list
         self._blockword_list: dict[str, list[str]] = {}  # chat_id → keyword list shown
         self._tasks: set[asyncio.Task] = set()  # background tasks (reason proposals)
+        self._vote_generation: dict[str, int] = {}  # item_id → bumps on every (re)vote
         logger.info("Telegram bot initialized")
 
     async def initialize(self) -> None:

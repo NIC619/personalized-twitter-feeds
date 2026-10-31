@@ -52,6 +52,16 @@ class RedirectServerTest(AsyncHTTPTestCase):
         resp = self.fetch("/secret", method="POST", body="not json")
         assert resp.code == 400
 
+    def test_duplicate_update_id_enqueued_once(self):
+        from unittest.mock import patch as _patch
+        fake_update = MagicMock(update_id=7)
+        with _patch("src.webhook_server.Update.de_json", return_value=fake_update):
+            body = json.dumps({"update_id": 7})
+            r1 = self.fetch("/secret", method="POST", body=body)
+            r2 = self.fetch("/secret", method="POST", body=body)
+        assert r1.code == 200 and r2.code == 200
+        assert self.application.update_queue.put.await_count == 1
+
     def test_webhook_wrong_path_404(self):
         resp = self.fetch("/other", method="POST", body="{}")
         assert resp.code == 404

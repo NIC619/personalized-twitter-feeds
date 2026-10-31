@@ -105,8 +105,26 @@ class TestFilterTweets:
         result = claude_filter.filter_tweets([sample_tweet], threshold=70)
 
         assert result == []
-        assert sample_tweet["filter_score"] == 0
+        assert sample_tweet["filter_score"] is None  # not persisted as scored → retried
         assert sample_tweet["filter_reason"] == "Not scored by Claude"
+        assert sample_tweet["filtered"] is False
+
+    def test_missing_tool_call_retries_once_with_nudge(self, claude_filter, sample_tweet):
+        text_only = SimpleNamespace(content=[SimpleNamespace(type="text", text="Here are the scores…")])
+        claude_filter.client.messages.create.side_effect = [
+            text_only, tool_response([{"item_id": "123456789", "score": 75, "reason": "ok"}]),
+        ]
+        claude_filter.filter_tweets([sample_tweet], threshold=70)
+        assert sample_tweet["filter_score"] == 75
+        calls = claude_filter.client.messages.create.call_args_list
+        assert len(calls) == 2
+        assert "Respond only by calling the submit_scores tool" in calls[1][1]["messages"][0]["content"]
+
+    def test_second_missing_tool_call_leaves_batch_unscored(self, claude_filter, sample_tweet):
+        text_only = SimpleNamespace(content=[SimpleNamespace(type="text", text="no")])
+        claude_filter.client.messages.create.side_effect = [text_only, text_only]
+        assert claude_filter.filter_tweets([sample_tweet], threshold=70) == []
+        assert sample_tweet["filter_score"] is None
 
     def test_api_error_propagates(self, claude_filter, sample_tweet):
         claude_filter.client.messages.create.side_effect = Exception("API error")
@@ -224,6 +242,9 @@ class TestExtractNewsletterEntries:
         assert kwargs["tools"] == [EXTRACT_TOOL]
         assert "Issue 1" in kwargs["messages"][0]["content"]
 
-    def test_no_tool_block(self, claude_filter):
+    def test_no_tool_block_raises_after_retry(self, claude_filter):
+        from src.claude_filter import NoToolCallError
         claude_filter.client.messages.create.return_value = SimpleNamespace(content=[])
-        assert claude_filter.extract_newsletter_entries("t", "x") == []
+        with pytest.raises(NoToolCallError):
+            claude_filter.extract_newsletter_entries("t", "x")
+        assert claude_filter.client.messages.create.call_count == 2

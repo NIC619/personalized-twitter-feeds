@@ -60,6 +60,7 @@ class Settings(BaseSettings):
     email_imap_password: Optional[str] = Field(default=None, description="Mailbox password / app password")
     email_imap_folder: str = Field(default="INBOX", description="Folder (Gmail label) to read")
     email_max_per_run: int = Field(default=10, description="Max emails processed per run")
+    email_delete_processed: bool = Field(default=False, description="Delete emails after processing instead of marking them read")
 
     # Preference profiles compiled from signals
     profile_compile_weekday: str = Field(

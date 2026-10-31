@@ -547,7 +547,67 @@ class TestInbox:
         assert summary == {"emails": 1, "entries": 2, "sent": 1}
         telegram.send_issue_digest.assert_awaited_once_with("ETH Daily #7", [good], total=2)
         mailbox.fetch_unseen.assert_called_once_with(5)
-        mailbox.mark_seen.assert_called_once_with("7")  # the failed one stays unseen
+        mailbox.acknowledge.assert_called_once_with("7")  # the failed one stays unseen
+        db.mark_item_sent.assert_called_once_with("n1", 501)
+
+    @pytest.mark.asyncio
+    async def test_delivery_failure_leaves_email_unseen_and_retries_only_unsent(self, components):
+        twitter, claude, telegram, db = components
+        mailbox = MagicMock()
+        mailbox.fetch_unseen.return_value = [{"uid": "9", "subject": "Issue", "sender": "a@b", "text": "..."}]
+        a = {"item_id": "a", "filter_score": 90, "author_username": "x"}
+        b = {"item_id": "b", "filter_score": 90, "author_username": "x"}
+        newsletter = MagicMock()
+        newsletter.from_email.return_value = {"title": "Issue", "entries": 2, "items": [a, b]}
+        telegram.send_issue_digest = AsyncMock(return_value=[(a, 1)])  # b failed
+        curator = self._curator(components, mailbox, newsletter)
+
+        summary = await curator.process_inbox()
+        assert summary["sent"] == 1
+        mailbox.acknowledge.assert_not_called()
+
+        # Next run: a is known as sent, only b goes out, then the email is acknowledged
+        a_sent = {**a, "sent_to_telegram": "2026-10-31T00:00:00+00:00"}
+        newsletter.from_email.return_value = {"title": "Issue", "entries": 2, "items": [a_sent, b]}
+        telegram.send_issue_digest = AsyncMock(return_value=[(b, 2)])
+        await curator.process_inbox()
+        telegram.send_issue_digest.assert_awaited_once_with("Issue", [b], total=2)
+        mailbox.acknowledge.assert_called_once_with("9")
+
+    @pytest.mark.asyncio
+    async def test_nothing_above_threshold_still_acknowledges(self, components):
+        twitter, claude, telegram, db = components
+        mailbox = MagicMock()
+        mailbox.fetch_unseen.return_value = [{"uid": "3", "subject": "Issue", "sender": "a@b", "text": "..."}]
+        newsletter = MagicMock()
+        newsletter.from_email.return_value = {"title": "Issue", "entries": 1, "items": [{"item_id": "a", "filter_score": 10}]}
+        curator = self._curator(components, mailbox, newsletter)
+        await curator.process_inbox()
+        telegram.send_issue_digest.assert_not_awaited()
+        mailbox.acknowledge.assert_called_once_with("3")
+
+    @pytest.mark.asyncio
+    async def test_overlapping_runs_are_serialised(self, components):
+        import asyncio
+        twitter, claude, telegram, db = components
+        mailbox = MagicMock()
+        release = asyncio.Event()
+        loop = asyncio.get_running_loop()
+
+        def slow_fetch(limit):
+            # Runs in a worker thread; block until the test releases it
+            asyncio.run_coroutine_threadsafe(release.wait(), loop).result()
+            return []
+        mailbox.fetch_unseen.side_effect = slow_fetch
+        curator = self._curator(components, mailbox, MagicMock())
+
+        first = asyncio.create_task(curator.process_inbox())
+        await asyncio.sleep(0.05)
+        second = await curator.process_inbox()
+        assert second.get("busy") is True
+        release.set()
+        assert (await first)["emails"] == 0
+        mailbox.fetch_unseen.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_daily_run_processes_inbox_after_digest(self, components):

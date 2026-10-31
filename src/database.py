@@ -379,24 +379,36 @@ class DatabaseClient:
             logger.error(f"Error loading signals for profile: {e}")
             raise
 
-    def get_voted_ids(self, item_ids: list[str], chunk_size: int = 200) -> set[str]:
-        """Subset of ``item_ids`` that already carry at least one vote signal."""
+    def get_voted_ids(self, item_ids: list[str], chunk_size: int = 200, page_size: int = 1000) -> set[str]:
+        """Subset of ``item_ids`` that already carry at least one vote signal.
+
+        An item can have many votes, so each chunk is paginated past
+        PostgREST's row cap.
+        """
         voted: set[str] = set()
         ids = list(dict.fromkeys(item_ids))
         for i in range(0, len(ids), chunk_size):
             chunk = ids[i : i + chunk_size]
-            try:
-                result = (
-                    self.client.table("signals")
-                    .select("item_id")
-                    .eq("kind", "vote")
-                    .in_("item_id", chunk)
-                    .execute()
-                )
-            except Exception as e:
-                logger.error(f"Error checking voted ids: {e}")
-                raise
-            voted.update(row["item_id"] for row in result.data or [])
+            offset = 0
+            while True:
+                try:
+                    result = (
+                        self.client.table("signals")
+                        .select("item_id")
+                        .eq("kind", "vote")
+                        .in_("item_id", chunk)
+                        .order("id")
+                        .range(offset, offset + page_size - 1)
+                        .execute()
+                    )
+                except Exception as e:
+                    logger.error(f"Error checking voted ids: {e}")
+                    raise
+                page = result.data or []
+                voted.update(row["item_id"] for row in page)
+                if len(page) < page_size:
+                    break
+                offset += page_size
         return voted
 
     def get_author_stats(self) -> list[dict]:
@@ -497,20 +509,32 @@ class DatabaseClient:
             raise
 
     def get_latest_profiles(self) -> dict[str, dict]:
-        """Latest version of every domain profile → {domain: row}."""
+        """Latest version of every domain profile → {domain: row}.
+
+        Paginated newest-first; one row per domain per week means the first
+        page is normally enough, but the cap is never silently hit.
+        """
+        latest: dict[str, dict] = {}
+        offset, page_size = 0, 1000
         try:
-            result = (
-                self.client.table("preference_profiles")
-                .select("*")
-                .order("version", desc=True)
-                .execute()
-            )
+            while True:
+                result = (
+                    self.client.table("preference_profiles")
+                    .select("*")
+                    .order("version", desc=True)
+                    .order("id", desc=True)
+                    .range(offset, offset + page_size - 1)
+                    .execute()
+                )
+                page = result.data or []
+                for row in page:
+                    latest.setdefault(row["domain"], row)  # first seen = highest version
+                if len(page) < page_size:
+                    break
+                offset += page_size
         except Exception as e:
             logger.error(f"Error loading profiles: {e}")
-            return {}
-        latest: dict[str, dict] = {}
-        for row in result.data or []:
-            latest.setdefault(row["domain"], row)  # first seen = highest version
+            return latest or {}
         return latest
 
     # ============================================================= authors

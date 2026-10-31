@@ -228,6 +228,8 @@ class FeedbackMixin:
         await self._cancel_vote(item_id, restore_keyboard=False)
         self._item_votes[item_id] = vote
         self._message_items[message_id] = item_id
+        generation = self._vote_generation.get(item_id, 0) + 1
+        self._vote_generation[item_id] = generation
 
         await self._set_keyboard(
             message_id, voted_buttons(item_id, vote, undo=grace), query=query
@@ -270,7 +272,7 @@ class FeedbackMixin:
             return
         # Proposals call the model (seconds). Run them off the update
         # handler so an Undo tapped meanwhile is processed in time.
-        self._background(self._propose_reason(item_id, vote, message_id))
+        self._background(self._propose_reason(item_id, vote, message_id, generation))
 
     def _background(self, coro) -> asyncio.Task:
         """Run ``coro`` as a tracked background task."""
@@ -303,7 +305,16 @@ class FeedbackMixin:
         except Exception as e:
             logger.debug(f"Keyboard update skipped for {message_id}: {e}")
 
-    async def _propose_reason(self, item_id: str, vote: Vote, message_id: int) -> None:
+    def _vote_is_current(self, item_id: str, generation: Optional[int]) -> bool:
+        """False once the vote was undone, retracted or re-cast since ``generation``."""
+        return (
+            item_id in self._item_votes
+            and (generation is None or self._vote_generation.get(item_id) == generation)
+        )
+
+    async def _propose_reason(
+        self, item_id: str, vote: Vote, message_id: int, generation: Optional[int] = None,
+    ) -> None:
         """Ask the model why the user voted this way and offer ✅ / ✏️ / skip."""
         if not self.reason_callback:
             return
@@ -312,7 +323,7 @@ class FeedbackMixin:
         except Exception as e:
             logger.warning(f"Reason proposal failed for {item_id}: {e}")
             return
-        if not proposal or self._item_votes.get(item_id) != vote:
+        if not proposal or not self._vote_is_current(item_id, generation):
             return  # nothing proposed, or the vote changed/was undone meanwhile
         try:
             sent = await self.application.bot.send_message(
@@ -324,6 +335,13 @@ class FeedbackMixin:
             )
         except Exception as e:
             logger.warning(f"Could not send reason prompt for {item_id}: {e}")
+            return
+        if not self._vote_is_current(item_id, generation) or item_id in self._item_prompts:
+            # Vote changed while the prompt was in flight, or a newer prompt exists
+            try:
+                await self.application.bot.delete_message(chat_id=self.chat_id, message_id=sent.message_id)
+            except Exception:
+                pass
             return
         self._reason_prompts[sent.message_id] = item_id
         self._item_prompts[item_id] = (sent.message_id, proposal)

@@ -8,6 +8,7 @@ signal for the item and redirects to the real URL.
 import json
 import logging
 import re
+from collections import OrderedDict
 from typing import Awaitable, Callable, Optional
 
 import tornado.web
@@ -20,10 +21,28 @@ ResolveFn = Callable[[str], Awaitable[Optional[str]]]
 """async (item_id) -> destination URL or None; also records the open."""
 
 
+class RecentIds:
+    """Bounded set of recently seen update_ids (Telegram retries on timeouts)."""
+
+    def __init__(self, size: int = 2000):
+        self.size = size
+        self._seen: OrderedDict[int, None] = OrderedDict()
+
+    def add(self, update_id: int) -> bool:
+        """Record ``update_id``; False if it was already present."""
+        if update_id in self._seen:
+            return False
+        self._seen[update_id] = None
+        while len(self._seen) > self.size:
+            self._seen.popitem(last=False)
+        return True
+
+
 class _UpdateHandler(tornado.web.RequestHandler):
     # Named ptb_app: tornado's RequestHandler already owns ``application``.
-    def initialize(self, ptb_app: Application) -> None:
+    def initialize(self, ptb_app: Application, recent: RecentIds) -> None:
         self.ptb_app = ptb_app
+        self.recent = recent
 
     async def post(self) -> None:
         try:
@@ -34,6 +53,10 @@ class _UpdateHandler(tornado.web.RequestHandler):
         update = Update.de_json(data, self.ptb_app.bot)
         if update is None:
             self.set_status(400)
+            return
+        if not self.recent.add(update.update_id):
+            logger.debug(f"Duplicate update {update.update_id} ignored")
+            self.set_status(200)
             return
         await self.ptb_app.update_queue.put(update)
         self.set_status(200)
@@ -68,7 +91,7 @@ class _HealthHandler(tornado.web.RequestHandler):
 def make_app(application: Application, url_path: str, resolve: ResolveFn) -> tornado.web.Application:
     """Build the tornado app. ``url_path`` is the secret webhook path."""
     return tornado.web.Application([
-        (rf"/{re.escape(url_path)}", _UpdateHandler, {"ptb_app": application}),
+        (rf"/{re.escape(url_path)}", _UpdateHandler, {"ptb_app": application, "recent": RecentIds()}),
         (r"/r/([^/]+)", _RedirectHandler, {"resolve": resolve}),
         (r"/health", _HealthHandler),
     ])

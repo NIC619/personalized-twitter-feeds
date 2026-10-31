@@ -70,6 +70,7 @@ class MailboxFetcher:
         password: str,
         folder: str = "INBOX",
         port: int = 993,
+        delete_processed: bool = False,
         imap_factory=None,
     ):
         self.host = host
@@ -77,6 +78,7 @@ class MailboxFetcher:
         self.password = password
         self.folder = folder
         self.port = port
+        self.delete_processed = delete_processed
         self._imap_factory = imap_factory or (lambda: imaplib.IMAP4_SSL(host, port))
 
     def _connect(self):
@@ -117,10 +119,27 @@ class MailboxFetcher:
         finally:
             self._close(conn)
 
+    def acknowledge(self, uid: str) -> None:
+        """Mark a processed message seen, or delete it when configured."""
+        if self.delete_processed:
+            self.delete(uid)
+        else:
+            self.mark_seen(uid)
+
     def mark_seen(self, uid: str) -> None:
         conn = self._connect()
         try:
             conn.uid("store", uid, "+FLAGS", "(\\Seen)")
+        finally:
+            self._close(conn)
+
+    def delete(self, uid: str) -> None:
+        """Flag deleted and expunge (on Gmail this removes the label / trashes
+        per the account's IMAP settings)."""
+        conn = self._connect()
+        try:
+            conn.uid("store", uid, "+FLAGS", "(\\Seen \\Deleted)")
+            conn.expunge()
         finally:
             self._close(conn)
 

@@ -106,3 +106,19 @@ class TestMailboxFetcher:
         f = MailboxFetcher("imap.x", "u", "p", folder="Nope", imap_factory=lambda: _FakeImap({}))
         with pytest.raises(RuntimeError):
             f.fetch_unseen()
+
+
+class TestAcknowledge:
+    def test_mark_seen_by_default(self):
+        imap = _FakeImap({b"1": _multipart("a")})
+        f = MailboxFetcher("imap.x", "u", "p", imap_factory=lambda: imap)
+        f.acknowledge("1")
+        assert imap.flags[b"1"] == "seen"
+
+    def test_delete_when_configured(self):
+        imap = _FakeImap({b"1": _multipart("a")})
+        imap.expunged = False
+        imap.expunge = lambda: setattr(imap, "expunged", True)
+        f = MailboxFetcher("imap.x", "u", "p", delete_processed=True, imap_factory=lambda: imap)
+        f.acknowledge("1")
+        assert imap.expunged

@@ -178,6 +178,10 @@ EXTRACT_TOOL = {
 }
 
 
+class NoToolCallError(RuntimeError):
+    """The model answered twice without calling the required tool."""
+
+
 class ClaudeFilter:
     """Claude-based content scorer."""
 
@@ -240,7 +244,10 @@ class ClaudeFilter:
             "role": "user",
             "content": prompt + f"\n\nRespond only by calling the {tool['name']} tool.",
         }]
-        return self.client.messages.create(**kwargs)
+        response = self.client.messages.create(**kwargs)
+        if not self._has_tool_call(response, tool["name"]):
+            raise NoToolCallError(f"model returned no {tool['name']} call after retry")
+        return response
 
     @staticmethod
     def _has_tool_call(response, name: str) -> bool:
@@ -261,7 +268,9 @@ class ClaudeFilter:
         """Score items and return the ones at or above ``threshold``.
 
         Every input dict is annotated in place with ``filter_score``,
-        ``filter_reason`` and ``filtered``.
+        ``filter_reason`` and ``filtered``. Items the model did not score
+        get ``filter_score=None`` so they are not persisted as scored and
+        are picked up again next run.
 
         Args:
             tweets: Item dicts (tweets or blog posts)
@@ -286,9 +295,9 @@ class ClaudeFilter:
                 if score_data.get("domain"):
                     tweet["domain"] = score_data["domain"]
             else:
-                tweet["filter_score"] = 0
+                tweet["filter_score"] = None
                 tweet["filter_reason"] = "Not scored by Claude"
-            tweet["filtered"] = tweet["filter_score"] >= threshold
+            tweet["filtered"] = (tweet["filter_score"] or 0) >= threshold and tweet["filter_score"] is not None
             if tweet["filtered"]:
                 passed.append(tweet)
 
@@ -449,6 +458,10 @@ class ClaudeFilter:
         prompt = self.build_prompt(tweets, neighbors, profile)
         try:
             response = self._call_tool(prompt, SCORE_TOOL, self.max_tokens)
+        except NoToolCallError as e:
+            # Leave this batch unscored (retried next run); other batches continue
+            logger.error(f"Batch left unscored: {e}")
+            return []
         except Exception as e:
             logger.error(f"Error scoring items: {e}")
             raise
@@ -502,7 +515,7 @@ class ClaudeFilter:
             author = tweet.get("author_username", "unknown")
             preview = tweet.get("text", "")[:60].replace("\n", " ")
             logger.info(
-                f"[{status}] Score {tweet.get('filter_score', 0):3d} | @{author}: {preview}..."
+                f"[{status}] Score {(tweet.get('filter_score') or 0):3d} | @{author}: {preview}..."
             )
             logger.info(f"         Reason: {tweet.get('filter_reason', '')}")
         logger.info("--- End Scores ---")

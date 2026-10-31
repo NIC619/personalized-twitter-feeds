@@ -157,6 +157,9 @@ class FeedsMixin:
             logger.error(f"Inbox check failed: {e}", exc_info=True)
             await update.message.reply_text(f"Inbox check failed: {e}")
             return
+        if summary.get("busy"):
+            await update.message.reply_text("Already processing the inbox; results will arrive shortly.")
+            return
         if not summary.get("emails"):
             await update.message.reply_text("No new newsletter emails.")
             return

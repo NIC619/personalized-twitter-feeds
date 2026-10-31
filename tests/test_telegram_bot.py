@@ -399,6 +399,37 @@ class TestVoteButtons:
         vote_bot.feedback_callback.assert_not_awaited()
 
     @pytest.mark.asyncio
+    async def test_undo_then_same_vote_drops_stale_proposal(self, vote_bot):
+        import asyncio
+        gate = asyncio.Event()
+        calls = 0
+
+        async def reason(*_):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                await gate.wait()
+                return "stale guess"
+            return "fresh guess"
+        vote_bot.reason_callback = AsyncMock(side_effect=reason)
+
+        u1, _ = _query("vote:42:up:1")
+        await vote_bot._handle_feedback(u1, MagicMock())
+        await asyncio.sleep(0)
+        u2, _ = _query("undo:42")
+        await vote_bot._handle_feedback(u2, MagicMock())
+        u3, _ = _query("vote:42:up:1")
+        await vote_bot._handle_feedback(u3, MagicMock())
+        gate.set()
+        await _settle(vote_bot)
+
+        texts = [c[1]["text"] for c in vote_bot.application.bot.send_message.call_args_list]
+        assert any("fresh guess" in t for t in texts)
+        assert not any("stale guess" in t for t in texts)
+        assert vote_bot._item_prompts["42"][1] == "fresh guess"
+        vote_bot._pending_feedback["42"]["task"].cancel()
+
+    @pytest.mark.asyncio
     async def test_liked_item_message_id_is_persisted(self, vote_bot):
         vote_bot.mark_sent_callback = AsyncMock()
         assert await vote_bot._send_liked_item("42", "hello")
