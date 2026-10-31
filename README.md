@@ -281,7 +281,7 @@ Use this to check if `MAX_TWEETS` is high enough to capture all your timeline ac
 Every vote you cast is a label. `scripts/eval_prompt.py` re-scores all voted items with
 the current prompt and reports how well the scores separate 👍 from 👎, so a prompt,
 profile or model change can be judged in minutes instead of waiting months for live votes.
-This replaced the shadow A/B framework (history kept in [AB_TESTING_PLAN.md](AB_TESTING_PLAN.md)).
+This replaced the shadow A/B framework (history kept in [archive/AB_TESTING_PLAN.md](archive/AB_TESTING_PLAN.md)).
 
 ```bash
 python scripts/eval_prompt.py --label baseline                      # production model + neighbours
@@ -358,7 +358,8 @@ personalized-twitter-feeds/
 │   ├── test_components.py         # Integration testing (live APIs)
 │   └── count_twitter_timeline.py  # Count tweets from Twitter
 ├── tests/                         # pytest suite (unit tests, no credentials needed)
-├── docs/                          # Railway deployment, MCP setup, xdk migration notes
+├── docs/                          # Railway deployment, MCP setup
+├── archive/                       # Retired docs kept for history (A/B framework, xdk migration)
 ├── main.py                        # CLI entry point
 ├── requirements.txt
 └── .env.example

@@ -37,7 +37,7 @@
 - [x] Exploration: random below-threshold items sent each run, marked 🎲
 - [ ] Track accuracy: % of sent tweets that got 👍
 
-### A/B Testing Framework (retired 2026-10-30 — see AB_TESTING_PLAN.md)
+### A/B Testing Framework (retired 2026-10-30 — see archive/AB_TESTING_PLAN.md)
 - [x] Shadow scoring: score every tweet with control + challenger prompt, send based on control only
 - [x] Prompt registry (`PROMPT_REGISTRY` in `claude_filter.py`) for named prompt variants
 - [x] `ab_test_scores` table with paired entries per experiment
@@ -104,7 +104,7 @@
 
 ## Future Ideas
 
-- [x] Migrate from tweepy to official X SDK (xdk) - see `docs/xdk-migration-notes.md`
+- [x] Migrate from tweepy to official X SDK (xdk) - see `archive/xdk-migration-notes.md`
 - [ ] Multi-account support (curate multiple Twitter accounts)
 - [ ] Topic clustering (group similar tweets together)
 - [x] Export: `--export-preferences PREFERENCES.md` (Notion/Obsidian can ingest Markdown)
