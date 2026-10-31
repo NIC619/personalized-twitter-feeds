@@ -139,21 +139,41 @@ class CaptureMixin:
         if not self.capture_url_callback:
             await self._like_blog_post(update, url)
             return
-        await update.message.reply_text("Saving…")
+        status = await update.message.reply_text("Saving…")
         try:
             item = await self.capture_url_callback(url)
         except Exception as e:
             logger.error(f"Error capturing {url}: {e}")
-            await update.message.reply_text("Error saving that link.")
+            await self._set_status(status, "Error saving that link.")
             return
         if not item:
-            await update.message.reply_text("Could not save that link.")
+            await self._set_status(status, "Could not save that link.")
             return
         self._tweet_authors[item["item_id"]] = item.get("author_username")
         if not await self._send_liked_item(
             item["item_id"], self._format_item_message(item), vote=vote, reason=reason,
         ):
-            await update.message.reply_text("Error sending item.")
+            await self._set_status(status, "Error sending item.")
+            return
+        await self._set_status(status, self._saved_text(vote, reason))
+
+    @staticmethod
+    def _saved_text(vote: Optional[Vote], reason: Optional[str]) -> str:
+        label = vote_label(vote or Vote("up", 1))
+        text = f"✅ Saved · {label}"
+        if reason:
+            text += f"\n📝 Reason: {reason}"
+        return text
+
+    async def _set_status(self, status, text: str) -> None:
+        """Replace the 'Saving…' line with the outcome (falls back to a new message)."""
+        try:
+            await status.edit_text(text)
+        except Exception:
+            try:
+                await self.application.bot.send_message(chat_id=self.chat_id, text=text)
+            except Exception as e:
+                logger.debug(f"Status update skipped: {e}")
 
     async def _capture_text(self, update: Update, text: str, origin: Optional[dict]) -> None:
         """Store free text / a forwarded post as a liked item."""
@@ -271,6 +291,8 @@ class CaptureMixin:
 
             if not await self._send_liked_item(item_id, message, vote=vote, reason=reason):
                 await update.message.reply_text(f"Error sending tweet {item_id}.")
+            elif reason:
+                await update.message.reply_text(self._saved_text(vote, reason))
 
     async def _like_blog_post(self, update: Update, url: str) -> None:
         """Process a blog post URL for liking."""

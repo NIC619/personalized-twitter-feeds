@@ -11,6 +11,16 @@ from src.content import generate_blog_id, is_blog_content, is_http_url, is_tweet
 # --- Content utility tests ---
 
 
+class TestAuthorName:
+    def test_url_author_becomes_name(self):
+        from src.blog_fetcher import _author_name
+        assert _author_name("https://blog.ambire.com/author/nadia/") == "Nadia"
+        assert _author_name("https://x.io/people/jane-doe") == "Jane Doe"
+        assert _author_name("https://x.io/author/") is None
+        assert _author_name("Vitalik Buterin") == "Vitalik Buterin"
+        assert _author_name("") is None
+
+
 class TestGenerateBlogId:
     def test_deterministic(self):
         url = "https://ethresear.ch/t/sharded-pir-design/24552"
