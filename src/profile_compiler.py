@@ -56,10 +56,12 @@ Call write_profile with the Markdown."""
 WRITE_TOOL = {
     "name": "write_profile",
     "description": "Submit the profile Markdown.",
+    "strict": True,
     "input_schema": {
         "type": "object",
         "properties": {"content": {"type": "string"}},
         "required": ["content"],
+        "additionalProperties": False,
     },
 }
 
@@ -128,20 +130,23 @@ def _one_line(text: str, limit: int = 240) -> str:
 class ProfileCompiler:
     """Builds and stores preference profiles from signals."""
 
-    def __init__(self, claude_client, model: str, db):
+    def __init__(self, claude_client, model: str, db, effort: Optional[str] = "high"):
         self.client = claude_client
         self.model = model
         self.db = db
+        self.effort = effort
 
     def _ask(self, prompt: str) -> Optional[str]:
-        response = self.client.messages.create(
+        kwargs = dict(
             model=self.model,
-            max_tokens=2000,
-            temperature=0.2,
+            max_tokens=4000,
             tools=[WRITE_TOOL],
-            tool_choice={"type": "tool", "name": "write_profile"},
+            tool_choice={"type": "auto", "disable_parallel_tool_use": True},
             messages=[{"role": "user", "content": prompt}],
         )
+        if self.effort:
+            kwargs["output_config"] = {"effort": self.effort}
+        response = self.client.messages.create(**kwargs)
         for block in getattr(response, "content", []) or []:
             if getattr(block, "type", None) == "tool_use" and block.name == "write_profile":
                 return str(block.input.get("content", "")).strip() or None

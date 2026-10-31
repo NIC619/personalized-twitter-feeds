@@ -8,6 +8,7 @@ import pytest
 
 from src.claude_filter import (
     DEFAULT_PROFILE,
+    EXTRACT_TOOL,
     SCORE_TOOL,
     ClaudeFilter,
 )
@@ -120,7 +121,11 @@ class TestFilterTweets:
 
         kwargs = claude_filter.client.messages.create.call_args[1]
         assert kwargs["tools"] == [SCORE_TOOL]
-        assert kwargs["tool_choice"] == {"type": "tool", "name": "submit_scores"}
+        assert SCORE_TOOL["strict"] is True
+        # Claude 5.5+ rejects forced tool_choice and non-default temperature
+        assert kwargs["tool_choice"] == {"type": "auto", "disable_parallel_tool_use": True}
+        assert "temperature" not in kwargs
+        assert kwargs["output_config"] == {"effort": "medium"}
         assert kwargs["model"] == "claude-sonnet-4-6"
 
     def test_default_profile_in_prompt(self, claude_filter, sample_tweet):
@@ -216,7 +221,7 @@ class TestExtractNewsletterEntries:
         assert [e["url"] for e in entries] == ["https://a.example/post", "https://b.example"]
         assert entries[0]["author"] is None and entries[0]["section"] == "Research"
         kwargs = claude_filter.client.messages.create.call_args[1]
-        assert kwargs["tool_choice"] == {"type": "tool", "name": "extract_entries"}
+        assert kwargs["tools"] == [EXTRACT_TOOL]
         assert "Issue 1" in kwargs["messages"][0]["content"]
 
     def test_no_tool_block(self, claude_filter):

@@ -91,6 +91,7 @@ class Settings(BaseSettings):
     embedding_model: str = Field(default="text-embedding-3-small", description="OpenAI embedding model")
     rag_similarity_limit: int = Field(default=3, description="Nearest voted neighbours attached to each item for scoring")
     claude_model: str = Field(default="claude-sonnet-4-6", description="Claude model used for scoring")
+    claude_effort: str = Field(default="medium", description="output_config.effort for scoring calls (low/medium/high)")
 
     model_config = {
         "env_file": ".env",

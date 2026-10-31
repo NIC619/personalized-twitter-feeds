@@ -86,6 +86,7 @@ Score every item exactly once using the submit_scores tool. Keep each reason to 
 SCORE_TOOL = {
     "name": "submit_scores",
     "description": "Submit a relevance score for every item.",
+    "strict": True,
     "input_schema": {
         "type": "object",
         "properties": {
@@ -100,10 +101,12 @@ SCORE_TOOL = {
                         "domain": {"type": "string", "enum": DOMAINS},
                     },
                     "required": ["item_id", "score", "reason", "domain"],
+                    "additionalProperties": False,
                 },
             }
         },
         "required": ["scores"],
+        "additionalProperties": False,
     },
 }
 
@@ -125,10 +128,12 @@ Call propose_reason with your best single guess."""
 REASON_TOOL = {
     "name": "propose_reason",
     "description": "Propose the reader's reason for the vote.",
+    "strict": True,
     "input_schema": {
         "type": "object",
         "properties": {"reason": {"type": "string"}},
         "required": ["reason"],
+        "additionalProperties": False,
     },
 }
 
@@ -147,6 +152,7 @@ Call extract_entries with the list, in page order."""
 EXTRACT_TOOL = {
     "name": "extract_entries",
     "description": "Return the linked items found in a newsletter page.",
+    "strict": True,
     "input_schema": {
         "type": "object",
         "properties": {
@@ -158,14 +164,16 @@ EXTRACT_TOOL = {
                         "title": {"type": "string"},
                         "url": {"type": "string"},
                         "summary": {"type": "string"},
-                        "author": {"type": "string"},
-                        "section": {"type": "string"},
+                        "author": {"type": ["string", "null"]},
+                        "section": {"type": ["string", "null"]},
                     },
-                    "required": ["title", "url"],
+                    "required": ["title", "url", "summary", "author", "section"],
+                    "additionalProperties": False,
                 },
             }
         },
         "required": ["entries"],
+        "additionalProperties": False,
     },
 }
 
@@ -180,6 +188,7 @@ class ClaudeFilter:
         batch_size: int = 25,
         profile: Optional[str] = None,
         max_tokens: int = 8192,
+        effort: Optional[str] = "medium",
     ):
         """Initialize Anthropic client.
 
@@ -190,6 +199,7 @@ class ClaudeFilter:
             profile: Preference profile text (defaults to DEFAULT_PROFILE)
             max_tokens: Output budget per call. 25 items with one-sentence
                 reasons use well under 4k tokens, so 8k never truncates.
+            effort: ``output_config.effort`` (low/medium/high). None omits it.
         """
         self.client = Anthropic(
             api_key=api_key,
@@ -199,7 +209,27 @@ class ClaudeFilter:
         self.batch_size = batch_size
         self.profile = profile or DEFAULT_PROFILE
         self.max_tokens = max_tokens
+        self.effort = effort
         logger.info(f"Claude filter initialized with model: {model}")
+
+    def _call_tool(self, prompt: str, tool: dict, max_tokens: int):
+        """One request that asks the model to answer via ``tool``.
+
+        Portable across model generations: forced ``tool_choice`` and
+        non-default ``temperature`` are rejected by Claude 5.5+, so we use
+        ``auto`` (single call) with a strict schema and an instruction in
+        the prompt naming the tool.
+        """
+        kwargs = dict(
+            model=self.model,
+            max_tokens=max_tokens,
+            tools=[tool],
+            tool_choice={"type": "auto", "disable_parallel_tool_use": True},
+            messages=[{"role": "user", "content": prompt}],
+        )
+        if self.effort:
+            kwargs["output_config"] = {"effort": self.effort}
+        return self.client.messages.create(**kwargs)
 
     # ------------------------------------------------------------------ public
 
@@ -298,14 +328,7 @@ class ClaudeFilter:
             item_json=json.dumps(self.build_item_entry(item, neighbors), indent=2, ensure_ascii=False),
         )
         try:
-            response = self.client.messages.create(
-                model=self.model,
-                max_tokens=200,
-                temperature=0.0,
-                tools=[REASON_TOOL],
-                tool_choice={"type": "tool", "name": "propose_reason"},
-                messages=[{"role": "user", "content": prompt}],
-            )
+            response = self._call_tool(prompt, REASON_TOOL, 1024)
         except Exception as e:
             logger.warning(f"Reason proposal failed: {e}")
             return None
@@ -323,14 +346,7 @@ class ClaudeFilter:
         """
         prompt = EXTRACT_PROMPT.format(page_title=page_title, page_text=page_text)
         try:
-            response = self.client.messages.create(
-                model=self.model,
-                max_tokens=8192,
-                temperature=0.0,
-                tools=[EXTRACT_TOOL],
-                tool_choice={"type": "tool", "name": "extract_entries"},
-                messages=[{"role": "user", "content": prompt}],
-            )
+            response = self._call_tool(prompt, EXTRACT_TOOL, 16000)
         except Exception as e:
             logger.error(f"Newsletter extraction failed: {e}")
             raise
@@ -414,14 +430,7 @@ class ClaudeFilter:
     ) -> list[dict]:
         prompt = self.build_prompt(tweets, neighbors, profile)
         try:
-            response = self.client.messages.create(
-                model=self.model,
-                max_tokens=self.max_tokens,
-                temperature=0.0,
-                tools=[SCORE_TOOL],
-                tool_choice={"type": "tool", "name": "submit_scores"},
-                messages=[{"role": "user", "content": prompt}],
-            )
+            response = self._call_tool(prompt, SCORE_TOOL, self.max_tokens)
         except Exception as e:
             logger.error(f"Error scoring items: {e}")
             raise

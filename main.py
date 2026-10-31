@@ -146,7 +146,10 @@ def init_components(settings, num_tweets=None, hours=None):
     )
 
     # Initialize Claude filter
-    claude = ClaudeFilter(api_key=settings.anthropic_api_key, model=settings.claude_model)
+    claude = ClaudeFilter(
+        api_key=settings.anthropic_api_key, model=settings.claude_model,
+        effort=settings.claude_effort,
+    )
 
     # Initialize database
     db = DatabaseClient(
