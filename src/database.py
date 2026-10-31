@@ -311,6 +311,7 @@ class DatabaseClient:
                 .eq("kind", "vote")
                 .in_("value", ["up", "down"])
                 .order("created_at")
+                .order("id")  # imports share timestamps; keep page boundaries stable
                 .range(offset, offset + page_size - 1)
                 .execute()
             )
@@ -366,6 +367,7 @@ class DatabaseClient:
                     .select("item_id,kind,value,strength,reason,created_at,items(text,title,author_username,domain,url,content_type)")
                     .in_("kind", ["vote", "note"])
                     .order("created_at", desc=True)
+                    .order("id", desc=True)
                     .range(offset, offset + size - 1)
                     .execute()
                 )

@@ -134,19 +134,35 @@ class MailboxFetcher:
             self._close(conn)
 
     def delete(self, uid: str) -> None:
-        """Flag deleted and expunge (on Gmail this removes the label / trashes
-        per the account's IMAP settings)."""
+        """Flag this one message deleted and expunge only it (``UID EXPUNGE``,
+        RFC 4315; Gmail and most servers support it). A mailbox-wide EXPUNGE
+        would also purge anything else the user had flagged. If the server
+        lacks UIDPLUS the message stays flagged + seen and is left to the
+        client's next expunge."""
         conn = self._connect()
         try:
             conn.uid("store", uid, "+FLAGS", "(\\Seen \\Deleted)")
-            conn.expunge()
+            try:
+                status, _ = conn.uid("expunge", uid)
+            except Exception as e:  # imaplib raises on BAD/NO for unknown commands
+                status = str(e)
+            if status != "OK":
+                logger.warning(f"UID EXPUNGE unsupported ({status}); {uid} left flagged \\Deleted")
         finally:
             self._close(conn)
 
     @staticmethod
     def _close(conn) -> None:
-        for fn in (conn.close, conn.logout):
+        """Disconnect without CLOSE, which would expunge every \\Deleted message
+        in the mailbox. UNSELECT (RFC 3691) leaves the mailbox untouched; when
+        it is unavailable, LOGOUT alone does not expunge either."""
+        unselect = getattr(conn, "unselect", None)
+        if callable(unselect):
             try:
-                fn()
+                unselect()
             except Exception:
                 pass
+        try:
+            conn.logout()
+        except Exception:
+            pass

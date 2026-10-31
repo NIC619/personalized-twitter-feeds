@@ -46,11 +46,6 @@ class TestParseEmail:
 
 
 class _FakeImap:
-    def __init__(self, messages):
-        self.messages = messages  # uid(bytes) → raw bytes
-        self.flags: dict[bytes, str] = {}
-        self.selected = None
-
     def login(self, user, password):
         return "OK", []
 
@@ -58,7 +53,19 @@ class _FakeImap:
         self.selected = folder
         return ("OK", [b"1"]) if folder in ("INBOX", "Newsletters", '"My Letters"') else ("NO", [])
 
+    def __init__(self, messages):
+        self.messages = messages  # uid(bytes) → raw bytes
+        self.flags: dict[bytes, str] = {}
+        self.selected = None
+        self.expunged: list = []
+        self.closed = False
+        self.unselected = False
+
     def uid(self, cmd, *args):
+        if cmd == "expunge":
+            uid = args[0] if isinstance(args[0], bytes) else args[0].encode()
+            self.expunged.append(uid)
+            return "OK", []
         if cmd == "search":
             unseen = [u for u in self.messages if self.flags.get(u) != "seen"]
             return "OK", [b" ".join(unseen)]
@@ -71,7 +78,10 @@ class _FakeImap:
         raise AssertionError(cmd)
 
     def close(self):
-        pass
+        self.closed = True  # CLOSE would expunge; the fetcher must never call it
+
+    def unselect(self):
+        self.unselected = True
 
     def logout(self):
         pass
@@ -115,10 +125,16 @@ class TestAcknowledge:
         f.acknowledge("1")
         assert imap.flags[b"1"] == "seen"
 
-    def test_delete_when_configured(self):
-        imap = _FakeImap({b"1": _multipart("a")})
-        imap.expunged = False
-        imap.expunge = lambda: setattr(imap, "expunged", True)
+    def test_delete_expunges_only_that_uid(self):
+        imap = _FakeImap({b"1": _multipart("a"), b"2": _multipart("b")})
+        imap.expunge = lambda: (_ for _ in ()).throw(AssertionError("mailbox-wide EXPUNGE"))
         f = MailboxFetcher("imap.x", "u", "p", delete_processed=True, imap_factory=lambda: imap)
         f.acknowledge("1")
-        assert imap.expunged
+        assert imap.expunged == [b"1"]
+        assert imap.unselected and not imap.closed
+
+    def test_never_calls_close(self):
+        imap = _FakeImap({b"1": _multipart("a")})
+        f = MailboxFetcher("imap.x", "u", "p", imap_factory=lambda: imap)
+        f.fetch_unseen(); f.mark_seen("1")
+        assert not imap.closed

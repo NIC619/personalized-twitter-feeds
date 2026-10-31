@@ -575,6 +575,22 @@ class TestInbox:
         mailbox.acknowledge.assert_called_once_with("9")
 
     @pytest.mark.asyncio
+    async def test_unscored_items_keep_email_unseen(self, components):
+        twitter, claude, telegram, db = components
+        mailbox = MagicMock()
+        mailbox.fetch_unseen.return_value = [{"uid": "4", "subject": "Issue", "sender": "a@b", "text": "..."}]
+        newsletter = MagicMock()
+        newsletter.from_email.return_value = {"title": "Issue", "entries": 2, "items": [
+            {"item_id": "a", "filter_score": 90, "author_username": "x"},
+            {"item_id": "b", "filter_score": None, "author_username": "x"},
+        ]}
+        telegram.send_issue_digest = AsyncMock(return_value=[({"item_id": "a"}, 1)])
+        curator = self._curator(components, mailbox, newsletter)
+        await curator.process_inbox()
+        telegram.send_issue_digest.assert_awaited_once()  # scored items still go out
+        mailbox.acknowledge.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_nothing_above_threshold_still_acknowledges(self, components):
         twitter, claude, telegram, db = components
         mailbox = MagicMock()

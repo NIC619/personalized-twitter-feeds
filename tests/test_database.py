@@ -23,7 +23,7 @@ def db():
 class TestSignalsForProfile:
     def test_paginates_past_1000_rows(self, db):
         pages = [[{"id": i} for i in range(1000)], [{"id": i} for i in range(1000, 1500)]]
-        q = db.client.table.return_value.select.return_value.in_.return_value.order.return_value
+        q = db.client.table.return_value.select.return_value.in_.return_value.order.return_value.order.return_value
         q.range.return_value.execute.side_effect = [MagicMock(data=p) for p in pages]
 
         rows = db.get_signals_for_profile(limit=4000)
@@ -32,7 +32,7 @@ class TestSignalsForProfile:
         assert [c[0] for c in q.range.call_args_list] == [(0, 999), (1000, 1999)]
 
     def test_honours_limit(self, db):
-        q = db.client.table.return_value.select.return_value.in_.return_value.order.return_value
+        q = db.client.table.return_value.select.return_value.in_.return_value.order.return_value.order.return_value
         q.range.return_value.execute.return_value = MagicMock(data=[{"id": i} for i in range(300)])
         assert len(db.get_signals_for_profile(limit=300)) == 300
         assert q.range.call_args_list[0][0] == (0, 299)

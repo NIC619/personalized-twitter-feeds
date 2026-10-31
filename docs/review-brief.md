@@ -145,6 +145,16 @@ Also new in this round, worth a look:
    paginates too.
 6. Webhook: a bounded set of recent `update_id`s drops Telegram retries.
 
+## Changes since the third review (2026-10-31, later still)
+
+1. An issue with any unscored link (a failed scoring batch) is left unseen;
+   scored items above the threshold still go out and are not re-sent.
+2. `MailboxFetcher.delete` uses `UID EXPUNGE` for that one message only and
+   falls back to leaving it flagged; connections end with UNSELECT + LOGOUT,
+   never CLOSE.
+3. `_vote_rows` and `get_signals_for_profile` order by `id` as a tie-breaker.
+4. The daily stats record `exploration_ids`.
+
 ## Questions a reviewer could answer
 
 - Any PostgREST limits the new queries will hit beyond the 1000-row

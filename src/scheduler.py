@@ -328,6 +328,7 @@ class DailyCurator:
             tweet["filtered"] = True
             filtered_tweets.append(tweet)
         stats["exploration"] = len(explored)
+        stats["exploration_ids"] = [t["item_id"] for t in explored]
 
         stats["filtered"] = len(filtered_tweets)
         stats["tier_breakdown"] = tier_counts
@@ -394,6 +395,7 @@ class DailyCurator:
                     continue  # stays unseen → retried next run
                 summary["emails"] += 1
                 summary["entries"] += result["entries"]
+                unscored = [i for i in result["items"] if i.get("filter_score") is None]
                 good = [
                     i for i in result["items"]
                     if i.get("filter_score") is not None
@@ -416,6 +418,13 @@ class DailyCurator:
                             "delivered; email left unseen for retry"
                         )
                         continue
+                if unscored:
+                    # A scoring batch failed; the unscored links are retried
+                    # with the email next run (scored ones are not re-sent).
+                    logger.warning(
+                        f"'{result['title']}': {len(unscored)} links unscored; email left unseen for retry"
+                    )
+                    continue
                 await asyncio.to_thread(self.mailbox.acknowledge, mail["uid"])
         if summary["emails"]:
             logger.info(f"Inbox: {summary}")
