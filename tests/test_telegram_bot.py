@@ -617,7 +617,8 @@ class TestPlainMessages:
         msg.chat_id = 12345
         msg.reply_to_message = None
         msg.forward_origin = forward
-        msg.reply_text = AsyncMock()
+        status = MagicMock(); status.edit_text = AsyncMock()
+        msg.reply_text = AsyncMock(return_value=status)
         update = MagicMock(); update.message = msg
         return update
 

@@ -32,6 +32,19 @@ def domain_of(url: str) -> str:
     return urlparse(url).netloc.removeprefix("www.")
 
 
+def _author_name(value: str) -> str | None:
+    """A display name from an author meta value, which may be a URL."""
+    value = (value or "").strip()
+    if not value:
+        return None
+    if not value.startswith(("http://", "https://")):
+        return value
+    segment = urlparse(value).path.rstrip("/").rsplit("/", 1)[-1]
+    if not segment or segment.lower() in ("author", "authors", "people", "team", "profile"):
+        return None
+    return segment.replace("-", " ").replace("_", " ").title()
+
+
 def html_to_page_text(html, max_chars: int = MAX_PAGE_TEXT) -> str:
     """Visible text of an HTML document with links kept inline as ``anchor <href>``.
 
@@ -213,13 +226,17 @@ class BlogFetcher:
 
     @staticmethod
     def _extract_author(soup: BeautifulSoup) -> str | None:
-        """Extract author from HTML meta tags."""
+        """Extract author from HTML meta tags.
+
+        ``article:author`` is often a profile URL (e.g. ``/author/nadia/``);
+        that is turned into a readable name from its last path segment.
+        """
         meta_author = soup.find("meta", attrs={"name": "author"})
         if meta_author and meta_author.get("content"):
-            return meta_author["content"].strip()
+            return _author_name(meta_author["content"])
         og_author = soup.find("meta", property="article:author")
         if og_author and og_author.get("content"):
-            return og_author["content"].strip()
+            return _author_name(og_author["content"])
         return None
 
     @staticmethod
