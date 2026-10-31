@@ -15,24 +15,33 @@ from telegram.ext import (
     ConversationHandler,
     ContextTypes,
     MessageHandler,
+    MessageReactionHandler,
     filters,
 )
 
-from src.content import is_blog_content, is_http_url, is_tweet_url, is_twitter_profile_url
+from src.feedback_flow import Vote
+from src.webhook_server import make_app
+from src.bot.admin import AdminMixin
+from src.bot.capture import CaptureMixin
+from src.bot.constants import (
+    BLOCKWORD_AWAITING_INPUT,
+    LIKE_AWAITING_INPUT,
+    NEWSLETTER_AWAITING_INPUT,
+    STAR_AWAITING_INPUT,
+    THREAD_AWAITING_INPUT,
+    VOTE_GRACE_SECONDS,
+)
+from src.bot.feedback import FeedbackMixin
+from src.bot.feeds import FeedsMixin
+from src.bot.formatting import FormattingMixin
+
 
 logger = logging.getLogger(__name__)
 
 
-# Conversation states
-STAR_AWAITING_INPUT = 0
-LIKE_AWAITING_INPUT = 1
-THREAD_AWAITING_INPUT = 2
-NEWSLETTER_AWAITING_INPUT = 3
-NEWSLETTER_PREFS_AWAITING_INPUT = 4
-BLOCKWORD_AWAITING_INPUT = 5
-
-
-class TelegramCurator:
+class TelegramCurator(
+    FeedbackMixin, CaptureMixin, FeedsMixin, AdminMixin, FormattingMixin
+):
     """Telegram bot for tweet curation."""
 
     def __init__(
@@ -48,39 +57,57 @@ class TelegramCurator:
         thread_callback: Optional[Callable] = None,
         like_blog_callback: Optional[Callable] = None,
         newsletter_callback: Optional[Callable] = None,
-        get_newsletter_prefs_callback: Optional[Callable] = None,
-        save_newsletter_prefs_callback: Optional[Callable] = None,
-        extract_sections_callback: Optional[Callable] = None,
+        feed_add_callback: Optional[Callable] = None,
+        feed_list_callback: Optional[Callable] = None,
+        feed_remove_callback: Optional[Callable] = None,
+        inbox_callback: Optional[Callable] = None,
         add_blocked_keyword_callback: Optional[Callable] = None,
         list_blocked_keywords_callback: Optional[Callable] = None,
         remove_blocked_keyword_callback: Optional[Callable] = None,
-        ab_report_callback: Optional[Callable] = None,
-        list_ab_experiments_callback: Optional[Callable] = None,
-        ab_test_config: Optional[dict] = None,
+        capture_url_callback: Optional[Callable] = None,
+        capture_text_callback: Optional[Callable] = None,
+        reason_callback: Optional[Callable] = None,
+        reason_confirm_callback: Optional[Callable] = None,
+        retract_vote_callback: Optional[Callable] = None,
+        note_callback: Optional[Callable] = None,
+        open_callback: Optional[Callable] = None,
+        lookup_message_callback: Optional[Callable] = None,
+        mark_sent_callback: Optional[Callable] = None,
+        redirect_base_url: Optional[str] = None,
     ):
         """Initialize Telegram bot.
 
         Args:
             bot_token: Telegram bot token from BotFather
             chat_id: Target chat ID to send messages to
-            feedback_callback: Async callback function(tweet_id, vote, message_id)
+            feedback_callback: Async callback function(item_id, vote, message_id)
             favorite_author_callback: Async callback function(username) → state string
             mute_author_callback: Async callback function(username) → state string
             stats_callback: Async callback function() → list of author stat dicts
             list_starred_callback: Async callback function() → list of starred usernames
-            like_tweet_callback: Async callback function(tweet_id) → tweet dict or None
-            thread_callback: Async callback function(tweet_id) → list of tweet dicts or None
+            like_tweet_callback: Async callback function(item_id) → tweet dict or None
+            thread_callback: Async callback function(item_id) → list of tweet dicts or None
             like_blog_callback: Async callback function(url) → blog post dict or None
-            newsletter_callback: Async callback function(url, ignored_sections) → list of blog post dicts
-            get_newsletter_prefs_callback: Async callback function(domain) → prefs dict or None
-            save_newsletter_prefs_callback: Async callback function(domain, ignored, all_sections) → dict
-            extract_sections_callback: Async callback function(url) → list of section names
+            newsletter_callback: Async function(url) → {"entries": n, "items": [scored item dicts]}
+            feed_add_callback: Async function(url) → feed dict (discovered + saved) or None
+            feed_list_callback: Async function() → list of feed dicts
+            feed_remove_callback: Async function(url) → None
+            inbox_callback: Async function() → {"emails", "entries", "sent"}; processes
+                newsletter emails now (None when email ingestion is not configured)
             add_blocked_keyword_callback: Async callback function(keyword) → saved keyword
             list_blocked_keywords_callback: Async callback function() → list of keywords
             remove_blocked_keyword_callback: Async callback function(keyword) → None
-            ab_report_callback: Async callback function(experiment_id, threshold) → report string
-            list_ab_experiments_callback: Async callback function() → list of experiment summary dicts
-            ab_test_config: Dict with keys: enabled, experiment_id, challenger_prompt
+            capture_url_callback: Async function(url) → item dict (fetched, scored, saved) or None
+            capture_text_callback: Async function(text, origin) → item dict or None
+            reason_callback: Async function(item_id, vote, strength) → proposed reason text or None
+            reason_confirm_callback: Async function(item_id, reason) → None
+            retract_vote_callback: Async function(item_id) → None (reaction removed)
+            note_callback: Async function(item_id, text, telegram_message_id) → None
+            open_callback: Async function(item_id) → destination URL or None; records the open
+            lookup_message_callback: Async function(telegram_message_id) → item dict or None
+            mark_sent_callback: Async function(item_id, telegram_message_id) → None; persists
+                the message id for items sent outside the daily digest
+            redirect_base_url: Public base URL for /r/<item_id> tracking links (None = direct links)
         """
         self.bot_token = bot_token
         self.chat_id = chat_id
@@ -93,20 +120,36 @@ class TelegramCurator:
         self.thread_callback = thread_callback
         self.like_blog_callback = like_blog_callback
         self.newsletter_callback = newsletter_callback
-        self.get_newsletter_prefs_callback = get_newsletter_prefs_callback
-        self.save_newsletter_prefs_callback = save_newsletter_prefs_callback
-        self.extract_sections_callback = extract_sections_callback
+        self.feed_add_callback = feed_add_callback
+        self.feed_list_callback = feed_list_callback
+        self.feed_remove_callback = feed_remove_callback
+        self.inbox_callback = inbox_callback
         self.add_blocked_keyword_callback = add_blocked_keyword_callback
         self.list_blocked_keywords_callback = list_blocked_keywords_callback
         self.remove_blocked_keyword_callback = remove_blocked_keyword_callback
-        self.ab_report_callback = ab_report_callback
-        self.list_ab_experiments_callback = list_ab_experiments_callback
-        self.ab_test_config = ab_test_config or {}
+        self.capture_url_callback = capture_url_callback
+        self.capture_text_callback = capture_text_callback
+        self.reason_callback = reason_callback
+        self.reason_confirm_callback = reason_confirm_callback
+        self.retract_vote_callback = retract_vote_callback
+        self.note_callback = note_callback
+        self.open_callback = open_callback
+        self.lookup_message_callback = lookup_message_callback
+        self.mark_sent_callback = mark_sent_callback
+        self.redirect_base_url = redirect_base_url
         self.application: Optional[Application] = None
-        self._pending_feedback: dict[str, dict] = {}  # tweet_id → pending save info
-        self._tweet_authors: dict[str, str] = {}  # tweet_id → username
-        self._section_selection: dict[str, dict] = {}  # chat_id → {url, domain, sections, ignored}
+        self._pending_feedback: dict[str, dict] = {}  # item_id → pending save info
+        self._tweet_authors: dict[str, str] = {}  # item_id → username
+        self._message_items: dict[int, str] = {}  # telegram message_id → item_id
+        self._item_votes: dict[str, Vote] = {}  # item_id → latest vote
+        self._reason_prompts: dict[int, str] = {}  # proposal message_id → item_id
+        self._item_prompts: dict[str, tuple[int, str]] = {}  # item_id → (prompt msg id, proposal)
+        self._pending_reasons: dict[str, str] = {}  # item_id → reason confirmed before save
+        self._awaiting_reason: dict[str, str] = {}  # chat_id → item_id waiting for typed reason
+        self._feed_list: dict[str, list[dict]] = {}  # chat_id → feeds shown by /feed list
         self._blockword_list: dict[str, list[str]] = {}  # chat_id → keyword list shown
+        self._tasks: set[asyncio.Task] = set()  # background tasks (reason proposals)
+        self._vote_generation: dict[str, int] = {}  # item_id → bumps on every (re)vote
         logger.info("Telegram bot initialized")
 
     async def initialize(self) -> None:
@@ -129,15 +172,14 @@ class TelegramCurator:
         commands = [
             BotCommand("star", "Toggle starred status — /star username"),
             BotCommand("like", "Upvote a tweet or blog post — /like url"),
-            BotCommand("newsletter", "Parse and score a newsletter — /newsletter url"),
-            BotCommand("newsletter_prefs", "Edit newsletter section preferences — /newsletter_prefs domain"),
+            BotCommand("newsletter", "Extract and score a newsletter issue — /newsletter url"),
+            BotCommand("feed", "RSS subscriptions — /feed add url | list | remove n"),
+            BotCommand("inbox", "Process newsletter emails now"),
             BotCommand("thread", "Fetch and display a thread — /thread tweet_url"),
             BotCommand("starred", "List all starred authors"),
             BotCommand("blockword", "Block keyword(s) from pipeline — paste one per line or comma-separated"),
             BotCommand("blockwords", "List blocked keywords — tap to remove"),
             BotCommand("stats", "Show author performance stats"),
-            BotCommand("ab_report", "A/B test report — /ab_report [experiment_id] [threshold]"),
-            BotCommand("ab_info", "Show current A/B test config and all experiments"),
             BotCommand("help", "Show help message"),
         ]
         await self.application.bot.set_my_commands(commands)
@@ -215,21 +257,13 @@ class TelegramCurator:
             )
         )
         self.application.add_handler(
-            ConversationHandler(
-                entry_points=[CommandHandler("newsletter_prefs", self._handle_newsletter_prefs)],
-                states={
-                    NEWSLETTER_PREFS_AWAITING_INPUT: [
-                        MessageHandler(
-                            filters.TEXT & ~filters.COMMAND,
-                            self._handle_newsletter_prefs_input,
-                        )
-                    ],
-                },
-                fallbacks=[CommandHandler("cancel", self._handle_newsletter_prefs_cancel)],
-            )
+            CommandHandler("starred", self._handle_starred)
         )
         self.application.add_handler(
-            CommandHandler("starred", self._handle_starred)
+            CommandHandler("feed", self._handle_feed)
+        )
+        self.application.add_handler(
+            CommandHandler("inbox", self._handle_inbox)
         )
         self.application.add_handler(
             ConversationHandler(
@@ -248,16 +282,15 @@ class TelegramCurator:
         self.application.add_handler(
             CommandHandler("blockwords", self._handle_blockwords)
         )
-        self.application.add_handler(
-            CommandHandler("ab_report", self._handle_ab_report)
-        )
-        self.application.add_handler(
-            CommandHandler("ab_info", self._handle_ab_info)
-        )
 
         # Callback handler for inline buttons
         self.application.add_handler(
             CallbackQueryHandler(self._handle_feedback)
+        )
+
+        # Emoji reactions on sent items count as votes
+        self.application.add_handler(
+            MessageReactionHandler(self._handle_reaction)
         )
 
         # Default handler: route plain messages to /like (tweets/blogs) or
@@ -291,1686 +324,31 @@ class TelegramCurator:
             "Commands:\n"
             "/star username or URL — toggle starred status for an author\n"
             "/like URL or tweet ID — upvote a tweet or blog post with a reason\n"
-            "/newsletter URL — parse a newsletter, score and send all posts\n"
-            "/newsletter_prefs domain — edit ignored sections for a newsletter\n"
+            "/newsletter URL — extract the links in a newsletter issue, score them, send the good ones\n"
+            "/feed add URL | list | remove N — RSS/Atom subscriptions polled in the daily run\n"
+            "/inbox — process forwarded newsletter emails now (also runs after each daily digest)\n"
             "/thread tweet URL or ID — fetch and display a full thread\n"
             "/starred — list all starred authors\n"
             "/blockword — block keyword(s) from the pipeline (one per line or comma-separated)\n"
             "/blockwords — list blocked keywords, tap to remove\n"
-            "/stats — show author performance stats\n"
-            "/ab_report [experiment_id] [threshold] — A/B test report "
-            "(defaults: current experiment, production filter threshold)\n"
-            "/ab_info — show current A/B test config and all past experiments\n\n"
+            "/stats — show author performance stats\n\n"
             "- I send you filtered tweets daily\n"
-            "- Use the buttons to tell me what you like\n"
-            "- Your feedback helps improve future curation\n"
-            "- /like accepts both tweet URLs and blog post URLs\n"
-            "- Shortcut: send a tweet/blog URL directly to /like it, "
-            "or a profile URL / @username to /star it\n"
+            "- Items marked 🎲 scored below the threshold and are sent at random "
+            "so your vote tells me what the filter is missing\n"
+            "- Vote with the buttons (🔥 strong like, 👍, 👎) or just react to the "
+            "message with an emoji; remove the reaction to retract\n"
+            "- After a vote I guess why; tap ✅, or ✏️ and reply with your own words\n"
+            "- Reply to any item to attach a note\n"
+            "\nSending me things (no command needed):\n"
+            "- a URL (tweet, article, anything) → saved and upvoted; "
+            "words around it are saved as your reason, e.g. "
+            "'great read https://… the section on preconfs'\n"
+            "- :like URL [why] · :dislike URL [why] · :star @handle · :note your thought\n"
+            "- a forwarded post → saved and upvoted\n"
+            "- a reply to any item → note on it\n"
             "- Blocked keywords are matched whole-word, case-insensitive, before LLM scoring\n"
             "  (content from starred authors is exempt from the blocklist)"
         )
-
-    async def _handle_stats(
-        self, update: Update, context: ContextTypes.DEFAULT_TYPE
-    ) -> None:
-        """Handle /stats command."""
-        if not self.stats_callback:
-            await update.message.reply_text("Stats not available.")
-            return
-
-        try:
-            stats = await self.stats_callback()
-        except Exception as e:
-            logger.error(f"Error fetching stats: {e}")
-            await update.message.reply_text("Error fetching stats.")
-            return
-
-        if not stats:
-            await update.message.reply_text(
-                "No feedback data yet. Vote on some tweets first!"
-            )
-            return
-
-        # Parse page number
-        page = 1
-        if context.args:
-            try:
-                page = max(1, int(context.args[0]))
-            except (ValueError, IndexError):
-                page = 1
-
-        message = self._format_stats_message(stats, page)
-        await update.message.reply_text(message, parse_mode="HTML")
-
-    @staticmethod
-    def _parse_ab_report_args(
-        args: list[str], default_experiment_id: str = ""
-    ) -> tuple[str, Optional[int]]:
-        """Parse /ab_report arguments into (experiment_id, threshold).
-
-        Accepts: no args (configured experiment, default threshold), a bare
-        threshold (configured experiment), an experiment id, or both.
-
-        Raises:
-            ValueError: With a user-facing message on bad input.
-        """
-        threshold = None  # Caller falls back to the production filter threshold
-        if not args:
-            experiment_id = default_experiment_id
-        elif args[0].lstrip("-").isdigit():
-            # Bare threshold — use the configured experiment
-            experiment_id = default_experiment_id
-            threshold = int(args[0])
-        else:
-            experiment_id = args[0]
-            if len(args) >= 2:
-                try:
-                    threshold = int(args[1])
-                except ValueError:
-                    raise ValueError(
-                        f"Invalid threshold '{args[1]}'. Must be an integer."
-                    )
-
-        if not experiment_id:
-            raise ValueError(
-                "No experiment configured (AB_TEST_EXPERIMENT_ID is unset).\n"
-                "Usage: /ab_report [experiment_id] [threshold]\n"
-                "Use /ab_info to list past experiments."
-            )
-        return experiment_id, threshold
-
-    async def _handle_ab_report(
-        self, update: Update, context: ContextTypes.DEFAULT_TYPE
-    ) -> None:
-        """Handle /ab_report [experiment_id] [threshold]."""
-        if not self.ab_report_callback:
-            await update.message.reply_text("A/B report not available.")
-            return
-
-        try:
-            experiment_id, threshold = self._parse_ab_report_args(
-                context.args or [], self.ab_test_config.get("experiment_id", "")
-            )
-        except ValueError as e:
-            await update.message.reply_text(str(e))
-            return
-
-        try:
-            report = await self.ab_report_callback(experiment_id, threshold)
-        except Exception as e:
-            logger.error(f"Error generating A/B report: {e}", exc_info=True)
-            await update.message.reply_text(f"Error generating report: {e}")
-            return
-
-        if not report or not report.strip():
-            await update.message.reply_text("Empty report.")
-            return
-
-        # Telegram message limit is 4096 chars; leave room for code-block fences.
-        chunk_size = 3800
-        text = report.strip()
-        for i in range(0, len(text), chunk_size):
-            chunk = text[i : i + chunk_size]
-            await update.message.reply_text(
-                f"<pre>{html.escape(chunk)}</pre>", parse_mode="HTML"
-            )
-
-    @staticmethod
-    def _format_ab_info_message(
-        config: dict, experiments: list[dict]
-    ) -> str:
-        """Format the /ab_info message (HTML) from config and experiment summaries."""
-        from src.claude_filter import (
-            DEFAULT_CONTROL_PROMPT,
-            PROMPT_DESCRIPTIONS,
-            PROMPT_REGISTRY,
-        )
-
-        def _describe(key: str) -> str:
-            descs = [
-                PROMPT_DESCRIPTIONS.get(k.strip(), "unknown prompt")
-                for k in key.split("/")
-            ]
-            return "; ".join(descs)
-
-        def _needs_rag(key: str) -> bool:
-            return "{rag_context}" in PROMPT_REGISTRY.get(key, "")
-
-        rag_enabled = config.get("rag_enabled", True)
-        control = config.get("control_prompt", DEFAULT_CONTROL_PROMPT)
-
-        lines = ["<b>Current A/B test config</b>"]
-        control_line = (
-            f"Control: {html.escape(control)} — "
-            + html.escape(_describe(control))
-            + " (set via CONTROL_PROMPT)"
-        )
-        if config.get("enabled"):
-            experiment_id = config.get("experiment_id") or "(unset)"
-            challenger = config.get("challenger_prompt", "?")
-            lines.append(f"Experiment: <code>{html.escape(experiment_id)}</code>")
-            lines.append(control_line)
-            lines.append(
-                f"Challenger: {html.escape(challenger)} — "
-                + html.escape(_describe(challenger))
-            )
-        else:
-            lines.append("A/B testing is disabled (AB_TEST_ENABLED=false).")
-            lines.append(control_line)
-
-        lines.append(f"RAG: {'enabled' if rag_enabled else 'disabled'}")
-        if not rag_enabled:
-            rag_prompts = [control] + (
-                [config.get("challenger_prompt")] if config.get("enabled") else []
-            )
-            for key in rag_prompts:
-                if key and _needs_rag(key):
-                    lines.append(
-                        f"⚠️ {html.escape(key)} expects RAG context, but RAG is disabled — "
-                        "it will run with 'No user feedback context available yet.'"
-                    )
-
-        lines.append("")
-        lines.append("<b>All experiments</b>")
-        if not experiments:
-            lines.append("No A/B test scores recorded yet.")
-        else:
-            for exp in experiments:
-                first = (exp.get("first_scored") or "")[:10]
-                last = (exp.get("last_scored") or "")[:10]
-                control = exp.get("control_prompt", "?")
-                challenger = exp.get("challenger_prompt", "?")
-                lines.append(
-                    f"• <code>{html.escape(exp['experiment_id'])}</code>: "
-                    f"{html.escape(control)} vs {html.escape(challenger)}, "
-                    f"{exp.get('pairs', 0)} pairs, {first} → {last}"
-                )
-                lines.append(
-                    f"   challenger: {html.escape(_describe(challenger))}"
-                )
-
-        lines.append("")
-        lines.append("<b>Prompt registry</b>")
-        for key, desc in PROMPT_DESCRIPTIONS.items():
-            lines.append(f"{key}: {html.escape(desc)}")
-
-        lines.append("")
-        lines.append("Run /ab_report [experiment_id] [threshold] for a full report.")
-        return "\n".join(lines)
-
-    async def _handle_ab_info(
-        self, update: Update, context: ContextTypes.DEFAULT_TYPE
-    ) -> None:
-        """Handle /ab_info — show current A/B config and all experiments."""
-        experiments: list[dict] = []
-        if self.list_ab_experiments_callback:
-            try:
-                experiments = await self.list_ab_experiments_callback()
-            except Exception as e:
-                logger.error(f"Error listing A/B experiments: {e}", exc_info=True)
-                await update.message.reply_text(f"Error listing experiments: {e}")
-                return
-
-        message = self._format_ab_info_message(self.ab_test_config, experiments)
-        await update.message.reply_text(message, parse_mode="HTML")
-
-    @staticmethod
-    def _extract_username(arg: str) -> str:
-        """Extract a Twitter username from a URL, @mention, or plain username.
-
-        Supports:
-            - https://twitter.com/username/status/123
-            - https://x.com/username
-            - @username
-            - username
-
-        Returns:
-            Lowercase username string
-        """
-        # Match twitter.com or x.com URLs
-        match = re.match(
-            r"https?://(?:www\.)?(?:twitter|x)\.com/([A-Za-z0-9_]+)",
-            arg,
-        )
-        if match:
-            return match.group(1).lower()
-        # Plain username or @mention
-        return arg.lower().lstrip("@")
-
-    async def _handle_star(
-        self, update: Update, context: ContextTypes.DEFAULT_TYPE
-    ) -> int:
-        """Handle /star command to toggle starred status for an author.
-
-        If called with args, processes immediately.
-        If called without args, prompts and waits for input.
-        """
-        if not self.favorite_author_callback:
-            await update.message.reply_text("Star feature not available.")
-            return ConversationHandler.END
-
-        if not context.args:
-            await update.message.reply_text(
-                "Send me a username, @mention, or tweet/profile URL to star.\n"
-                "You can send multiple separated by spaces.\n\n"
-                "/cancel to abort."
-            )
-            return STAR_AWAITING_INPUT
-
-        await self._star_authors(update, context.args)
-        return ConversationHandler.END
-
-    async def _handle_star_input(
-        self, update: Update, context: ContextTypes.DEFAULT_TYPE
-    ) -> int:
-        """Handle the follow-up message with usernames/URLs after /star prompt."""
-        args = update.message.text.strip().split()
-        if not args:
-            await update.message.reply_text("No input received. Try again or /cancel.")
-            return STAR_AWAITING_INPUT
-
-        await self._star_authors(update, args)
-        return ConversationHandler.END
-
-    async def _handle_star_cancel(
-        self, update: Update, context: ContextTypes.DEFAULT_TYPE
-    ) -> int:
-        """Handle /cancel during star conversation."""
-        await update.message.reply_text("Cancelled.")
-        return ConversationHandler.END
-
-    async def _star_authors(self, update: Update, args: list[str]) -> None:
-        """Process a list of username/URL args and toggle their starred status."""
-        results = []
-        for arg in args:
-            username = self._extract_username(arg)
-            try:
-                state = await self.favorite_author_callback(username=username)
-                if state == "favorited":
-                    results.append(f"⭐ @{username} starred")
-                elif state == "unmuted":
-                    results.append(f"🔊 @{username} unmuted (was muted)")
-                else:
-                    results.append(f"@{username} → {state}")
-            except Exception as e:
-                logger.error(f"Error starring @{username}: {e}")
-                results.append(f"❌ @{username} — error")
-
-        await update.message.reply_text("\n".join(results))
-
-    @staticmethod
-    def _extract_tweet_id(arg: str) -> str | None:
-        """Extract a tweet ID from a URL or raw numeric string.
-
-        Supports:
-            - https://twitter.com/user/status/123456
-            - https://x.com/user/status/123456
-            - 123456 (raw numeric ID)
-
-        Returns:
-            Tweet ID string, or None if unrecognizable
-        """
-        match = re.match(
-            r"https?://(?:www\.)?(?:twitter|x)\.com/[A-Za-z0-9_]+/status/(\d+)",
-            arg,
-        )
-        if match:
-            return match.group(1)
-        if arg.isdigit():
-            return arg
-        return None
-
-    async def _handle_default_message(
-        self, update: Update, context: ContextTypes.DEFAULT_TYPE
-    ) -> None:
-        """Default handler for plain text: route to /like or /star based on content.
-
-        - Tweet URLs, numeric tweet IDs, and non-tweet HTTP(S) URLs → /like
-        - Twitter/X profile URLs, @mentions, and plain usernames → /star
-        """
-        if not update.message or not update.message.text:
-            return
-
-        args = update.message.text.strip().split()
-        if not args:
-            return
-
-        like_args: list[str] = []
-        star_args: list[str] = []
-        unknown: list[str] = []
-
-        for arg in args:
-            if is_http_url(arg):
-                if is_twitter_profile_url(arg):
-                    star_args.append(arg)
-                else:
-                    # Tweet URL or any other URL (blog) → like
-                    like_args.append(arg)
-            elif arg.isdigit():
-                like_args.append(arg)
-            elif re.match(r"^@?[A-Za-z0-9_]+$", arg):
-                star_args.append(arg)
-            else:
-                unknown.append(arg)
-
-        if like_args and self.like_tweet_callback:
-            await self._like_tweets(update, like_args)
-        if star_args and self.favorite_author_callback:
-            await self._star_authors(update, star_args)
-        if unknown:
-            await update.message.reply_text(
-                "Could not interpret: " + " ".join(unknown)
-            )
-
-    async def _handle_like(
-        self, update: Update, context: ContextTypes.DEFAULT_TYPE
-    ) -> int:
-        """Handle /like command to upvote a tweet or blog post.
-
-        If called with args, processes immediately.
-        If called without args, prompts and waits for input.
-        """
-        if not self.like_tweet_callback and not self.like_blog_callback:
-            await update.message.reply_text("Like feature not available.")
-            return ConversationHandler.END
-
-        if not context.args:
-            await update.message.reply_text(
-                "Send me a tweet URL, blog post URL, or tweet ID to like.\n"
-                "You can send multiple separated by spaces.\n\n"
-                "/cancel to abort."
-            )
-            return LIKE_AWAITING_INPUT
-
-        await self._like_tweets(update, context.args)
-        return ConversationHandler.END
-
-    async def _handle_like_input(
-        self, update: Update, context: ContextTypes.DEFAULT_TYPE
-    ) -> int:
-        """Handle follow-up message with tweet URLs/IDs after /like prompt."""
-        args = update.message.text.strip().split()
-        if not args:
-            await update.message.reply_text("No input received. Try again or /cancel.")
-            return LIKE_AWAITING_INPUT
-
-        await self._like_tweets(update, args)
-        return ConversationHandler.END
-
-    async def _handle_like_cancel(
-        self, update: Update, context: ContextTypes.DEFAULT_TYPE
-    ) -> int:
-        """Handle /cancel during like conversation."""
-        await update.message.reply_text("Cancelled.")
-        return ConversationHandler.END
-
-    async def _like_tweets(self, update: Update, args: list[str]) -> None:
-        """Process a list of tweet/blog URL/ID args and send each with reason buttons."""
-        for arg in args:
-            # Check if this is a blog post URL (not a tweet URL)
-            if is_http_url(arg) and not is_tweet_url(arg):
-                await self._like_blog_post(update, arg)
-                continue
-
-            tweet_id = self._extract_tweet_id(arg)
-            if not tweet_id:
-                await update.message.reply_text(f"Could not parse ID from: {arg}")
-                continue
-
-            try:
-                tweet = await self.like_tweet_callback(tweet_id)
-            except Exception as e:
-                logger.error(f"Error fetching tweet {tweet_id}: {e}")
-                await update.message.reply_text(f"Error fetching tweet {tweet_id}.")
-                continue
-
-            if not tweet:
-                await update.message.reply_text(f"Tweet {tweet_id} not found.")
-                continue
-
-            # Format message without score/reason
-            message = self._format_like_message(tweet)
-
-            # Store author mapping for undo functionality
-            self._tweet_authors[tweet_id] = tweet["author_username"]
-
-            # Send with reason category buttons
-            keyboard = self._make_like_reason_buttons(tweet_id)
-
-            try:
-                await self.application.bot.send_message(
-                    chat_id=self.chat_id,
-                    text=message,
-                    reply_markup=keyboard,
-                    parse_mode="HTML",
-                    disable_web_page_preview=True,
-                )
-            except Exception as e:
-                logger.error(f"Error sending like message for {tweet_id}: {e}")
-                await update.message.reply_text(f"Error sending tweet {tweet_id}.")
-
-    async def _like_blog_post(self, update: Update, url: str) -> None:
-        """Process a blog post URL for liking."""
-        if not self.like_blog_callback:
-            await update.message.reply_text("Blog post liking not available.")
-            return
-
-        await update.message.reply_text("Fetching and scoring blog post...")
-
-        try:
-            post = await self.like_blog_callback(url)
-        except Exception as e:
-            logger.error(f"Error fetching blog post {url}: {e}")
-            await update.message.reply_text(f"Error fetching blog post.")
-            return
-
-        if not post:
-            await update.message.reply_text("Could not fetch blog post.")
-            return
-
-        content_id = post["tweet_id"]
-        message = self._format_blog_like_message(post)
-
-        # Store author mapping for undo functionality
-        self._tweet_authors[content_id] = post["author_username"]
-
-        # Send with reason category buttons
-        keyboard = self._make_like_reason_buttons(content_id)
-
-        try:
-            await self.application.bot.send_message(
-                chat_id=self.chat_id,
-                text=message,
-                reply_markup=keyboard,
-                parse_mode="HTML",
-                disable_web_page_preview=True,
-            )
-        except Exception as e:
-            logger.error(f"Error sending blog like message for {content_id}: {e}")
-            await update.message.reply_text("Error sending blog post.")
-
-    async def _handle_thread(
-        self, update: Update, context: ContextTypes.DEFAULT_TYPE
-    ) -> int:
-        """Handle /thread command to fetch and display a thread.
-
-        If called with args, processes immediately.
-        If called without args, prompts and waits for input.
-        """
-        if not self.thread_callback:
-            await update.message.reply_text("Thread feature not available.")
-            return ConversationHandler.END
-
-        if not context.args:
-            await update.message.reply_text(
-                "Send me a tweet URL or ID (the last tweet in the thread).\n\n"
-                "/cancel to abort."
-            )
-            return THREAD_AWAITING_INPUT
-
-        await self._fetch_and_send_thread(update, context.args[0])
-        return ConversationHandler.END
-
-    async def _handle_thread_input(
-        self, update: Update, context: ContextTypes.DEFAULT_TYPE
-    ) -> int:
-        """Handle follow-up message with tweet URL/ID after /thread prompt."""
-        arg = update.message.text.strip().split()[0] if update.message.text.strip() else ""
-        if not arg:
-            await update.message.reply_text("No input received. Try again or /cancel.")
-            return THREAD_AWAITING_INPUT
-
-        await self._fetch_and_send_thread(update, arg)
-        return ConversationHandler.END
-
-    async def _handle_thread_cancel(
-        self, update: Update, context: ContextTypes.DEFAULT_TYPE
-    ) -> int:
-        """Handle /cancel during thread conversation."""
-        await update.message.reply_text("Cancelled.")
-        return ConversationHandler.END
-
-    async def _fetch_and_send_thread(self, update: Update, arg: str) -> None:
-        """Fetch a thread and send it as a compiled message."""
-        tweet_id = self._extract_tweet_id(arg)
-        if not tweet_id:
-            await update.message.reply_text(f"Could not parse tweet ID from: {arg}")
-            return
-
-        try:
-            tweets = await self.thread_callback(tweet_id)
-        except Exception as e:
-            logger.error(f"Error fetching thread for {tweet_id}: {e}")
-            await update.message.reply_text(f"Error fetching thread for tweet {tweet_id}.")
-            return
-
-        if not tweets:
-            await update.message.reply_text(f"Could not find thread for tweet {tweet_id}.")
-            return
-
-        message = self._format_thread_message(tweets)
-
-        try:
-            await self.application.bot.send_message(
-                chat_id=self.chat_id,
-                text=message,
-                parse_mode="HTML",
-                disable_web_page_preview=True,
-            )
-        except Exception as e:
-            logger.error(f"Error sending thread message for {tweet_id}: {e}")
-            await update.message.reply_text(f"Error sending thread for tweet {tweet_id}.")
-
-    def _format_thread_message(self, tweets: list[dict]) -> str:
-        """Format a list of thread tweets into a single compiled message.
-
-        Args:
-            tweets: List of normalized tweet dicts, sorted chronologically
-
-        Returns:
-            Formatted HTML message string
-        """
-        n = len(tweets)
-        author = tweets[0]["author_username"]
-        last_tweet = tweets[-1]
-
-        lines = [f"<b>Thread by @{author} ({n} tweets)</b>\n"]
-
-        for i, tweet in enumerate(tweets, 1):
-            text = self._escape_html(tweet["text"])
-            lines.append(f"<b>[{i}/{n}]</b> {text}\n")
-
-        lines.append(
-            f"<a href=\"{last_tweet['url']}\">View on Twitter</a>"
-        )
-
-        return "\n".join(lines)
-
-    # --- Newsletter handlers ---
-
-    async def _handle_newsletter(
-        self, update: Update, context: ContextTypes.DEFAULT_TYPE
-    ) -> int:
-        """Handle /newsletter command to parse and score a newsletter.
-
-        If called with args, processes immediately.
-        If called without args, prompts and waits for input.
-        """
-        if not self.newsletter_callback:
-            await update.message.reply_text("Newsletter feature not available.")
-            return ConversationHandler.END
-
-        if not context.args:
-            await update.message.reply_text(
-                "Send me a newsletter URL to parse.\n\n"
-                "/cancel to abort."
-            )
-            return NEWSLETTER_AWAITING_INPUT
-
-        return await self._process_newsletter(update, context.args[0])
-
-    async def _handle_newsletter_input(
-        self, update: Update, context: ContextTypes.DEFAULT_TYPE
-    ) -> int:
-        """Handle follow-up message with newsletter URL after /newsletter prompt."""
-        arg = update.message.text.strip().split()[0] if update.message.text.strip() else ""
-        if not arg:
-            await update.message.reply_text("No input received. Try again or /cancel.")
-            return NEWSLETTER_AWAITING_INPUT
-
-        return await self._process_newsletter(update, arg)
-
-    async def _handle_newsletter_cancel(
-        self, update: Update, context: ContextTypes.DEFAULT_TYPE
-    ) -> int:
-        """Handle /cancel during newsletter conversation."""
-        await update.message.reply_text("Cancelled.")
-        return ConversationHandler.END
-
-    async def _process_newsletter(self, update: Update, url: str) -> int:
-        """Parse a newsletter, checking section preferences first.
-
-        If the domain is new and section extraction is available, prompts
-        the user to select sections to ignore before processing.
-
-        Returns:
-            ConversationHandler.END or NEWSLETTER_AWAITING_INPUT (if awaiting section selection)
-        """
-        if not is_http_url(url):
-            await update.message.reply_text("Please provide a valid URL.")
-            return ConversationHandler.END
-
-        from urllib.parse import urlparse
-        domain = urlparse(url).netloc.removeprefix("www.")
-
-        # Check for existing preferences
-        ignored_sections = None
-        if self.get_newsletter_prefs_callback:
-            prefs = await self.get_newsletter_prefs_callback(domain)
-            if prefs:
-                ignored_sections = prefs.get("ignored_sections", [])
-                if ignored_sections:
-                    logger.info(f"Skipping {len(ignored_sections)} sections for {domain}")
-            elif self.extract_sections_callback:
-                # New domain — prompt for section selection
-                sections = await self.extract_sections_callback(url)
-                if sections:
-                    chat_id = str(update.effective_chat.id)
-                    self._section_selection[chat_id] = {
-                        "url": url,
-                        "domain": domain,
-                        "sections": sections,
-                        "ignored": set(),
-                    }
-                    await self._send_section_picker(update, chat_id)
-                    return ConversationHandler.END  # Selection handled via callback buttons
-
-        await self._do_process_newsletter(update, url, ignored_sections)
-        return ConversationHandler.END
-
-    async def _send_section_picker(self, update: Update, chat_id: str) -> None:
-        """Send section selection message with toggle buttons."""
-        state = self._section_selection[chat_id]
-        sections = state["sections"]
-        ignored = state["ignored"]
-        domain = state["domain"]
-
-        buttons = []
-        for i, section in enumerate(sections):
-            checked = "☐" if section in ignored else "☑"
-            buttons.append([
-                InlineKeyboardButton(
-                    f"{checked} {section}",
-                    callback_data=f"nsec:{i}",
-                )
-            ])
-        buttons.append([
-            InlineKeyboardButton("✅ Done — process newsletter", callback_data="nsec:done"),
-            InlineKeyboardButton("❌ Cancel", callback_data="nsec:cancel"),
-        ])
-
-        text = (
-            f"New newsletter: <b>{self._escape_html(domain)}</b>\n\n"
-            f"Found {len(sections)} sections. "
-            "Tap to toggle sections you want to <b>ignore</b>.\n"
-            "☑ = included, ☐ = ignored"
-        )
-
-        msg = await update.message.reply_text(
-            text,
-            reply_markup=InlineKeyboardMarkup(buttons),
-            parse_mode="HTML",
-        )
-        state["message_id"] = msg.message_id
-
-    async def _handle_section_toggle(self, query, data: str) -> None:
-        """Handle section toggle/done/cancel button presses."""
-        chat_id = str(query.message.chat_id)
-        state = self._section_selection.get(chat_id)
-        if not state:
-            await query.edit_message_text("Section selection expired. Run /newsletter again.")
-            return
-
-        action = data.split(":", 1)[1]
-
-        if action == "cancel":
-            del self._section_selection[chat_id]
-            await query.edit_message_text("Newsletter cancelled.")
-            return
-
-        if action == "done":
-            # Save preferences
-            domain = state["domain"]
-            url = state["url"]
-            ignored = list(state["ignored"])
-            sections = state["sections"]
-            del self._section_selection[chat_id]
-
-            if self.save_newsletter_prefs_callback:
-                await self.save_newsletter_prefs_callback(domain, ignored, sections)
-
-            if url:
-                # From /newsletter — save prefs then process
-                await query.edit_message_text(
-                    f"Saved preferences for {domain}: ignoring {len(ignored)} sections.\n"
-                    "Processing newsletter..."
-                )
-                await self._do_process_newsletter_by_chat(url, ignored or None)
-            else:
-                # From /newsletter_prefs — just save
-                await query.edit_message_text(
-                    f"Saved preferences for {domain}: ignoring {len(ignored)} sections."
-                )
-            return
-
-        # Toggle a section
-        try:
-            idx = int(action)
-        except ValueError:
-            return
-
-        sections = state["sections"]
-        if idx < 0 or idx >= len(sections):
-            return
-
-        section = sections[idx]
-        if section in state["ignored"]:
-            state["ignored"].discard(section)
-        else:
-            state["ignored"].add(section)
-
-        # Rebuild buttons with updated state
-        ignored = state["ignored"]
-        buttons = []
-        for i, sec in enumerate(sections):
-            checked = "☐" if sec in ignored else "☑"
-            buttons.append([
-                InlineKeyboardButton(
-                    f"{checked} {sec}",
-                    callback_data=f"nsec:{i}",
-                )
-            ])
-        buttons.append([
-            InlineKeyboardButton("✅ Done — process newsletter", callback_data="nsec:done"),
-            InlineKeyboardButton("❌ Cancel", callback_data="nsec:cancel"),
-        ])
-
-        try:
-            await query.edit_message_reply_markup(
-                reply_markup=InlineKeyboardMarkup(buttons),
-            )
-        except telegram.error.BadRequest:
-            pass  # Message not modified (same state)
-
-    async def _do_process_newsletter_by_chat(
-        self, url: str, ignored_sections: list[str] | None,
-    ) -> None:
-        """Process newsletter and send results directly to chat."""
-        try:
-            posts = await self.newsletter_callback(url, ignored_sections)
-        except Exception as e:
-            logger.error(f"Error processing newsletter {url}: {e}")
-            await self.application.bot.send_message(
-                chat_id=self.chat_id, text="Error processing newsletter."
-            )
-            return
-
-        if not posts:
-            await self.application.bot.send_message(
-                chat_id=self.chat_id, text="No articles found in newsletter. The newsletter layout may not be supported — check logs for details."
-            )
-            return
-
-        await self.application.bot.send_message(
-            chat_id=self.chat_id,
-            text=f"Found {len(posts)} articles. Sending...",
-        )
-
-        total = len(posts)
-        sent_count = 0
-        for idx, post in enumerate(posts, start=1):
-            content_id = post["tweet_id"]
-            self._tweet_authors[content_id] = post["author_username"]
-            message = self._format_blog_scored_message(post, position=(idx, total))
-            keyboard = self._make_tweet_buttons(
-                content_id, post["author_username"],
-                fav_label="⭐ Source", mute_label="🔇 Mute",
-            )
-            try:
-                await self.application.bot.send_message(
-                    chat_id=self.chat_id, text=message,
-                    reply_markup=keyboard, parse_mode="HTML",
-                    disable_web_page_preview=True,
-                )
-                sent_count += 1
-                await asyncio.sleep(1.0)
-            except Exception as e:
-                logger.error(f"Error sending newsletter post {content_id}: {e}")
-
-        await self.application.bot.send_message(
-            chat_id=self.chat_id,
-            text=f"Newsletter processed: {sent_count}/{len(posts)} articles sent.",
-        )
-
-    async def _do_process_newsletter(
-        self, update: Update, url: str, ignored_sections: list[str] | None,
-    ) -> None:
-        """Parse a newsletter, score all posts, and send them for feedback."""
-        await update.message.reply_text("Parsing newsletter...")
-
-        try:
-            posts = await self.newsletter_callback(url, ignored_sections)
-        except Exception as e:
-            logger.error(f"Error processing newsletter {url}: {e}")
-            await update.message.reply_text("Error processing newsletter.")
-            return
-
-        if not posts:
-            await update.message.reply_text("No articles found in newsletter. The newsletter layout may not be supported — check logs for details.")
-            return
-
-        await update.message.reply_text(
-            f"Found {len(posts)} articles. Sending..."
-        )
-
-        total = len(posts)
-        sent_count = 0
-        for idx, post in enumerate(posts, start=1):
-            content_id = post["tweet_id"]
-            self._tweet_authors[content_id] = post["author_username"]
-
-            message = self._format_blog_scored_message(post, position=(idx, total))
-            keyboard = self._make_tweet_buttons(
-                content_id,
-                post["author_username"],
-                fav_label="⭐ Source",
-                mute_label="🔇 Mute",
-            )
-
-            try:
-                await self.application.bot.send_message(
-                    chat_id=self.chat_id,
-                    text=message,
-                    reply_markup=keyboard,
-                    parse_mode="HTML",
-                    disable_web_page_preview=True,
-                )
-                sent_count += 1
-                # Small delay to avoid rate limiting
-                await asyncio.sleep(1.0)
-            except Exception as e:
-                logger.error(f"Error sending newsletter post {content_id}: {e}")
-
-        await update.message.reply_text(
-            f"Newsletter processed: {sent_count}/{len(posts)} articles sent."
-        )
-
-    # --- Newsletter preferences handlers ---
-
-    async def _handle_newsletter_prefs(
-        self, update: Update, context: ContextTypes.DEFAULT_TYPE
-    ) -> int:
-        """Handle /newsletter_prefs command to edit section preferences.
-
-        Accepts a domain name or a full newsletter URL.
-        If given a URL, extracts fresh sections from it.
-        """
-        if not self.get_newsletter_prefs_callback:
-            await update.message.reply_text("Newsletter preferences not available.")
-            return ConversationHandler.END
-
-        if not context.args:
-            await update.message.reply_text(
-                "Send me a newsletter domain or URL to edit preferences.\n"
-                "Example: etherealnews.substack.com\n"
-                "Or: https://etherealnews.substack.com\n"
-                "Or: https://etherealnews.substack.com/p/ethereal-news-weekly-18\n\n"
-                "/cancel to abort."
-            )
-            return NEWSLETTER_PREFS_AWAITING_INPUT
-
-        await self._show_prefs_editor(update, context.args[0].strip())
-        return ConversationHandler.END
-
-    async def _handle_newsletter_prefs_input(
-        self, update: Update, context: ContextTypes.DEFAULT_TYPE
-    ) -> int:
-        """Handle follow-up message with domain/URL for /newsletter_prefs."""
-        arg = update.message.text.strip().split()[0] if update.message.text.strip() else ""
-        if not arg:
-            await update.message.reply_text("No input received. Try again or /cancel.")
-            return NEWSLETTER_PREFS_AWAITING_INPUT
-
-        await self._show_prefs_editor(update, arg)
-        return ConversationHandler.END
-
-    async def _handle_newsletter_prefs_cancel(
-        self, update: Update, context: ContextTypes.DEFAULT_TYPE
-    ) -> int:
-        """Handle /cancel during newsletter_prefs conversation."""
-        await update.message.reply_text("Cancelled.")
-        return ConversationHandler.END
-
-    async def _show_prefs_editor(self, update: Update, arg: str) -> None:
-        """Show section toggle picker for a newsletter domain or URL.
-
-        If arg is a URL to a specific newsletter issue, extracts fresh sections
-        from it. If arg is a bare domain (or a URL with no path, like
-        "https://etherealnews.substack.com"), loads saved sections from preferences.
-        """
-        from urllib.parse import urlparse
-
-        is_url_with_path = False
-        if is_http_url(arg):
-            parsed = urlparse(arg)
-            domain = parsed.netloc.removeprefix("www.")
-            # A URL with just the origin (no path or "/") is effectively a domain
-            is_url_with_path = parsed.path.strip("/") != ""
-        else:
-            domain = arg
-
-        if is_url_with_path:
-            # Given a newsletter issue URL — extract fresh sections
-            if not self.extract_sections_callback:
-                await update.message.reply_text("Section extraction not available.")
-                return
-            await update.message.reply_text("Extracting sections...")
-            sections = await self.extract_sections_callback(arg)
-            if not sections:
-                await update.message.reply_text(f"No sections found in {arg}")
-                return
-            # Load existing ignored list if any
-            prefs = await self.get_newsletter_prefs_callback(domain)
-            ignored = set(prefs.get("ignored_sections", [])) if prefs else set()
-        else:
-            # Given a domain name (or origin-only URL) — load from saved prefs
-            prefs = await self.get_newsletter_prefs_callback(domain)
-            if not prefs:
-                await update.message.reply_text(
-                    f"No preferences found for {domain}. "
-                    "Try with a full newsletter URL instead."
-                )
-                return
-            sections = prefs.get("all_sections", [])
-            if not sections:
-                await update.message.reply_text(
-                    f"No sections recorded for {domain}. "
-                    "Try with a full newsletter URL to re-extract sections."
-                )
-                return
-            ignored = set(prefs.get("ignored_sections", []))
-
-        chat_id = str(update.effective_chat.id)
-        self._section_selection[chat_id] = {
-            "url": None,  # No URL to process — just editing prefs
-            "domain": domain,
-            "sections": sections,
-            "ignored": ignored,
-        }
-        await self._send_section_picker(update, chat_id)
-
-    # --- Blog post formatting ---
-
-    def _format_blog_like_message(self, post: dict) -> str:
-        """Format a blog post for like message (no score/reason header)."""
-        article = post.get("article", {})
-        title = self._escape_html(article.get("title", post["text"][:100]))
-        url = post["url"]
-        source = post["author_username"]
-        author_name = post.get("author_name", source)
-
-        message = (
-            f"<b>{self._escape_html(author_name)}</b> | "
-            f"<a href=\"{url}\">{source}</a>\n\n"
-            f"<b>{title}</b>\n"
-        )
-
-        body = article.get("body", "")
-        if body:
-            preview = self._escape_html(body[:300])
-            if len(body) > 300:
-                preview += "..."
-            message += f"\n{preview}"
-
-        return message
-
-    def _format_blog_scored_message(
-        self,
-        post: dict,
-        position: Optional[tuple[int, int]] = None,
-    ) -> str:
-        """Format a blog post with score for newsletter digest."""
-        article = post.get("article", {})
-        title = self._escape_html(article.get("title", post["text"][:100]))
-        url = post["url"]
-        source = post["author_username"]
-        author_name = post.get("author_name", source)
-
-        prefix = f"<b>[{position[0]}/{position[1]}]</b>\n" if position else ""
-        message = (
-            f"{prefix}"
-            f"<b>{self._escape_html(author_name)}</b> | "
-            f"<a href=\"{url}\">{source}</a>\n\n"
-            f"<b>{title}</b>\n"
-        )
-
-        body = article.get("body", "")
-        if body:
-            preview = self._escape_html(body[:300])
-            if len(body) > 300:
-                preview += "..."
-            message += f"\n{preview}"
-
-        return message
-
-    @staticmethod
-    def _make_like_reason_buttons(tweet_id: str) -> InlineKeyboardMarkup:
-        """Build the reason category buttons for a liked tweet."""
-        return InlineKeyboardMarkup([
-            [
-                InlineKeyboardButton(
-                    "Tech content",
-                    callback_data=f"like_reason:{tweet_id}:tech",
-                ),
-                InlineKeyboardButton(
-                    "Non-tech insight",
-                    callback_data=f"like_reason:{tweet_id}:non_tech",
-                ),
-            ],
-            [
-                InlineKeyboardButton(
-                    "Soft skills",
-                    callback_data=f"like_reason:{tweet_id}:soft_skills",
-                ),
-                InlineKeyboardButton(
-                    "Life wisdom",
-                    callback_data=f"like_reason:{tweet_id}:life_wisdom",
-                ),
-            ],
-        ])
-
-    def _format_like_message(self, tweet: dict) -> str:
-        """Format tweet for like message (no score/reason header)."""
-        metrics = tweet.get("metrics", {})
-        text = self._escape_html(tweet["text"])
-
-        likes = metrics.get("likes", 0)
-        retweets = metrics.get("retweets", 0)
-        replies = metrics.get("replies", 0)
-
-        likes_str = self._format_number(likes)
-        retweets_str = self._format_number(retweets)
-        replies_str = self._format_number(replies)
-
-        header = self._retweet_header(tweet) + self._quote_header(tweet)
-        message = (
-            f"<b>@{tweet['author_username']}</b> | "
-            f"<a href=\"{tweet['url']}\">View Tweet</a>\n\n"
-            f"{header}{text}"
-        )
-
-        quoted = tweet.get("quoted_tweet")
-        if quoted:
-            qt_author = self._escape_html(quoted["author_username"])
-            qt_text = self._escape_html(quoted["text"])
-            qt_lines = qt_text.split("\n")
-            qt_block = "\n".join(f"┃ {line}" for line in qt_lines)
-            message += (
-                f"\n\n┃ <b>@{qt_author}:</b>\n"
-                f"{qt_block}"
-            )
-
-        message += f"\n\n❤️ {likes_str}  🔁 {retweets_str}  💬 {replies_str}"
-        return message
-
-    async def _handle_starred(
-        self, update: Update, context: ContextTypes.DEFAULT_TYPE
-    ) -> None:
-        """Handle /starred command to list all starred authors."""
-        if not self.list_starred_callback:
-            await update.message.reply_text("Starred list not available.")
-            return
-
-        try:
-            authors = await self.list_starred_callback()
-        except Exception as e:
-            logger.error(f"Error fetching starred authors: {e}")
-            await update.message.reply_text("Error fetching starred authors.")
-            return
-
-        if not authors:
-            await update.message.reply_text(
-                "No starred authors yet.\n"
-                "Use /star username to add one."
-            )
-            return
-
-        lines = [f"⭐ <b>Starred Authors</b> ({len(authors)})\n"]
-        for author in sorted(authors):
-            lines.append(f"  @{author}")
-        lines.append(f"\nUse /star username to add or remove.")
-
-        await update.message.reply_text("\n".join(lines), parse_mode="HTML")
-
-    # --- Blocked keyword handlers ---
-
-    async def _handle_blockword(
-        self, update: Update, context: ContextTypes.DEFAULT_TYPE
-    ) -> int:
-        """Handle /blockword command to add keyword(s) to the blocklist."""
-        if not self.add_blocked_keyword_callback:
-            await update.message.reply_text("Keyword blocking not available.")
-            return ConversationHandler.END
-
-        if context.args:
-            await self._add_blocked_keywords(update, " ".join(context.args))
-            return ConversationHandler.END
-
-        await update.message.reply_text(
-            "Send me the keyword(s) to block. One per line or comma-separated.\n"
-            "Matching is whole-word, case-insensitive.\n"
-            "Content from starred authors is exempt.\n\n"
-            "/cancel to abort."
-        )
-        return BLOCKWORD_AWAITING_INPUT
-
-    async def _handle_blockword_input(
-        self, update: Update, context: ContextTypes.DEFAULT_TYPE
-    ) -> int:
-        """Handle follow-up message with keyword(s) after /blockword prompt."""
-        text = update.message.text.strip()
-        if not text:
-            await update.message.reply_text("No input received. Try again or /cancel.")
-            return BLOCKWORD_AWAITING_INPUT
-
-        await self._add_blocked_keywords(update, text)
-        return ConversationHandler.END
-
-    async def _handle_blockword_cancel(
-        self, update: Update, context: ContextTypes.DEFAULT_TYPE
-    ) -> int:
-        """Handle /cancel during blockword conversation."""
-        await update.message.reply_text("Cancelled.")
-        return ConversationHandler.END
-
-    async def _add_blocked_keywords(self, update: Update, text: str) -> None:
-        """Parse keyword input (one per line or comma-separated) and save each."""
-        raw_parts = re.split(r"[\n,]", text)
-        keywords = []
-        seen = set()
-        for part in raw_parts:
-            kw = part.strip().lower()
-            if kw and kw not in seen:
-                keywords.append(kw)
-                seen.add(kw)
-
-        if not keywords:
-            await update.message.reply_text("No valid keywords found.")
-            return
-
-        results = []
-        for kw in keywords:
-            try:
-                await self.add_blocked_keyword_callback(kw)
-                results.append(f"🚫 '{kw}' blocked")
-            except Exception as e:
-                logger.error(f"Error saving blocked keyword '{kw}': {e}")
-                results.append(f"❌ '{kw}' — error")
-
-        await update.message.reply_text("\n".join(results))
-
-    async def _handle_blockwords(
-        self, update: Update, context: ContextTypes.DEFAULT_TYPE
-    ) -> None:
-        """Handle /blockwords command to list blocked keywords."""
-        if not self.list_blocked_keywords_callback:
-            await update.message.reply_text("Keyword blocking not available.")
-            return
-
-        try:
-            keywords = await self.list_blocked_keywords_callback()
-        except Exception as e:
-            logger.error(f"Error fetching blocked keywords: {e}")
-            await update.message.reply_text("Error fetching blocked keywords.")
-            return
-
-        if not keywords:
-            await update.message.reply_text(
-                "No blocked keywords yet.\nUse /blockword to add some."
-            )
-            return
-
-        chat_id = str(update.effective_chat.id)
-        self._blockword_list[chat_id] = keywords
-        await update.message.reply_text(
-            f"🚫 <b>Blocked keywords</b> ({len(keywords)})\n"
-            "Tap to remove.",
-            reply_markup=self._make_blockword_buttons(keywords),
-            parse_mode="HTML",
-        )
-
-    @staticmethod
-    def _make_blockword_buttons(keywords: list[str]) -> InlineKeyboardMarkup:
-        """Build one-button-per-keyword inline keyboard keyed by index."""
-        buttons = [
-            [InlineKeyboardButton(f"✖ {kw}", callback_data=f"bkrm:{i}")]
-            for i, kw in enumerate(keywords)
-        ]
-        return InlineKeyboardMarkup(buttons)
-
-    async def _handle_blockword_remove(self, query, data: str) -> None:
-        """Handle tap on a blocked-keyword button: remove it and re-render."""
-        chat_id = str(query.message.chat_id)
-        keywords = self._blockword_list.get(chat_id)
-        if keywords is None:
-            await query.edit_message_text("Blocked keyword list expired. Run /blockwords again.")
-            return
-
-        try:
-            idx = int(data.split(":", 1)[1])
-        except (ValueError, IndexError):
-            return
-        if idx < 0 or idx >= len(keywords):
-            return
-
-        kw = keywords[idx]
-        if self.remove_blocked_keyword_callback:
-            try:
-                await self.remove_blocked_keyword_callback(kw)
-            except Exception as e:
-                logger.error(f"Error removing blocked keyword '{kw}': {e}")
-                return
-
-        remaining = [k for k in keywords if k != kw]
-        self._blockword_list[chat_id] = remaining
-
-        if not remaining:
-            del self._blockword_list[chat_id]
-            await query.edit_message_text("All blocked keywords removed.")
-            return
-
-        try:
-            await query.edit_message_reply_markup(
-                reply_markup=self._make_blockword_buttons(remaining),
-            )
-        except telegram.error.BadRequest:
-            pass
-
-    @staticmethod
-    def _format_stats_message(stats: list[dict], page: int = 1, per_page: int = 15) -> str:
-        """Format author stats into a paginated table.
-
-        Args:
-            stats: List of author stat dicts from get_author_stats()
-            page: Page number (1-indexed)
-            per_page: Authors per page
-
-        Returns:
-            Formatted HTML message string
-        """
-        total_authors = len(stats)
-        total_pages = max(1, (total_authors + per_page - 1) // per_page)
-        page = min(page, total_pages)
-
-        start = (page - 1) * per_page
-        end = start + per_page
-        page_stats = stats[start:end]
-
-        total_votes = sum(s["total_votes"] for s in stats)
-
-        lines = [f"Author Performance (Page {page}/{total_pages})\n"]
-        lines.append(f" #  {'Author':<16} Score  Up Dn  Avg")
-        lines.append("-" * 42)
-
-        for i, s in enumerate(page_stats, start=start + 1):
-            username = s["author_username"]
-            prefix = ""
-            if s["is_favorite"]:
-                prefix = "\u2b50"
-            elif s["is_muted"]:
-                prefix = "\U0001f507"
-
-            display = prefix + username
-            if len(display) > 15:
-                display = display[:14] + "\u2026"
-
-            score = f"{s['weighted_score']:.2f}"
-            avg = f"{s['avg_filter_score']:.0f}" if s["avg_filter_score"] else " -"
-
-            lines.append(
-                f"{i:>2}  {display:<16} {score}  {s['up']:>2} {s['down']:>2}  {avg:>3}"
-            )
-
-        lines.append("")
-        lines.append("Score = weighted signal ratio (tweets 1.0x, RTs 0.5x)")
-        lines.append(f"Total authors: {total_authors} | Total votes: {total_votes}")
-        if total_pages > 1:
-            lines.append(f"/stats {page + 1 if page < total_pages else 1} \u2192 {'next' if page < total_pages else 'first'} page")
-
-        return "<pre>" + "\n".join(lines) + "</pre>"
-
-    async def _handle_feedback(
-        self, update: Update, context: ContextTypes.DEFAULT_TYPE
-    ) -> None:
-        """Handle feedback button press."""
-        query = update.callback_query
-        try:
-            await query.answer()
-        except (telegram.error.BadRequest, telegram.error.NetworkError):
-            logger.warning(f"Callback query answer failed, processing anyway: {query.data}")
-
-        data = query.data
-
-        try:
-            await self._dispatch_feedback(query, data)
-        except (telegram.error.BadRequest, telegram.error.NetworkError) as e:
-            logger.debug(f"Error handling callback {data}: {e}")
-
-    async def _dispatch_feedback(
-        self, query, data: str
-    ) -> None:
-        """Dispatch feedback callback by type. Caller catches BadRequest."""
-        # Handle newsletter section toggle: "nsec:{index|done|cancel}"
-        if data.startswith("nsec:"):
-            await self._handle_section_toggle(query, data)
-            return
-
-        # Handle blocked-keyword removal: "bkrm:{index}"
-        if data.startswith("bkrm:"):
-            await self._handle_blockword_remove(query, data)
-            return
-
-        # Handle vote: "vote:{tweet_id}:{up|down}"
-        if data.startswith("vote:"):
-            parts = data.split(":")
-            if len(parts) != 3:
-                return
-
-            _, tweet_id, vote = parts
-
-            if vote == "up":
-                # Thumbs up - show category buttons
-                await query.edit_message_reply_markup(
-                    reply_markup=InlineKeyboardMarkup([
-                        [
-                            InlineKeyboardButton(
-                                "Tech content",
-                                callback_data=f"reason:{tweet_id}:up:tech"
-                            ),
-                            InlineKeyboardButton(
-                                "Non-tech insight",
-                                callback_data=f"reason:{tweet_id}:up:non_tech"
-                            ),
-                        ],
-                        [
-                            InlineKeyboardButton(
-                                "Soft skills",
-                                callback_data=f"reason:{tweet_id}:up:soft_skills"
-                            ),
-                            InlineKeyboardButton(
-                                "Life wisdom",
-                                callback_data=f"reason:{tweet_id}:up:life_wisdom"
-                            ),
-                        ],
-                    ])
-                )
-
-            elif vote == "down":
-                # Thumbs down - show reason buttons
-                await query.edit_message_reply_markup(
-                    reply_markup=InlineKeyboardMarkup([
-                        [
-                            InlineKeyboardButton(
-                                "No tech content",
-                                callback_data=f"reason:{tweet_id}:down:no_tech"
-                            ),
-                            InlineKeyboardButton(
-                                "Event/promo",
-                                callback_data=f"reason:{tweet_id}:down:event_promo"
-                            ),
-                        ],
-                        [
-                            InlineKeyboardButton(
-                                "Low quality",
-                                callback_data=f"reason:{tweet_id}:down:low_quality"
-                            ),
-                            InlineKeyboardButton(
-                                "Not relevant",
-                                callback_data=f"reason:{tweet_id}:down:not_relevant"
-                            ),
-                        ],
-                    ])
-                )
-
-        # Handle vote reason: "reason:{tweet_id}:{up|down}:{reason_code}"
-        elif data.startswith("reason:"):
-            parts = data.split(":")
-            if len(parts) != 4:
-                return
-
-            _, tweet_id, vote, reason_code = parts
-
-            reason_labels = {
-                # Upvote reasons
-                "tech": "Tech content",
-                "non_tech": "Non-tech insight",
-                "soft_skills": "Soft skills",
-                "life_wisdom": "Life wisdom",
-                # Downvote reasons
-                "no_tech": "No tech content",
-                "event_promo": "Event/promo",
-                "low_quality": "Low quality",
-                "not_relevant": "Not relevant",
-            }
-            reason = reason_labels.get(reason_code, reason_code)
-            vote_emoji = "👍" if vote == "up" else "👎"
-            message_id = query.message.message_id
-
-            # Cancel any existing pending feedback for this tweet
-            if tweet_id in self._pending_feedback:
-                self._pending_feedback[tweet_id]["task"].cancel()
-
-            # Show confirmation with undo button
-            await query.edit_message_reply_markup(
-                reply_markup=InlineKeyboardMarkup([
-                    [
-                        InlineKeyboardButton(
-                            f"{vote_emoji} {reason}", callback_data="voted"
-                        ),
-                        InlineKeyboardButton(
-                            "↩ Undo", callback_data=f"undo:{tweet_id}"
-                        ),
-                    ]
-                ])
-            )
-
-            # Schedule feedback save after 10 seconds
-            async def _save_after_delay(
-                t_id=tweet_id, v=vote, r=reason, m_id=message_id, emoji=vote_emoji
-            ):
-                await asyncio.sleep(10)
-                if t_id not in self._pending_feedback:
-                    return
-
-                if self.feedback_callback:
-                    try:
-                        await self.feedback_callback(
-                            tweet_id=t_id,
-                            vote=v,
-                            telegram_message_id=m_id,
-                            notes=r,
-                        )
-                        logger.info(
-                            f"Feedback recorded: tweet={t_id}, vote={v}, reason={r}"
-                        )
-                    except Exception as e:
-                        logger.error(f"Error recording feedback: {e}")
-
-                # Remove undo button
-                try:
-                    await self.application.bot.edit_message_reply_markup(
-                        chat_id=self.chat_id,
-                        message_id=m_id,
-                        reply_markup=InlineKeyboardMarkup([
-                            [InlineKeyboardButton(
-                                f"{emoji} {r}", callback_data="voted"
-                            )]
-                        ]),
-                    )
-                except Exception:
-                    pass
-
-                self._pending_feedback.pop(t_id, None)
-
-            task = asyncio.create_task(_save_after_delay())
-            self._pending_feedback[tweet_id] = {
-                "task": task,
-                "message_id": message_id,
-            }
-
-        # Handle like reason: "like_reason:{tweet_id}:{reason_code}"
-        elif data.startswith("like_reason:"):
-            parts = data.split(":")
-            if len(parts) != 3:
-                return
-
-            _, tweet_id, reason_code = parts
-
-            reason_labels = {
-                "tech": "Tech content",
-                "non_tech": "Non-tech insight",
-                "soft_skills": "Soft skills",
-                "life_wisdom": "Life wisdom",
-            }
-            reason = reason_labels.get(reason_code, reason_code)
-            message_id = query.message.message_id
-
-            # Cancel any existing pending feedback for this tweet
-            if tweet_id in self._pending_feedback:
-                self._pending_feedback[tweet_id]["task"].cancel()
-
-            # Show confirmation with undo button
-            await query.edit_message_reply_markup(
-                reply_markup=InlineKeyboardMarkup([
-                    [
-                        InlineKeyboardButton(
-                            f"👍 {reason}", callback_data="voted"
-                        ),
-                        InlineKeyboardButton(
-                            "↩ Undo", callback_data=f"like_undo:{tweet_id}"
-                        ),
-                    ]
-                ])
-            )
-
-            # Schedule feedback save after 10 seconds
-            async def _save_like_after_delay(
-                t_id=tweet_id, r=reason, m_id=message_id
-            ):
-                await asyncio.sleep(10)
-                if t_id not in self._pending_feedback:
-                    return
-
-                if self.feedback_callback:
-                    try:
-                        await self.feedback_callback(
-                            tweet_id=t_id,
-                            vote="up",
-                            telegram_message_id=m_id,
-                            notes=r,
-                        )
-                        logger.info(
-                            f"Like feedback recorded: tweet={t_id}, reason={r}"
-                        )
-                    except Exception as e:
-                        logger.error(f"Error recording like feedback: {e}")
-
-                # Remove undo button
-                try:
-                    await self.application.bot.edit_message_reply_markup(
-                        chat_id=self.chat_id,
-                        message_id=m_id,
-                        reply_markup=InlineKeyboardMarkup([
-                            [InlineKeyboardButton(
-                                f"👍 {r}", callback_data="voted"
-                            )]
-                        ]),
-                    )
-                except Exception:
-                    pass
-
-                self._pending_feedback.pop(t_id, None)
-
-            task = asyncio.create_task(_save_like_after_delay())
-            self._pending_feedback[tweet_id] = {
-                "task": task,
-                "message_id": message_id,
-            }
-
-        # Handle like undo: "like_undo:{tweet_id}"
-        elif data.startswith("like_undo:"):
-            parts = data.split(":")
-            if len(parts) != 2:
-                return
-
-            _, tweet_id = parts
-
-            if tweet_id not in self._pending_feedback:
-                logger.info(f"Like undo too late: tweet={tweet_id}, already saved")
-                return
-
-            self._pending_feedback[tweet_id]["task"].cancel()
-            del self._pending_feedback[tweet_id]
-
-            await query.edit_message_reply_markup(
-                reply_markup=self._make_like_reason_buttons(tweet_id)
-            )
-            logger.info(f"Like feedback undone: tweet={tweet_id}")
-
-        # Handle undo: "undo:{tweet_id}"
-        elif data.startswith("undo:"):
-            parts = data.split(":")
-            if len(parts) != 2:
-                return
-
-            _, tweet_id = parts
-
-            if tweet_id not in self._pending_feedback:
-                # Too late — feedback already saved
-                logger.info(f"Undo too late: tweet={tweet_id}, already saved")
-                return
-
-            self._pending_feedback[tweet_id]["task"].cancel()
-            del self._pending_feedback[tweet_id]
-
-            username = self._tweet_authors.get(tweet_id, "unknown")
-            await query.edit_message_reply_markup(
-                reply_markup=self._make_tweet_buttons(tweet_id, username)
-            )
-            logger.info(f"Feedback undone: tweet={tweet_id}")
-
-        # Handle favorite author: "fav:{username}:{tweet_id}"
-        elif data.startswith("fav:"):
-            parts = data.split(":")
-            if len(parts) != 3:
-                return
-
-            _, username, tweet_id = parts
-
-            state = None
-            if self.favorite_author_callback:
-                try:
-                    state = await self.favorite_author_callback(username=username)
-                    logger.info(f"Toggle favorite @{username} → {state}")
-                except Exception as e:
-                    logger.error(f"Error toggling favorite author: {e}")
-
-            label = f"⭐ @{username}" if state == "favorited" else f"⭐ Author"
-            await query.edit_message_reply_markup(
-                reply_markup=self._make_tweet_buttons(tweet_id, username, fav_label=label)
-            )
-
-        # Handle mute author: "mute:{username}:{tweet_id}"
-        elif data.startswith("mute:"):
-            parts = data.split(":")
-            if len(parts) != 3:
-                return
-
-            _, username, tweet_id = parts
-
-            state = None
-            if self.mute_author_callback:
-                try:
-                    state = await self.mute_author_callback(username=username)
-                    logger.info(f"Toggle mute @{username} → {state}")
-                except Exception as e:
-                    logger.error(f"Error toggling mute author: {e}")
-
-            label = f"🔇 @{username}" if state == "muted" else f"🔇 Mute"
-            await query.edit_message_reply_markup(
-                reply_markup=self._make_tweet_buttons(tweet_id, username, mute_label=label)
-            )
 
     async def send_tweet(
         self,
@@ -1981,7 +359,7 @@ class TelegramCurator:
 
         Args:
             tweet: Tweet dictionary with:
-                - tweet_id: Twitter ID
+                - item_id: Twitter ID
                 - author_username: Author's username
                 - author_name: Author's display name
                 - text: Tweet text
@@ -2000,10 +378,10 @@ class TelegramCurator:
         message = self._format_tweet_message(tweet, position=position)
 
         # Store author mapping for undo functionality
-        self._tweet_authors[tweet["tweet_id"]] = tweet["author_username"]
+        self._tweet_authors[tweet["item_id"]] = tweet["author_username"]
 
         # Create inline keyboard with feedback buttons
-        keyboard = self._make_tweet_buttons(tweet["tweet_id"], tweet["author_username"])
+        keyboard = self._make_tweet_buttons(tweet["item_id"], tweet["author_username"])
 
         try:
             sent_message = await self.application.bot.send_message(
@@ -2013,167 +391,12 @@ class TelegramCurator:
                 parse_mode="HTML",
                 disable_web_page_preview=True,
             )
-            logger.info(f"Sent tweet {tweet['tweet_id']} to Telegram")
+            self._message_items[sent_message.message_id] = tweet["item_id"]
+            logger.info(f"Sent tweet {tweet['item_id']} to Telegram")
             return sent_message.message_id
         except Exception as e:
-            logger.error(f"Error sending tweet {tweet['tweet_id']} to Telegram: {e}")
+            logger.error(f"Error sending tweet {tweet['item_id']} to Telegram: {e}")
             return None
-
-    @staticmethod
-    def _make_tweet_buttons(
-        tweet_id: str,
-        username: str,
-        fav_label: str = "⭐ Author",
-        mute_label: str = "🔇 Mute",
-    ) -> InlineKeyboardMarkup:
-        """Build the two-row inline keyboard for a tweet.
-
-        Args:
-            tweet_id: Twitter ID
-            username: Author username
-            fav_label: Label for favorite button
-            mute_label: Label for mute button
-
-        Returns:
-            InlineKeyboardMarkup with two rows
-        """
-        return InlineKeyboardMarkup([
-            [
-                InlineKeyboardButton("👍", callback_data=f"vote:{tweet_id}:up"),
-                InlineKeyboardButton("👎", callback_data=f"vote:{tweet_id}:down"),
-            ],
-            [
-                InlineKeyboardButton(fav_label, callback_data=f"fav:{username}:{tweet_id}"),
-                InlineKeyboardButton(mute_label, callback_data=f"mute:{username}:{tweet_id}"),
-            ],
-        ])
-
-    def _format_tweet_message(
-        self,
-        tweet: dict,
-        position: Optional[tuple[int, int]] = None,
-    ) -> str:
-        """Format tweet for Telegram message.
-
-        Args:
-            tweet: Tweet dictionary
-            position: Optional (index, total) for digest numbering, 1-indexed.
-
-        Returns:
-            Formatted message string (HTML)
-        """
-        metrics = tweet.get("metrics", {})
-
-        # Escape HTML special characters in text
-        text = self._escape_html(tweet["text"])
-
-        likes = metrics.get("likes", 0)
-        retweets = metrics.get("retweets", 0)
-        replies = metrics.get("replies", 0)
-
-        # Format engagement numbers
-        likes_str = self._format_number(likes)
-        retweets_str = self._format_number(retweets)
-        replies_str = self._format_number(replies)
-
-        prefix = f"<b>[{position[0]}/{position[1]}]</b>\n" if position else ""
-        message = (
-            f"{prefix}"
-            f"<b>@{tweet['author_username']}</b> | "
-            f"<a href=\"{tweet['url']}\">View Tweet</a>\n\n"
-            f"{self._retweet_header(tweet)}{self._quote_header(tweet)}"
-        )
-
-        # Show article info for X Articles
-        article = tweet.get("article")
-        if article:
-            title = self._escape_html(article["title"])
-            article_url = article.get("url")
-            if article_url:
-                message += f"<b>[Article]</b> <a href=\"{article_url}\">{title}</a>\n"
-            else:
-                message += f"<b>[Article]</b> {title}\n"
-            body = article.get("body", "")
-            if body:
-                preview = self._escape_html(body[:300])
-                if len(body) > 300:
-                    preview += "..."
-                message += f"{preview}\n"
-        else:
-            message += text
-
-        # Append quoted tweet block if present
-        quoted = tweet.get("quoted_tweet")
-        if quoted:
-            qt_author = self._escape_html(quoted["author_username"])
-            qt_text = self._escape_html(quoted["text"])
-            qt_lines = qt_text.split("\n")
-            qt_block = "\n".join(f"┃ {line}" for line in qt_lines)
-            message += (
-                f"\n\n┃ <b>@{qt_author}:</b>\n"
-                f"{qt_block}"
-            )
-
-        message += f"\n\n❤️ {likes_str}  🔁 {retweets_str}  💬 {replies_str}"
-        return message
-
-    def _retweet_header(self, tweet: dict) -> str:
-        """Render a "🔁 via @original_author" header for retweets, else empty.
-
-        Falls back to raw_data.retweeted_from for DB-retrieved tweets where the
-        top-level field isn't reconstructed.
-        """
-        if not tweet.get("is_retweet"):
-            return ""
-        retweeted_from = tweet.get("retweeted_from")
-        if not retweeted_from:
-            raw = tweet.get("raw_data") or {}
-            retweeted_from = raw.get("retweeted_from")
-        if not retweeted_from:
-            return "🔁 <i>retweet</i>\n\n"
-        original_author = self._escape_html(retweeted_from.get("author_username", ""))
-        return f"🔁 via <b>@{original_author}</b>\n\n"
-
-    def _quote_header(self, tweet: dict) -> str:
-        """Render a "💬 quoting @quoted_author" header for quote tweets, else empty."""
-        quoted = tweet.get("quoted_tweet")
-        if not quoted:
-            return ""
-        quoted_author = self._escape_html(quoted.get("author_username", ""))
-        return f"💬 quoting <b>@{quoted_author}</b>\n\n"
-
-    @staticmethod
-    def _escape_html(text: str) -> str:
-        """Escape HTML special characters.
-
-        Args:
-            text: Raw text
-
-        Returns:
-            HTML-escaped text
-        """
-        text = html.unescape(text)
-        return (
-            text.replace("&", "&amp;")
-            .replace("<", "&lt;")
-            .replace(">", "&gt;")
-        )
-
-    @staticmethod
-    def _format_number(num: int) -> str:
-        """Format large numbers with K/M suffix.
-
-        Args:
-            num: Number to format
-
-        Returns:
-            Formatted string
-        """
-        if num >= 1_000_000:
-            return f"{num / 1_000_000:.1f}M"
-        elif num >= 1_000:
-            return f"{num / 1_000:.1f}K"
-        return str(num)
 
     async def send_daily_digest(
         self,
@@ -2188,7 +411,7 @@ class TelegramCurator:
             delay_seconds: Delay between messages (default 1s)
 
         Returns:
-            Flat list of (tweet, message_id) tuples for mark_tweet_sent.
+            Flat list of (tweet, message_id) tuples for mark_item_sent.
         """
         total_tweets = sum(len(g) for g in tweet_groups)
         if not total_tweets:
@@ -2224,7 +447,7 @@ class TelegramCurator:
 
             for tweet in group:
                 flat_index += 1
-                message_id = await self.send_tweet(
+                message_id = await self._send_item(
                     tweet, position=(flat_index, total_tweets),
                 )
                 results.append((tweet, message_id))
@@ -2262,7 +485,9 @@ class TelegramCurator:
 
         logger.info("Starting Telegram bot polling...")
         await self.application.start()
-        await self.application.updater.start_polling(bootstrap_retries=3)
+        await self.application.updater.start_polling(
+            bootstrap_retries=3, allowed_updates=Update.ALL_TYPES,
+        )
 
         # Keep running until interrupted
         try:
@@ -2275,6 +500,10 @@ class TelegramCurator:
 
     async def run_webhook(self, webhook_url: str, port: int) -> None:
         """Start the bot in webhook mode.
+
+        Runs our own HTTP server (see ``src/webhook_server.py``) so the same
+        port serves Telegram updates at ``/<token>`` and click-tracking
+        redirects at ``/r/<item_id>``.
 
         Args:
             webhook_url: Public HTTPS base URL Telegram will POST updates to
@@ -2289,13 +518,12 @@ class TelegramCurator:
         url_path = self.bot_token
         full_url = f"{webhook_url.rstrip('/')}/{url_path}"
 
-        logger.info(f"Starting Telegram bot webhook on port {port}, url={webhook_url}/<token>")
+        logger.info(f"Starting webhook server on port {port}, url={webhook_url}/<token>")
+        app = make_app(self.application, url_path, self.resolve_open)
+        server = app.listen(port, address="0.0.0.0")
         await self.application.start()
-        await self.application.updater.start_webhook(
-            listen="0.0.0.0",
-            port=port,
-            url_path=url_path,
-            webhook_url=full_url,
+        await self.application.bot.set_webhook(
+            url=full_url, allowed_updates=Update.ALL_TYPES,
         )
 
         try:
@@ -2304,6 +532,7 @@ class TelegramCurator:
         except asyncio.CancelledError:
             pass
         finally:
+            server.stop()
             await self.shutdown()
 
     async def shutdown(self) -> None:

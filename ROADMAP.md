@@ -32,9 +32,12 @@
 - [x] Inject RAG context into Claude prompt (liked/disliked tweets with similarity scores)
 - [x] Backfill script for existing feedback (`scripts/backfill_embeddings.py`)
 - [x] Graceful fallback: works without OpenAI key (uses V1 prompt, no RAG)
+- [x] Per-item nearest voted neighbours attached to each scored item (replaced 5 global examples)
+- [x] Offline eval against all votes: `scripts/eval_prompt.py` (AUC, recall, bands)
+- [x] Exploration: random below-threshold items sent each run, marked 🎲
 - [ ] Track accuracy: % of sent tweets that got 👍
 
-### A/B Testing Framework ✅
+### A/B Testing Framework (retired 2026-10-30 — see AB_TESTING_PLAN.md)
 - [x] Shadow scoring: score every tweet with control + challenger prompt, send based on control only
 - [x] Prompt registry (`PROMPT_REGISTRY` in `claude_filter.py`) for named prompt variants
 - [x] `ab_test_scores` table with paired entries per experiment
@@ -43,7 +46,6 @@
 - [x] Analysis report: score gap, precision/recall/F1, Wilcoxon signed-rank test
 - [x] CLI: `--ab-report <experiment_id>`
 - [x] 5 prompt variants: V1 (bio+rubric), V2 (V1+RAG), V3 (interests-only), V4 (binary), V5 (strict)
-- [ ] Auto-promote winning prompt after N votes
 
 ### Keyword Blocklist ✅
 - [x] `blocked_keywords` table + CRUD in DatabaseClient
@@ -77,16 +79,38 @@
 - [x] /starred command (list favorite authors)
 - [x] /star command (add/toggle favorite author — supports username, @mention, URL, multiple authors)
 - [ ] /unfav command (remove favorite author) — covered by /star toggle
-- [ ] Reply to tweet message to add notes
+- [x] Reply to tweet message to add notes
+- [x] Emoji reactions as votes (🔥 strong / 👍 / 👎), removal retracts
+- [x] Model-proposed vote reason with ✅ / ✏️ confirm (replaced fixed reason buttons)
+- [x] Click tracking via /r/<item_id> redirect → `open` signals
+
+## Phase 4: General preference store ✅ (2026-10-31)
+
+- [x] `items` / `signals` / `item_embeddings` / `preference_profiles` schema with migration from legacy tables
+- [x] LLM domain tagging on every scored item
+- [x] Capture by sending: URLs, forwarded posts, free text → liked items
+- [x] Import scripts: Raindrop, Readwise, generic CSV, Twitter archive likes
+- [x] Weekly compiled per-domain profiles injected into scoring; `--export-preferences PREFERENCES.md`
+- [x] MCP server: get_profile, search_liked, score_items, record_signal
+
+## Phase 5: Feeds and newsletters ✅ (2026-10-31)
+
+- [x] `feeds` table, `/feed add|list|remove`, RSS/Atom discovery from a site URL
+- [x] Daily run polls feeds; new entries fetched in full and scored like tweets
+- [x] `/newsletter` = LLM extraction of linked items from page text (HTML section heuristics and `/newsletter_prefs` removed)
+- [x] Newsletters by email: forward to a mailbox, bot reads it over IMAP, same extraction pipeline, one digest per issue
+- [x] Explicit capture grammar (`:like` / `:dislike` / `:star` / `:note`, URL + words = like + reason)
+- [x] Default model `claude-sonnet-5-5`, `FILTER_THRESHOLD` 50 (eval-calibrated; 60 for Sonnet 4.6)
 
 ## Future Ideas
 
 - [x] Migrate from tweepy to official X SDK (xdk) - see `docs/xdk-migration-notes.md`
 - [ ] Multi-account support (curate multiple Twitter accounts)
 - [ ] Topic clustering (group similar tweets together)
-- [ ] Export to Notion/Obsidian
+- [x] Export: `--export-preferences PREFERENCES.md` (Notion/Obsidian can ingest Markdown)
 - [ ] Web dashboard for analytics
 - [x] A/B test different prompts
 - [ ] Auto-adjust threshold based on feedback ratio
 - [ ] Support for Twitter lists (not just home timeline)
+- [x] Email ingestion for newsletters: IMAP mailbox read after the digest and on `/inbox` (2026-10-31)
 - [ ] Keyword alerts (always show tweets mentioning X)

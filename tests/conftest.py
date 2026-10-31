@@ -7,7 +7,7 @@ import pytest
 def sample_tweet():
     """A single normalized tweet dict as produced by TwitterClient._normalize_tweet."""
     return {
-        "tweet_id": "123456789",
+        "item_id": "123456789",
         "author_username": "vitalikbuterin",
         "author_name": "Vitalik Buterin",
         "text": "New EIP proposal for blob fee market adjustments",
@@ -36,7 +36,7 @@ def sample_tweet():
 def sample_tweets(sample_tweet):
     """Multiple tweet dicts for batch operations."""
     tweet2 = {
-        "tweet_id": "987654321",
+        "item_id": "987654321",
         "author_username": "protolambda",
         "author_name": "protolambda",
         "text": "Based rollup sequencer design exploration thread",
@@ -48,7 +48,7 @@ def sample_tweets(sample_tweet):
         "raw_data": {"id": "987654321", "text": "Based rollup sequencer design exploration thread", "author_id": "222", "created_at": "2025-01-15T11:00:00+00:00", "entities": None, "conversation_id": None},
     }
     tweet3 = {
-        "tweet_id": "111222333",
+        "item_id": "111222333",
         "author_username": "memecoinshiller",
         "author_name": "Meme Lord",
         "text": "BUY $DOGE TO THE MOON 🚀🚀🚀",
@@ -66,7 +66,7 @@ def sample_tweets(sample_tweet):
 def sample_retweet():
     """A retweet dict."""
     return {
-        "tweet_id": "444555666",
+        "item_id": "444555666",
         "author_username": "someuser",
         "author_name": "Some User",
         "text": "RT @vitalikbuterin: New EIP proposal...",
@@ -83,7 +83,7 @@ def sample_retweet():
 def sample_quote_tweet():
     """A tweet that quotes another tweet."""
     return {
-        "tweet_id": "555666777",
+        "item_id": "555666777",
         "author_username": "researcher",
         "author_name": "Researcher",
         "text": "This is a great analysis!",
@@ -93,7 +93,7 @@ def sample_quote_tweet():
             "author_username": "vitalikbuterin",
             "author_name": "Vitalik Buterin",
             "text": "Deep dive into blob fee market dynamics and EIP-4844 implications",
-            "tweet_id": "888999000",
+            "item_id": "888999000",
         },
         "metrics": {"likes": 300, "retweets": 50, "replies": 20, "views": 15000},
         "url": "https://twitter.com/researcher/status/555666777",
@@ -112,7 +112,7 @@ def sample_quote_tweet():
 def claude_scores():
     """Sample Claude scoring response (parsed)."""
     return [
-        {"tweet_id": "123456789", "score": 85, "reason": "Relevant EIP discussion"},
-        {"tweet_id": "987654321", "score": 92, "reason": "Based rollup design — core interest"},
-        {"tweet_id": "111222333", "score": 10, "reason": "Meme coin promotion"},
+        {"item_id": "123456789", "score": 85, "reason": "Relevant EIP discussion"},
+        {"item_id": "987654321", "score": 92, "reason": "Based rollup design — core interest"},
+        {"item_id": "111222333", "score": 10, "reason": "Meme coin promotion"},
     ]

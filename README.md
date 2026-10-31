@@ -1,14 +1,20 @@
-# Content Curator
+# Preference Curator
 
-AI-powered content curation that filters your Twitter timeline and blog posts using Claude and delivers relevant content to Telegram.
+A personal preference store with a Twitter curator on top. Claude filters your
+timeline and delivers the good parts to Telegram; everything you vote on, react
+to, send in, or import becomes a signal. Those signals are compiled into a
+preference profile that drives the filter, and that any agent can read over MCP.
 
 ## Features
 
-- **Smart Filtering**: Claude AI scores tweets and blog posts based on your interests (blockchain research, Ethereum scaling, smart contract security)
-- **Telegram Delivery**: Filtered content sent to your Telegram with engagement metrics
-- **Blog Post Support**: Like individual blog posts or parse entire newsletters to score and review all articles
-- **Feedback Loop**: Thumbs up/down buttons to improve future curation via RAG
-- **Persistent Storage**: All tweets, blog posts, and feedback stored in Supabase
+- **Smart filtering**: Claude scores tweets 0-100 against your compiled preference profile, seeing each item's nearest past votes. Strict tool-use output, no JSON parsing.
+- **Telegram delivery** with 🔥/👍/👎 buttons, emoji reactions as votes, model-proposed reasons you confirm in one tap, reply-to-note, and click tracking.
+- **Capture anything**: send the bot a URL (with your reason in the same message), a forwarded post, or `:note …` and it is stored as a voted item in the same store.
+- **Newsletters by email**: forward issues to a mailbox the bot reads; every linked article is extracted, scored and delivered as its own small digest.
+- **Imports**: Raindrop, Readwise, generic CSV, or your Twitter archive's likes.
+- **Compiled profiles**: a weekly job turns votes, reasons and notes into per-domain Markdown profiles (`PREFERENCES.md`), versioned in the database.
+- **Agent access**: an MCP server exposes `get_profile`, `search_liked`, `score_items`, `record_signal`.
+- **Measurable**: offline eval against all votes, plus daily exploration items so recall below the threshold is measured too.
 
 ## Prerequisites
 
@@ -66,12 +72,12 @@ cp .env.example .env
 ### 5. Supabase Database
 
 1. Go to [Supabase](https://supabase.com/) and create a project
-2. Go to SQL Editor and run the schema:
-  ```bash
-   python scripts/setup_database.py
-  ```
-   Copy the printed SQL and paste into Supabase SQL Editor.
-   If you've previously run this script, re-run it now to add the `error_log` table introduced for persistent error tracking. All DDL is idempotent (`IF NOT EXISTS`); wrap any `CREATE POLICY "anon_all"` lines in `DROP POLICY IF EXISTS ...;` if the policy was already created.
+2. Go to SQL Editor and run the schema.
+   - **Fresh install**: `python scripts/setup_database.py` prints the full schema; paste it into the SQL Editor.
+   - **Existing deployment**: run the files in `scripts/migrations/` in date order instead. They add
+     `items`, `signals`, `item_embeddings`, `preference_profiles` and copy your `tweets`,
+     `feedback` and `tweet_embeddings` rows into them. The legacy tables are left in place; drop
+     them yourself once you are happy. All migrations are idempotent.
 3. Get your credentials from Settings > API:
   - `SUPABASE_URL`: Project URL
   - `SUPABASE_KEY`: anon/public key
@@ -102,7 +108,7 @@ SUPABASE_KEY=your_anon_key
 # Configuration (optional - defaults shown)
 FETCH_HOURS=24
 MAX_TWEETS=100
-FILTER_THRESHOLD=70
+FILTER_THRESHOLD=50
 SCHEDULE_HOUR=9
 SCHEDULE_TIMEZONE=Asia/Taipei
 SCHEDULE_SKIP_WEEKDAYS=          # e.g. "sunday" or "saturday,sunday"
@@ -162,19 +168,95 @@ python main.py --bot-only
 | Command | Description |
 | --- | --- |
 | `/star username` | Toggle starred status for an author. Accepts username, @mention, or profile/tweet URL. |
-| `/like url` | Upvote a tweet or blog post with a reason category. Accepts tweet URLs, blog post URLs, or numeric tweet IDs. |
-| `/newsletter url` | Parse a newsletter, score all articles with Claude, and send them for review. On first use of a domain, prompts to select sections to ignore. |
-| `/newsletter_prefs domain_or_url` | Edit ignored sections for a newsletter. Accepts a domain name or a full URL to re-extract sections. |
-| `/thread tweet_url` | Fetch a full thread and display it as a single compiled message. Give it the last tweet in the thread. |
+| `/like url` | Upvote a tweet, article or any URL. Accepts tweet URLs, other URLs, or numeric tweet IDs. |
+| `/newsletter url` | Read a newsletter issue published on the web, let Claude extract every linked item, score them, send the ones above the threshold. |
+| `/inbox` | Process forwarded newsletter emails now (also runs after each daily digest). |
+| `/feed add url` | Subscribe to a site or feed (RSS/Atom discovered automatically). `/feed list`, `/feed remove N`. |
+| `/thread tweet_url` | Fetch a full thread and display it as a single compiled message. |
 | `/starred` | List all currently starred authors. |
-| `/blockword` | Block keyword(s) from the pipeline. Paste one per line or comma-separated. Whole-word, case-insensitive. Starred authors are exempt. |
+| `/blockword` | Block keyword(s) from the pipeline. Whole-word, case-insensitive. Starred authors are exempt. |
 | `/blockwords` | List blocked keywords; tap a keyword to remove it. |
 | `/stats` | Show author performance stats (paginated). |
 | `/help` | Show help message with available commands. |
 
-Inline buttons on delivered content allow thumbs up/down voting with reason categories, starring/muting authors, and undoing recent votes.
+**You rarely need commands.** Plain messages follow a small, explicit grammar
+(no guessing from word counts):
 
-**Shortcut**: you can omit the command and just send a message — tweet URLs, blog URLs, and numeric tweet IDs are treated as `/like`, while profile URLs, `@mentions`, and plain usernames are treated as `/star`. Mixed tokens in one message are dispatched accordingly.
+| You send | What happens |
+| --- | --- |
+| A message containing a URL, e.g. `great read https://… the preconf section` | Every URL (tweet, article, anything) is fetched, scored, stored and upvoted; the other words are saved as your reason, so no reason prompt follows |
+| `:like URL [why]` / `:dislike URL [why]` (`:down` works too) | Same, with the vote stated explicitly |
+| A profile URL | Author starred |
+| `:star @handle …` (or profile URLs; several allowed) | Authors starred (toggle) |
+| `:note your thought` | Stored as a note item, upvoted |
+| A forwarded post (channel, user) | Stored as an item with the origin, upvoted |
+| A reply to a delivered item | Saved as a note on that item |
+| Anything else | Not stored; the bot replies with this grammar |
+
+A bare `@handle`, a bare tweet id or a paragraph without a verb is deliberately
+*not* interpreted. If the words around a URL are only a comment, they still become
+the reason; that is the point. After a vote with no reason the bot proposes one and
+you confirm or edit it.
+
+### Newsletters and feeds
+
+The old approach parsed Substack section headings with HTML heuristics and scored
+title-plus-blurb. It is gone. Now:
+
+- **`/feed add <site or feed URL>`** subscribes to the underlying blog. New entries are fetched
+  in full text during the daily run and scored exactly like tweets (threshold, exploration,
+  neighbours, votes all apply). Most newsletters are digests of a handful of blogs; follow
+  those directly and you get the articles a day earlier, with full text.
+- **Email forwarding** for digests you receive by mail (ETH Daily, Substacks, MailerLite
+  letters). Point the bot at a mailbox over IMAP (`EMAIL_IMAP_HOST/USER/PASSWORD`, optional
+  `EMAIL_IMAP_FOLDER`), then either forward issues there or set a mail filter that files them
+  into that folder. After each daily digest (and on `/inbox`) every unseen message is read,
+  one model call extracts the linked items (click-tracking links are resolved to their
+  destinations first), each is scored, and the ones above the threshold arrive as a small
+  digest headed by the issue's subject. Messages are marked read only once processed, so a
+  failed run retries them. Gmail: enable IMAP, create an app password, and use the label
+  name as the folder.
+- **`/newsletter <issue URL>`** does the same for an issue published on the web.
+
+```bash
+# Feeds table (existing deployments)
+scripts/migrations/2026-10-31_phase4_feeds.sql
+```
+
+### Importing what you already liked
+
+```bash
+python scripts/import_items.py raindrop raindrop.csv
+python scripts/import_items.py readwise reader.csv
+python scripts/import_items.py csv likes.csv --name pocket         # any CSV with a url column
+python scripts/import_items.py twitter-archive data/like.js --username you
+python scripts/import_items.py raindrop raindrop.csv --dry-run     # parse only
+```
+
+Each row becomes an item plus an upvote (`source = import:<name>`) and an embedding when
+`OPENAI_API_KEY` is set (otherwise run `scripts/backfill_embeddings.py` later).
+Add `--tag-domains` to have Claude assign domains during import.
+
+### Compiled preference profiles
+
+Votes, reasons and notes are compiled per domain (`ethereum-protocol`, `crypto`, `software`,
+`ai`, `science`, `economics`, `politics`, `culture`, `life`, `other`) into Markdown profiles.
+The scoring prompt injects the latest profiles (`PROFILE_SOURCE=compiled`); the static baseline
+in `src/claude_filter.py` is only the fallback.
+
+```bash
+python main.py --compile-profile                    # recompile now (also runs weekly in --schedule mode)
+python main.py --export-preferences PREFERENCES.md  # write the latest profiles as one Markdown file
+```
+
+### Agent access (MCP)
+
+```bash
+claude mcp add preferences -- "$PWD/.venv/bin/python" -m src.mcp_server
+```
+
+Tools: `get_profile`, `search_liked`, `score_items`, `record_signal`, `list_domains`.
+See [docs/mcp.md](docs/mcp.md).
 
 ### Count Timeline Tweets
 
@@ -190,22 +272,26 @@ python scripts/count_twitter_timeline.py --hours 48 --max 300
 
 Use this to check if `MAX_TWEETS` is high enough to capture all your timeline activity.
 
-### A/B Test Prompts
+### Offline Prompt Evaluation
 
-Compare different Claude filter prompts to find which best predicts your preferences. See [AB_TESTING_PLAN.md](AB_TESTING_PLAN.md) for full details.
+Every vote you cast is a label. `scripts/eval_prompt.py` re-scores all voted items with
+the current prompt and reports how well the scores separate 👍 from 👎, so a prompt,
+profile or model change can be judged in minutes instead of waiting months for live votes.
+This replaced the shadow A/B framework (history kept in [AB_TESTING_PLAN.md](AB_TESTING_PLAN.md)).
 
 ```bash
-# 1. Enable in .env:
-#    AB_TEST_ENABLED=true
-#    AB_TEST_EXPERIMENT_ID=exp_001
-#    AB_TEST_CHALLENGER_PROMPT=V3
-
-# 2. Run normally — shadow scoring happens automatically
-python main.py --once
-
-# 3. After voting on ~30-50 tweets, generate report
-python main.py --ab-report exp_001
+python scripts/eval_prompt.py --label baseline                      # production model + neighbours
+python scripts/eval_prompt.py --label no-rag --no-rag               # isolate the RAG effect
+python scripts/eval_prompt.py --label sonnet55 --model claude-sonnet-5-5
+python scripts/eval_prompt.py --label profile-v2 --profile-file my_profile.md
+python scripts/eval_prompt.py --compare baseline no-rag sonnet55    # side-by-side report
 ```
+
+Runs are saved under `eval_runs/` and the report always includes a `stored@send` column
+(the scores production gave the items when they were sent). The headline metric is AUC.
+Read the caveats at the top of the script: labels only exist for items that were sent,
+so recall is over previously-sent upvotes. The 🎲 exploration items (see below) are the
+only unbiased sample of what the filter misses.
 
 ### Monthly Error Report
 
@@ -228,8 +314,6 @@ python main.py --schedule          # Run daily at configured hour (waits for nex
 python main.py --schedule --run-once-on-startup  # Also run one curation immediately
 python main.py --bot-only          # Run Telegram bot only
 python main.py --test              # Test all components
-python main.py --ab-report exp_001 # A/B test report for an experiment
-python main.py --ab-report exp_001 --threshold 80  # Custom threshold for precision/recall
 python main.py --error-report 2026-03  # Monthly error log report
 python main.py --error-report last     # Error log report for previous month
 ```
@@ -237,59 +321,77 @@ python main.py --error-report last     # Error log report for previous month
 ## Project Structure
 
 ```
-twitter-curator/
-├── config/
-│   └── settings.py         # Environment config with validation
+personalized-twitter-feeds/
+├── config/settings.py             # pydantic settings (env vars)
 ├── src/
-│   ├── twitter_client.py   # Twitter API v2 client
-│   ├── claude_filter.py    # Claude AI filtering
-│   ├── telegram_bot.py     # Telegram bot with feedback buttons
-│   ├── database.py         # Supabase operations
-│   ├── embeddings.py       # RAG embeddings for feedback-driven curation
-│   ├── scheduler.py        # Daily curation orchestration
-│   ├── content.py          # Content ID utilities (blog ID generation, URL detection)
-│   ├── keyword_filter.py   # Pre-LLM blocklist filter (whole-word, case-insensitive)
-│   ├── error_logger.py     # DatabaseErrorHandler: persists WARNING+ logs to Supabase
-│   └── blog_fetcher.py     # Blog post fetching and newsletter parsing
-├── tests/
-│   ├── conftest.py                # Shared test fixtures
-│   ├── test_claude_filter.py      # ClaudeFilter unit tests
-│   ├── test_database.py           # DatabaseClient unit tests
-│   ├── test_twitter_client.py     # TwitterClient unit tests
-│   ├── test_scheduler.py          # DailyCurator unit tests
-│   ├── test_telegram_bot.py       # TelegramCurator unit tests
-│   ├── test_embeddings.py         # EmbeddingManager unit tests
-│   ├── test_keyword_filter.py     # Keyword blocklist filter unit tests
-│   ├── test_error_logger.py       # Error logger + monthly report unit tests
-│   └── test_blog_fetcher.py       # BlogFetcher and content utils unit tests
+│   ├── scheduler.py               # DailyCurator: fetch → feeds → neighbours → score → exploration → send; weekly profile job
+│   ├── telegram_bot.py            # TelegramCurator: init, handlers, sending, polling/webhook
+│   ├── bot/                       # Bot mixins: feedback, capture, feeds, admin, formatting, constants
+│   ├── claude_filter.py           # Scoring prompt + tool schema, domain tagging, reason proposals, newsletter extraction
+│   ├── embeddings.py              # OpenAI embeddings + per-item pgvector neighbours
+│   ├── database.py                # Supabase client: items, signals, embeddings, profiles, feeds, authors, keywords
+│   ├── profile_compiler.py        # Signals → per-domain Markdown profiles (+ overall), scoring profile text
+│   ├── preference_api.py          # Agent-facing API (get_profile / search_liked / score_items / record_signal)
+│   ├── mcp_server.py              # MCP server over preference_api
+│   ├── capture.py                 # Classify sent messages, build items from URLs/text/forwards
+│   ├── feedback_flow.py           # Reactions → votes, vote/reason keyboards (pure helpers)
+│   ├── webhook_server.py          # Telegram webhook + /r/<item_id> click tracking + /health
+│   ├── feeds.py                   # RSS/Atom discovery, parsing, entries → items
+│   ├── newsletter.py              # Issue text → LLM extraction → deduped, scored items (web or email)
+│   ├── email_ingest.py            # IMAP mailbox reader, email → page text with inline links
+│   ├── blog_fetcher.py            # Article fetching, page text for LLM extraction
+│   ├── twitter_client.py          # X API client (xdk)
+│   ├── keyword_filter.py          # Pre-LLM keyword blocklist
+│   ├── content.py                 # Item id helpers, URL detection
+│   └── error_logger.py            # WARNING+ → error_log table
 ├── scripts/
-│   ├── setup_database.py          # Database schema SQL
-│   ├── ab_test_report.py          # A/B test analysis report
+│   ├── setup_database.py          # Fresh-install schema SQL
+│   ├── migrations/                # Incremental SQL for existing deployments (run in date order)
+│   ├── eval_prompt.py             # Offline prompt/model evaluation against votes
+│   ├── import_items.py            # Import Raindrop/Readwise/CSV/Twitter-archive likes
+│   ├── backfill_embeddings.py     # Embed voted items that have no embedding
 │   ├── error_report.py            # Monthly error log report
 │   ├── test_components.py         # Integration testing (live APIs)
 │   └── count_twitter_timeline.py  # Count tweets from Twitter
-├── main.py                 # CLI entry point
+├── tests/                         # pytest suite (unit tests, no credentials needed)
+├── docs/                          # Railway deployment, MCP setup, xdk migration notes
+├── main.py                        # CLI entry point
 ├── requirements.txt
-├── requirements-dev.txt    # Test dependencies
 └── .env.example
 ```
 
 ## How It Works
 
-### Tweets
-1. **Fetch**: Pulls tweets from your home timeline (last 24 hours)
-2. **Pre-filter**: Items containing blocked keywords (managed via `/blockword`) are dropped before Claude scoring. Matching is whole-word, case-insensitive, across tweet text, X Article title/body, and quoted-tweet text. Content from starred authors is currently exempt from the blocklist.
-3. **Filter**: Claude scores each tweet 0-100 based on your interests
-4. **Send**: Tweets scoring ≥70 are sent to Telegram with 👍/👎 buttons
-5. **Store**: All tweets and feedback saved to Supabase
-6. **Learn**: Past feedback improves future filtering via RAG
+### Data model
 
-### Blog Posts
-1. **Like**: Send `/like <blog_url>` to fetch, score, and save a blog post you enjoyed
-2. **Newsletter**: Send `/newsletter <url>` to parse a newsletter — all articles are scored and sent for review (no filtering threshold, all are shown)
-3. **Section Filtering**: On first use of a newsletter domain, you're prompted to select sections to ignore (e.g. Regulation, Sponsor). Preferences are saved per domain. Edit later with `/newsletter_prefs`.
-4. **Feedback**: Vote on blog posts just like tweets to train the system
-5. **Store**: Blog posts stored alongside tweets with `content_type='blog_post'`
+| Table | Holds |
+| --- | --- |
+| `items` | Anything from any source: tweets, articles, forwarded posts, notes, imports. Carries the LLM-assigned `domain`, score, and delivery state. |
+| `signals` | Every preference event: `vote` (up/down, strength 1 or 2, reason), `note`, `open`. With `source` (button, reaction, like_cmd, reply, redirect, telegram, import:x, agent). |
+| `item_embeddings` | pgvector embeddings for voted items, used for per-item neighbours and `search_liked`. |
+| `preference_profiles` | Versioned compiled Markdown profiles per domain plus `overall`. |
+
+### Daily run
+1. **Fetch**: Pulls tweets from your home timeline (last 24 hours) plus starred authors' timelines
+2. **Pre-filter**: Retweets from non-starred authors and blocked keywords are dropped before scoring
+3. **Neighbours**: Each tweet is embedded and its 3 most similar past votes are looked up in pgvector
+4. **Score**: Claude scores each tweet 0-100 against the compiled profile, seeing each tweet's own past-vote neighbours, and tags its domain
+5. **Send**: Tweets at or above the threshold (per-author tiers apply) go to Telegram, plus 2 random below-threshold items marked 🎲 (exploration)
+6. **Store**: Every scored item is saved; every vote, reaction, reason, note and link open becomes a signal
+7. **Learn**: Signals feed neighbours immediately and the compiled profile weekly; the eval script measures the effect
+
+### Captured content
+`/like`, URLs, `:note` text and forwarded posts go through the same scorer (threshold 0, so
+they always get a score and a domain), are saved as items, and receive the stated vote with an
+undo window. A reason typed in the same message is saved with the vote; otherwise the model
+proposes one.
+
+### Feeds and newsletters
+Subscribed feeds are polled at the start of the daily run, before dedup and the keyword
+blocklist, so their entries are treated exactly like tweets. Newsletter emails are processed
+after the digest (step 5) and on `/inbox`: email HTML → text with inline links → LLM
+extraction → tracking links resolved → dedup against the store → scoring → one digest per
+issue. `/newsletter <url>` runs the same pipeline on a web page.
 
 ## Filtering Criteria
 
@@ -321,7 +423,7 @@ The choices below reflect how I personally want this tool to behave. They are no
 ### Author tiers & filtering
 
 - **Retweets from non-favorite authors are dropped entirely** (`src/scheduler.py`). Favorites' retweets are treated as curation signal worth reading; everyone else's are treated as noise.
-- **Three author tiers with different score thresholds**: favorites pass at 50, defaults at 70, muted at 85 (`FILTER_THRESHOLD` ± offsets). Claude scores everything against the lowest floor so feedback signal isn't lost for muted authors.
+- **Three author tiers with different score thresholds**: favorites pass at 30, defaults at 50, muted at 65 (`FILTER_THRESHOLD` ± offsets; defaults calibrated for Sonnet 5.5). Claude scores everything against the lowest floor so feedback signal isn't lost for muted authors.
 - **Starred authors have a dedicated fetch path** alongside the home timeline, capped per author. Favorites are treated as a distinct content source, not just surfaced by timeline algorithms.
 - **Keyword blocklist runs before Claude scoring; favorites are exempt.** Saves API cost on obvious noise, but trusts favorites' judgment even when they post about blocked topics.
 
@@ -336,9 +438,18 @@ The choices below reflect how I personally want this tool to behave. They are no
 - **24-hour fetch window, max 100 tweets per run.** Trades recency against catch-up after absences.
 - **Tweets grouped by thread (conversation_id) and sorted chronologically within threads** at delivery time. Optimizes for reading threads as a unit rather than flat chronological order.
 
+### Feedback capture
+
+- **Three ways to vote, lowest friction first**: react to the message with an emoji (🔥 strong like, 👍 / ❤️ like, 👎 skip; remove the reaction to retract), tap the 🔥 👍 👎 buttons, or `/like` a URL. Reactions save immediately; buttons keep a 10-second undo.
+- **The model proposes the reason, you confirm it.** After every vote the bot replies with a one-line guess ("Liked because: concrete preconf economics?") and ✅ / ✏️ / skip. Free text beats fixed categories, and it is what the compiled profile is built from. The old eight reason buttons are gone; their labels survive as reason text on past votes.
+- **Reply to any item to attach a note.**
+- **Opens are tracked.** In production, item links go through `/r/<item_id>` on the bot's own web server, which records an `open` signal and redirects. Set `REDIRECT_BASE_URL` to override (defaults to `WEBHOOK_URL`); links stay direct in `DEVELOPMENT_MODE`.
+- **Everything lands in the `signals` table** (`kind`: vote / note / open, with `strength`, `reason`, `source`). Votes are also still written to the legacy `feedback` table until phase 3 moves reads over.
+
 ### Feedback & RAG
 
-- **RAG context is built only from explicitly voted tweets** (top-5 similar) — unvoted tweets don't influence future scoring. Trusts explicit signal only; ignores the implicit "sent but never reacted to" signal.
+- **Neighbours come only from explicitly voted items** (top-3 per item, `RAG_SIMILARITY_LIMIT`) — unvoted tweets don't influence future scoring. Trusts explicit signal only; ignores the implicit "sent but never reacted to" signal.
+- **Exploration over pure exploitation**: `EXPLORATION_PER_RUN` (default 2) below-threshold items are sent each run, clearly marked 🎲. Votes on them are the only unbiased measurement of recall.
 
 
 
@@ -347,14 +458,20 @@ The choices below reflect how I personally want this tool to behave. They are no
 | ------------------- | ----------- | --------------------------------------- |
 | `FETCH_HOURS`       | 24          | Hours to look back for tweets           |
 | `MAX_TWEETS`        | 100         | Maximum tweets to fetch per run         |
-| `FILTER_THRESHOLD`  | 70          | Minimum score to send to Telegram       |
+| `FILTER_THRESHOLD`  | 50          | Minimum score to send to Telegram (50 for Sonnet 5.5, 60 for Sonnet 4.6) |
 | `SCHEDULE_HOUR`     | 9           | Hour to run daily curation (24h format) |
 | `SCHEDULE_TIMEZONE` | Asia/Taipei | Timezone for scheduling                 |
 | `SCHEDULE_SKIP_WEEKDAYS` | (empty) | Comma-separated weekday names to skip in scheduled mode (e.g. `sunday`). Evaluated in `SCHEDULE_TIMEZONE`. |
-| `RAG_ENABLED`       | true        | Enable RAG context in Claude prompts    |
-| `AB_TEST_ENABLED`   | false       | Enable A/B testing of filter prompts    |
-| `AB_TEST_EXPERIMENT_ID` | -       | Experiment ID for current A/B test      |
-| `AB_TEST_CHALLENGER_PROMPT` | V1  | Prompt registry key for challenger      |
+| `RAG_ENABLED`       | true        | Attach voted neighbours to items when scoring |
+| `RAG_SIMILARITY_LIMIT` | 3        | Neighbours per item                     |
+| `EXPLORATION_PER_RUN` | 2         | Random below-threshold items sent per run (🎲) |
+| `FEED_MAX_ENTRIES_PER_RUN` | 10   | Newest entries fetched per feed per run |
+| `CLAUDE_MODEL`      | claude-sonnet-5-5 | Scoring model                     |
+| `EMAIL_IMAP_HOST` / `EMAIL_IMAP_USER` / `EMAIL_IMAP_PASSWORD` | (unset) | Mailbox for forwarded newsletters; all three enable email ingestion |
+| `EMAIL_IMAP_FOLDER` | INBOX       | Folder / Gmail label to read            |
+| `EMAIL_MAX_PER_RUN` | 10          | Max newsletter emails processed per run |
+| `EMAIL_DELETE_PROCESSED` | false  | Delete processed emails instead of marking them read |
+| `REDIRECT_BASE_URL` | `WEBHOOK_URL` | Base URL for click-tracking links; unset in dev = direct links |
 
 
 ## Troubleshooting
@@ -400,11 +517,7 @@ Logs are written to `curator.log` and stdout for day-to-day curation stats. WARN
 
 ## Roadmap
 
-- Phase 1: Core MVP (fetch, filter, send, feedback buttons)
-- Phase 2: RAG with embeddings (use feedback to improve filtering)
-- Phase 3: Blog post and newsletter support
-- Phase 4: LLM-based blog post filtering (once enough feedback is accumulated)
-- Phase 5: RSS feed support, analytics dashboard, multi-account support
+See [ROADMAP.md](ROADMAP.md). Next: RSS feeds and LLM-based newsletter extraction (phase 4).
 
 ## License
 

@@ -1,295 +1,222 @@
 #!/usr/bin/env python3
-"""Database setup script for Twitter Curator.
+"""Database setup script for the preference curator.
 
-Run this script to create the required tables in Supabase.
-You can either:
-1. Run the SQL directly in Supabase SQL Editor (recommended)
-2. Use this script to print the SQL commands
+Prints the SQL for a FRESH install (items, signals, item_embeddings,
+preference_profiles, authors, keywords, error log). Paste it into the
+Supabase SQL Editor.
+
+Existing deployments must NOT use this: run the files in
+scripts/migrations/ in date order instead; they copy the legacy
+tweets / feedback / tweet_embeddings tables into the new ones.
 """
 
-SCHEMA_SQL = """
--- Enable pgvector extension (for Phase 2 embeddings)
+SCHEMA_SQL = """-- Preference store schema (fresh install). Existing deployments: run the
+-- files in scripts/migrations/ in date order instead.
+
 CREATE EXTENSION IF NOT EXISTS vector;
 
--- Table: tweets
--- Stores all fetched tweets with filter results
-CREATE TABLE IF NOT EXISTS tweets (
-    id BIGSERIAL PRIMARY KEY,
-    tweet_id TEXT UNIQUE NOT NULL,
-    author_username TEXT NOT NULL,
-    author_name TEXT NOT NULL,
+
+-- ---------------------------------------------------------------- items
+CREATE TABLE IF NOT EXISTS public.items (
+    item_id TEXT PRIMARY KEY,                     -- tweet id, blog_<hash>, note_<hash>, ...
+    source TEXT NOT NULL DEFAULT 'twitter',       -- twitter | blog | newsletter | rss | telegram | manual | import:<name>
+    content_type TEXT NOT NULL DEFAULT 'tweet',   -- tweet | blog_post | note | video | ...
+    url TEXT,
+    title TEXT,
+    author_username TEXT,
+    author_name TEXT,
     text TEXT NOT NULL,
-    created_at TIMESTAMP NOT NULL,
-    fetched_at TIMESTAMP DEFAULT NOW(),
-    metrics JSONB,  -- likes, retweets, replies, views
-    url TEXT NOT NULL,
-    raw_data JSONB,  -- Full tweet object
-    filtered BOOLEAN DEFAULT FALSE,
-    filter_score FLOAT,  -- Claude's confidence score (0-100)
-    filter_reason TEXT,  -- Why it was filtered in/out
-    sent_to_telegram TIMESTAMP,  -- When sent to user
-    telegram_message_id INTEGER,  -- Telegram message ID for reference
-    content_type TEXT DEFAULT 'tweet'  -- 'tweet' or 'blog_post'
+    created_at TIMESTAMPTZ,                       -- when the content was published
+    fetched_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    metrics JSONB,
+    raw_data JSONB,
+    is_retweet BOOLEAN NOT NULL DEFAULT FALSE,
+    domain TEXT,                                  -- LLM-assigned topic domain
+    filtered BOOLEAN NOT NULL DEFAULT FALSE,
+    filter_score FLOAT,
+    filter_reason TEXT,
+    exploration BOOLEAN NOT NULL DEFAULT FALSE,
+    sent_to_telegram TIMESTAMPTZ,
+    telegram_message_id BIGINT
 );
+CREATE INDEX IF NOT EXISTS idx_items_created_at ON public.items(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_items_sent ON public.items(sent_to_telegram);
+CREATE INDEX IF NOT EXISTS idx_items_message ON public.items(telegram_message_id);
+CREATE INDEX IF NOT EXISTS idx_items_domain ON public.items(domain);
+CREATE INDEX IF NOT EXISTS idx_items_source ON public.items(source);
+CREATE INDEX IF NOT EXISTS idx_items_url ON public.items(url);
+CREATE INDEX IF NOT EXISTS idx_items_scored ON public.items(filter_score) WHERE filter_score IS NOT NULL;
+ALTER TABLE public.items ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS "anon_all" ON public.items;
+CREATE POLICY "anon_all" ON public.items FOR ALL TO anon USING (true) WITH CHECK (true);
 
--- Indexes for tweets table
-CREATE INDEX IF NOT EXISTS idx_tweets_tweet_id ON tweets(tweet_id);
-CREATE INDEX IF NOT EXISTS idx_tweets_created_at ON tweets(created_at DESC);
-CREATE INDEX IF NOT EXISTS idx_tweets_filtered ON tweets(filtered);
-CREATE INDEX IF NOT EXISTS idx_tweets_sent ON tweets(sent_to_telegram);
-CREATE INDEX IF NOT EXISTS idx_tweets_content_type ON tweets(content_type);
-
--- Table: feedback
--- Stores user feedback (thumbs up/down) on tweets
-CREATE TABLE IF NOT EXISTS feedback (
+-- ------------------------------------------------------------- signals
+CREATE TABLE IF NOT EXISTS public.signals (
     id BIGSERIAL PRIMARY KEY,
-    tweet_id TEXT REFERENCES tweets(tweet_id) ON DELETE CASCADE,
-    user_vote TEXT CHECK (user_vote IN ('up', 'down')),
-    voted_at TIMESTAMP DEFAULT NOW(),
-    telegram_message_id INTEGER,
-    notes TEXT  -- Optional user comments
+    item_id TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    value TEXT,
+    strength SMALLINT NOT NULL DEFAULT 1,
+    reason TEXT,
+    source TEXT,
+    telegram_message_id BIGINT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+CREATE INDEX IF NOT EXISTS idx_signals_item ON public.signals(item_id);
+CREATE INDEX IF NOT EXISTS idx_signals_kind_created ON public.signals(kind, created_at DESC);
+ALTER TABLE public.signals ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS "anon_all" ON public.signals;
+CREATE POLICY "anon_all" ON public.signals FOR ALL TO anon USING (true) WITH CHECK (true);
 
--- Indexes for feedback table
-CREATE INDEX IF NOT EXISTS idx_feedback_tweet_id ON feedback(tweet_id);
-CREATE INDEX IF NOT EXISTS idx_feedback_vote ON feedback(user_vote);
-CREATE INDEX IF NOT EXISTS idx_feedback_voted_at ON feedback(voted_at DESC);
+DO $$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'signals_item_fk') THEN
+        ALTER TABLE public.signals
+            ADD CONSTRAINT signals_item_fk FOREIGN KEY (item_id)
+            REFERENCES public.items(item_id) ON DELETE CASCADE;
+    END IF;
+END $$;
 
--- Table: favorite_authors
--- Stores Twitter accounts the user likes
-CREATE TABLE IF NOT EXISTS favorite_authors (
+-- ----------------------------------------------------- item_embeddings
+CREATE TABLE IF NOT EXISTS public.item_embeddings (
+    item_id TEXT PRIMARY KEY REFERENCES public.items(item_id) ON DELETE CASCADE,
+    embedding vector(1536) NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_item_embeddings ON public.item_embeddings
+    USING ivfflat (embedding vector_cosine_ops) WITH (lists = 100);
+ALTER TABLE public.item_embeddings ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS "anon_all" ON public.item_embeddings;
+CREATE POLICY "anon_all" ON public.item_embeddings FOR ALL TO anon USING (true) WITH CHECK (true);
+
+-- -------------------------------------------------- preference_profiles
+CREATE TABLE IF NOT EXISTS public.preference_profiles (
     id BIGSERIAL PRIMARY KEY,
-    username TEXT UNIQUE NOT NULL,  -- Twitter username (lowercase, without @)
-    added_at TIMESTAMP DEFAULT NOW(),
-    notes TEXT  -- Optional notes about why they're favorited
+    domain TEXT NOT NULL,                 -- 'overall' or a topic domain
+    version INTEGER NOT NULL,
+    content TEXT NOT NULL,                -- markdown
+    stats JSONB,                          -- counts used to build it
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (domain, version)
 );
+CREATE INDEX IF NOT EXISTS idx_profiles_domain_version ON public.preference_profiles(domain, version DESC);
+ALTER TABLE public.preference_profiles ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS "anon_all" ON public.preference_profiles;
+CREATE POLICY "anon_all" ON public.preference_profiles FOR ALL TO anon USING (true) WITH CHECK (true);
 
--- Index for favorite_authors
-CREATE INDEX IF NOT EXISTS idx_favorite_authors_username ON favorite_authors(username);
-
--- Table: muted_authors
--- Stores Twitter accounts the user wants stricter filtering for
-CREATE TABLE IF NOT EXISTS muted_authors (
-    id BIGSERIAL PRIMARY KEY,
-    username TEXT UNIQUE NOT NULL,  -- Twitter username (lowercase, without @)
-    added_at TIMESTAMP DEFAULT NOW(),
-    notes TEXT  -- Optional notes about why they're muted
-);
-
--- Index for muted_authors
-CREATE INDEX IF NOT EXISTS idx_muted_authors_username ON muted_authors(username);
-
--- Table: tweet_embeddings (Phase 2)
--- Stores vector embeddings for similarity search
-CREATE TABLE IF NOT EXISTS tweet_embeddings (
-    id BIGSERIAL PRIMARY KEY,
-    tweet_id TEXT UNIQUE REFERENCES tweets(tweet_id) ON DELETE CASCADE,
-    embedding vector(1536),  -- OpenAI text-embedding-3-small dimensions
-    created_at TIMESTAMP DEFAULT NOW()
-);
-
--- Index for vector similarity search (Phase 2)
--- Note: Adjust 'lists' parameter based on data size
--- Rule of thumb: lists = sqrt(row_count)
-CREATE INDEX IF NOT EXISTS idx_tweet_embeddings ON tweet_embeddings
-USING ivfflat (embedding vector_cosine_ops)
-WITH (lists = 100);
-
--- Row Level Security: enable on all tables, allow anon role full access
-ALTER TABLE public.tweets ENABLE ROW LEVEL SECURITY;
-ALTER TABLE public.feedback ENABLE ROW LEVEL SECURITY;
-ALTER TABLE public.favorite_authors ENABLE ROW LEVEL SECURITY;
-ALTER TABLE public.muted_authors ENABLE ROW LEVEL SECURITY;
-ALTER TABLE public.tweet_embeddings ENABLE ROW LEVEL SECURITY;
-
-CREATE POLICY "anon_all" ON public.tweets FOR ALL TO anon USING (true) WITH CHECK (true);
-CREATE POLICY "anon_all" ON public.feedback FOR ALL TO anon USING (true) WITH CHECK (true);
-CREATE POLICY "anon_all" ON public.favorite_authors FOR ALL TO anon USING (true) WITH CHECK (true);
-CREATE POLICY "anon_all" ON public.muted_authors FOR ALL TO anon USING (true) WITH CHECK (true);
-CREATE POLICY "anon_all" ON public.tweet_embeddings FOR ALL TO anon USING (true) WITH CHECK (true);
-
--- Function: match_voted_tweets
--- Find similar tweets that have user feedback, using pgvector cosine distance
-CREATE OR REPLACE FUNCTION match_voted_tweets(
+-- ------------------------------------------------------- similarity RPC
+-- Nearest voted items: each item's latest vote (strength, reason) + similarity.
+CREATE OR REPLACE FUNCTION match_voted_items(
     query_embedding vector(1536),
     match_count int DEFAULT 5
 )
 RETURNS TABLE (
-    tweet_id text,
+    item_id text,
     text text,
     author_username text,
+    domain text,
     vote text,
+    strength smallint,
+    reason text,
     similarity float
 )
-LANGUAGE plpgsql
+LANGUAGE sql STABLE
 AS $$
-BEGIN
-    RETURN QUERY
+    WITH latest_vote AS (
+        SELECT DISTINCT ON (s.item_id) s.item_id, s.value, s.strength, s.reason
+        FROM public.signals s
+        WHERE s.kind = 'vote' AND s.value IN ('up', 'down')
+        ORDER BY s.item_id, s.created_at DESC
+    )
     SELECT
-        t.tweet_id,
-        t.text,
-        t.author_username,
-        f.user_vote AS vote,
-        1 - (te.embedding <=> query_embedding) AS similarity
-    FROM tweet_embeddings te
-    JOIN tweets t ON t.tweet_id = te.tweet_id
-    JOIN feedback f ON f.tweet_id = te.tweet_id
-    ORDER BY te.embedding <=> query_embedding
+        i.item_id,
+        i.text,
+        i.author_username,
+        i.domain,
+        lv.value AS vote,
+        lv.strength,
+        lv.reason,
+        1 - (e.embedding <=> query_embedding) AS similarity
+    FROM public.item_embeddings e
+    JOIN public.items i ON i.item_id = e.item_id
+    JOIN latest_vote lv ON lv.item_id = e.item_id
+    ORDER BY e.embedding <=> query_embedding
     LIMIT match_count;
-END;
 $$;
 
--- Optional: Create a view for tweets with feedback
-CREATE OR REPLACE VIEW tweets_with_feedback
+-- Latest vote per item as a view (handy for SQL exploration and the eval)
+CREATE OR REPLACE VIEW public.item_votes
 WITH (security_invoker = true) AS
-SELECT
-    t.*,
-    f.user_vote,
-    f.voted_at,
-    f.notes as feedback_notes
-FROM tweets t
-LEFT JOIN feedback f ON t.tweet_id = f.tweet_id;
+SELECT DISTINCT ON (s.item_id)
+    s.item_id, s.value AS vote, s.strength, s.reason, s.source, s.created_at AS voted_at
+FROM public.signals s
+WHERE s.kind = 'vote' AND s.value IN ('up', 'down')
+ORDER BY s.item_id, s.created_at DESC;
 
--- Table: ab_test_scores
--- Stores A/B test scores for prompt comparison experiments
-CREATE TABLE IF NOT EXISTS ab_test_scores (
+-- ------------------------------------------------------------ authors
+CREATE TABLE IF NOT EXISTS public.favorite_authors (
     id BIGSERIAL PRIMARY KEY,
-    tweet_id TEXT REFERENCES tweets(tweet_id) ON DELETE CASCADE,
-    experiment_id TEXT NOT NULL,
-    prompt_variant TEXT NOT NULL,  -- e.g. 'control', 'challenger'
-    prompt_version TEXT NOT NULL,  -- e.g. 'V1', 'V2', 'V3'
-    score FLOAT NOT NULL,
-    reason TEXT,
-    is_control BOOLEAN NOT NULL DEFAULT FALSE,
-    scored_at TIMESTAMP DEFAULT NOW()
+    username TEXT UNIQUE NOT NULL,   -- lowercase, without @
+    added_at TIMESTAMPTZ DEFAULT NOW(),
+    notes TEXT
 );
-
--- Indexes for ab_test_scores
-CREATE INDEX IF NOT EXISTS idx_ab_test_experiment ON ab_test_scores(experiment_id);
-CREATE INDEX IF NOT EXISTS idx_ab_test_tweet ON ab_test_scores(tweet_id);
-CREATE INDEX IF NOT EXISTS idx_ab_test_variant ON ab_test_scores(prompt_variant);
-
--- RLS for ab_test_scores
-ALTER TABLE public.ab_test_scores ENABLE ROW LEVEL SECURITY;
-CREATE POLICY "anon_all" ON public.ab_test_scores FOR ALL TO anon USING (true) WITH CHECK (true);
-
--- Function: get_ab_test_analysis
--- Joins control + challenger scores with feedback for paired comparison
-CREATE OR REPLACE FUNCTION get_ab_test_analysis(p_experiment_id text)
-RETURNS TABLE (
-    tweet_id text,
-    control_score float,
-    control_reason text,
-    control_prompt text,
-    challenger_score float,
-    challenger_reason text,
-    challenger_prompt text,
-    user_vote text,
-    tweet_text text,
-    author_username text
-)
-LANGUAGE plpgsql
-AS $$
-BEGIN
-    RETURN QUERY
-    SELECT
-        c.tweet_id,
-        c.score AS control_score,
-        c.reason AS control_reason,
-        c.prompt_version AS control_prompt,
-        ch.score AS challenger_score,
-        ch.reason AS challenger_reason,
-        ch.prompt_version AS challenger_prompt,
-        f.user_vote,
-        t.text AS tweet_text,
-        t.author_username
-    FROM ab_test_scores c
-    JOIN ab_test_scores ch
-        ON c.tweet_id = ch.tweet_id
-        AND c.experiment_id = ch.experiment_id
-        AND ch.is_control = false
-    LEFT JOIN feedback f ON f.tweet_id = c.tweet_id
-    LEFT JOIN tweets t ON t.tweet_id = c.tweet_id
-    WHERE c.experiment_id = p_experiment_id
-        AND c.is_control = true
-    ORDER BY c.scored_at DESC;
-END;
-$$;
-
--- Table: newsletter_preferences
--- Stores per-domain section ignore preferences for newsletters
-CREATE TABLE IF NOT EXISTS newsletter_preferences (
-    domain TEXT PRIMARY KEY,
-    ignored_sections JSONB NOT NULL DEFAULT '[]'::jsonb,
-    all_sections JSONB NOT NULL DEFAULT '[]'::jsonb,
-    created_at TIMESTAMP DEFAULT NOW(),
-    updated_at TIMESTAMP DEFAULT NOW()
+CREATE TABLE IF NOT EXISTS public.muted_authors (
+    id BIGSERIAL PRIMARY KEY,
+    username TEXT UNIQUE NOT NULL,
+    added_at TIMESTAMPTZ DEFAULT NOW(),
+    notes TEXT
 );
+ALTER TABLE public.favorite_authors ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.muted_authors ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS "anon_all" ON public.favorite_authors;
+DROP POLICY IF EXISTS "anon_all" ON public.muted_authors;
+CREATE POLICY "anon_all" ON public.favorite_authors FOR ALL TO anon USING (true) WITH CHECK (true);
+CREATE POLICY "anon_all" ON public.muted_authors FOR ALL TO anon USING (true) WITH CHECK (true);
 
--- RLS for newsletter_preferences
-ALTER TABLE public.newsletter_preferences ENABLE ROW LEVEL SECURITY;
-CREATE POLICY "anon_all" ON public.newsletter_preferences FOR ALL TO anon USING (true) WITH CHECK (true);
-
--- Table: blocked_keywords
--- Stores keywords/phrases to filter out from the pipeline before Claude scoring.
--- Matching is whole-word, case-insensitive. Favorite authors are exempt.
-CREATE TABLE IF NOT EXISTS blocked_keywords (
+-- ------------------------------------------------------------ keywords
+CREATE TABLE IF NOT EXISTS public.blocked_keywords (
     keyword TEXT PRIMARY KEY,
-    created_at TIMESTAMP DEFAULT NOW()
+    created_at TIMESTAMPTZ DEFAULT NOW()
 );
-
--- RLS for blocked_keywords
 ALTER TABLE public.blocked_keywords ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS "anon_all" ON public.blocked_keywords;
 CREATE POLICY "anon_all" ON public.blocked_keywords FOR ALL TO anon USING (true) WITH CHECK (true);
 
--- Table: error_log
--- Persistent capture of WARNING/ERROR log records for monthly review.
--- Written by a custom logging handler alongside existing console/file sinks.
-CREATE TABLE IF NOT EXISTS error_log (
+-- ----------------------------------------------------------- error log
+CREATE TABLE IF NOT EXISTS public.error_log (
     id BIGSERIAL PRIMARY KEY,
     logged_at TIMESTAMPTZ DEFAULT NOW(),
-    source TEXT NOT NULL,      -- logger name (e.g. 'src.embeddings')
-    level TEXT NOT NULL,       -- 'WARNING' | 'ERROR' | 'CRITICAL'
-    error_type TEXT,           -- exception class if record has exc_info
-    message TEXT NOT NULL      -- formatted log message (truncated to 2000 chars)
+    source TEXT NOT NULL,
+    level TEXT NOT NULL,
+    error_type TEXT,
+    message TEXT NOT NULL
 );
-
--- Indexes for error_log
-CREATE INDEX IF NOT EXISTS idx_error_log_logged_at ON error_log(logged_at DESC);
-CREATE INDEX IF NOT EXISTS idx_error_log_level ON error_log(level);
-
--- RLS for error_log
+CREATE INDEX IF NOT EXISTS idx_error_log_logged_at ON public.error_log(logged_at DESC);
+CREATE INDEX IF NOT EXISTS idx_error_log_level ON public.error_log(level);
 ALTER TABLE public.error_log ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS "anon_all" ON public.error_log;
 CREATE POLICY "anon_all" ON public.error_log FOR ALL TO anon USING (true) WITH CHECK (true);
 
--- Optional: Function to get feedback statistics
-CREATE OR REPLACE FUNCTION get_feedback_stats()
-RETURNS TABLE (
-    total_tweets BIGINT,
-    filtered_tweets BIGINT,
-    thumbs_up BIGINT,
-    thumbs_down BIGINT,
-    no_feedback BIGINT
-) AS $$
-BEGIN
-    RETURN QUERY
-    SELECT
-        COUNT(*)::BIGINT as total_tweets,
-        COUNT(*) FILTER (WHERE filtered = true)::BIGINT as filtered_tweets,
-        COUNT(*) FILTER (WHERE f.user_vote = 'up')::BIGINT as thumbs_up,
-        COUNT(*) FILTER (WHERE f.user_vote = 'down')::BIGINT as thumbs_down,
-        COUNT(*) FILTER (WHERE f.user_vote IS NULL AND t.filtered = true)::BIGINT as no_feedback
-    FROM tweets t
-    LEFT JOIN feedback f ON t.tweet_id = f.tweet_id;
-END;
-$$ LANGUAGE plpgsql;
+-- --------------------------------------------------------------- feeds
+CREATE TABLE IF NOT EXISTS public.feeds (
+    url TEXT PRIMARY KEY,
+    title TEXT,
+    site_url TEXT,
+    active BOOLEAN NOT NULL DEFAULT TRUE,
+    added_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    last_fetched_at TIMESTAMPTZ,
+    last_error TEXT,
+    error_count INTEGER NOT NULL DEFAULT 0
+);
+ALTER TABLE public.feeds ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS "anon_all" ON public.feeds;
+CREATE POLICY "anon_all" ON public.feeds FOR ALL TO anon USING (true) WITH CHECK (true);
 """
 
 
 def print_schema():
     """Print the schema SQL."""
     print("=" * 60)
-    print("Twitter Curator Database Schema")
+    print("Preference Curator Database Schema (fresh install)")
     print("=" * 60)
     print()
     print("Copy and paste the following SQL into Supabase SQL Editor:")
@@ -300,24 +227,18 @@ def print_schema():
     print()
     print("After running the SQL:")
     print("1. Go to Supabase Dashboard > Table Editor")
-    print("2. Verify tables exist: tweets, feedback, favorite_authors, tweet_embeddings")
+    print("2. Verify tables exist: items, signals, item_embeddings, preference_profiles, feeds")
     print("3. Check that pgvector extension is enabled")
     print()
+    print("Upgrading an existing deployment? Run scripts/migrations/*.sql in date order instead.")
 
 
 def main():
     """Main entry point."""
     import argparse
 
-    parser = argparse.ArgumentParser(
-        description="Setup database schema for Twitter Curator"
-    )
-    parser.add_argument(
-        "--sql-only",
-        action="store_true",
-        help="Print SQL only, no additional output",
-    )
-
+    parser = argparse.ArgumentParser(description="Print the fresh-install database schema")
+    parser.add_argument("--sql-only", action="store_true", help="Print SQL only, no additional output")
     args = parser.parse_args()
 
     if args.sql_only:

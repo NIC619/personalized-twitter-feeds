@@ -9,13 +9,18 @@ from functools import partial
 
 from config.settings import get_settings
 from src.twitter_client import TwitterClient
-from src.claude_filter import ClaudeFilter, validate_prompt_key
+from src.claude_filter import ClaudeFilter
 from src.telegram_bot import TelegramCurator
 from src.database import DatabaseClient
 from src.embeddings import EmbeddingManager
 from src.scheduler import DailyCurator, feedback_handler
 from src.blog_fetcher import BlogFetcher
+from src.feeds import FeedFetcher
+from src.email_ingest import MailboxFetcher
+from src.newsletter import NewsletterProcessor
 from src.error_logger import attach_db_error_handler
+from src.capture import minimal_url_item, text_item
+from src.profile_compiler import render_preferences_md, scoring_profile
 
 # Configure logging with colored console output
 class ColorFormatter(logging.Formatter):
@@ -82,17 +87,16 @@ def parse_args() -> argparse.Namespace:
         help="Run only the Telegram bot (for receiving feedback)",
     )
     parser.add_argument(
-        "--ab-report",
-        type=str,
-        default=None,
-        metavar="EXPERIMENT_ID",
-        help="Generate A/B test report for a given experiment ID",
+        "--compile-profile",
+        action="store_true",
+        help="Recompile preference profiles from recorded signals and exit",
     )
     parser.add_argument(
-        "--threshold",
-        type=int,
+        "--export-preferences",
+        type=str,
         default=None,
-        help="Score threshold for A/B report precision/recall (default: FILTER_THRESHOLD)",
+        metavar="PATH",
+        help="Write the latest compiled profiles as Markdown to PATH (e.g. PREFERENCES.md) and exit",
     )
     parser.add_argument(
         "--error-report",
@@ -144,7 +148,10 @@ def init_components(settings, num_tweets=None, hours=None):
     )
 
     # Initialize Claude filter
-    claude = ClaudeFilter(api_key=settings.anthropic_api_key)
+    claude = ClaudeFilter(
+        api_key=settings.anthropic_api_key, model=settings.claude_model,
+        effort=settings.claude_effort,
+    )
 
     # Initialize database
     db = DatabaseClient(
@@ -164,11 +171,75 @@ def init_components(settings, num_tweets=None, hours=None):
     )
 
     # Create feedback callback
-    async def on_feedback(tweet_id: str, vote: str, telegram_message_id: int, notes: str = None):
+    async def on_feedback(
+        item_id: str, vote: str, telegram_message_id: int, notes: str = None,
+        strength: int = 1, source: str = "button",
+    ):
         await feedback_handler(
-            db, tweet_id, vote, telegram_message_id,
+            db, item_id, vote, telegram_message_id,
             notes=notes, embedding_manager=embedding_manager,
+            strength=strength, source=source,
         )
+
+    # Model-proposed reason for a vote (runs blocking calls in a thread)
+    async def on_reason(item_id: str, vote: str, strength: int) -> str | None:
+        def _propose():
+            item = db.get_item(item_id)
+            if not item:
+                return None
+            neighbors = None
+            past_reasons: list[str] = []
+            if settings.rag_enabled and embedding_manager.enabled:
+                try:
+                    found = embedding_manager.find_neighbors(
+                        [item], k=settings.rag_similarity_limit, exclude_self=True
+                    )
+                    neighbors = found.get(item_id)
+                    if neighbors:
+                        past_reasons = [
+                            r["reason"] for r in db.get_recent_reasons(
+                                [n["item_id"] for n in neighbors]
+                            ) if r.get("reason")
+                        ]
+                except Exception as e:
+                    logger.warning(f"Neighbour lookup for reason failed: {e}")
+            return claude.propose_reason(
+                item, vote, strength, neighbors=neighbors, past_reasons=past_reasons,
+            )
+        return await asyncio.to_thread(_propose)
+
+    async def on_reason_confirm(item_id: str, reason: str) -> None:
+        await asyncio.to_thread(db.update_latest_vote_reason, item_id, reason)
+
+    async def on_retract_vote(item_id: str) -> None:
+        await asyncio.to_thread(db.delete_latest_vote, item_id)
+
+    async def on_note(item_id: str, text: str, telegram_message_id: int) -> None:
+        await asyncio.to_thread(
+            db.save_signal, item_id, "note", None, 1, text, "reply", telegram_message_id,
+        )
+
+    async def on_open(item_id: str) -> str | None:
+        def _resolve():
+            item = db.get_item(item_id)
+            if not item or not item.get("url"):
+                return None
+            try:
+                db.save_signal(item_id=item_id, kind="open", source="redirect")
+            except Exception as e:
+                logger.warning(f"Open signal failed for {item_id}: {e}")
+            return item["url"]
+        return await asyncio.to_thread(_resolve)
+
+    async def on_lookup_message(telegram_message_id: int) -> dict | None:
+        return await asyncio.to_thread(db.get_item_by_message_id, telegram_message_id)
+
+    async def on_mark_sent(item_id: str, telegram_message_id: int) -> None:
+        await asyncio.to_thread(db.mark_item_sent, item_id, telegram_message_id)
+
+    redirect_base_url = settings.redirect_base_url
+    if redirect_base_url is None and not settings.development_mode:
+        redirect_base_url = settings.webhook_url
 
     # Create favorite author callback (toggle: muted→default, default→favorite)
     async def on_favorite_author(username: str) -> str:
@@ -189,150 +260,128 @@ def init_components(settings, num_tweets=None, hours=None):
     # Create like tweet callback.
     # Runs the blocking Twitter HTTP call in a worker thread so a slow/hung
     # request can't freeze the Telegram bot's event loop.
-    async def on_like_tweet(tweet_id: str) -> dict | None:
-        tweet = db.get_tweet_by_id(tweet_id)
+    async def on_like_tweet(item_id: str) -> dict | None:
+        tweet = db.get_item(item_id)
         if tweet:
             return tweet
-        tweet = await asyncio.to_thread(twitter.fetch_tweet, tweet_id)
+        tweet = await asyncio.to_thread(twitter.fetch_tweet, item_id)
         if tweet:
-            db.save_tweets([tweet])
+            db.save_items([tweet])
         return tweet
 
     # Create thread callback
-    async def on_fetch_thread(tweet_id: str) -> list[dict] | None:
-        tweets = await asyncio.to_thread(twitter.fetch_thread, tweet_id)
+    async def on_fetch_thread(item_id: str) -> list[dict] | None:
+        tweets = await asyncio.to_thread(twitter.fetch_thread, item_id)
         if tweets:
-            db.save_tweets(tweets)
+            db.save_items(tweets)
         return tweets
 
-    # Validate prompt keys up front so a typo fails the deploy loudly
-    # instead of silently collecting no A/B data.
-    validate_prompt_key(settings.control_prompt, "CONTROL_PROMPT")
-    if settings.ab_test_enabled:
-        validate_prompt_key(
-            settings.ab_test_challenger_prompt, "AB_TEST_CHALLENGER_PROMPT"
-        )
-
-    # Build A/B test config (needed by blog callbacks below and curator)
-    ab_test_config = {
-        "enabled": settings.ab_test_enabled,
-        "experiment_id": settings.ab_test_experiment_id,
-        "challenger_prompt": settings.ab_test_challenger_prompt,
-        "control_prompt": settings.control_prompt,
-        "rag_enabled": settings.rag_enabled,
-    }
-
-    # Initialize blog fetcher
+    # Initialize blog + feed fetchers
     blog_fetcher = BlogFetcher()
+    feed_fetcher = FeedFetcher(blog_fetcher=blog_fetcher)
 
     # RAG setup
     rag_enabled = settings.rag_enabled and embedding_manager.enabled
 
-    def _build_rag_context(content: list[dict]) -> str | None:
-        """Build RAG context from similar voted content, if RAG is enabled."""
+    def _neighbors_for(content: list[dict]) -> dict[str, list[dict]] | None:
+        """Per-item voted neighbours, if RAG is enabled."""
         if not rag_enabled:
             return None
         try:
-            similar = embedding_manager.find_similar_voted_tweets(content)
-            if similar:
-                from src.scheduler import DailyCurator
-                return DailyCurator._format_rag_context(similar)
+            return embedding_manager.find_neighbors(
+                content, k=settings.rag_similarity_limit
+            ) or None
         except Exception as e:
-            logger.warning(f"RAG context generation failed: {e}")
-        return None
+            logger.warning(f"Neighbour lookup failed: {e}")
+            return None
+
+    def _score_and_save(content: list[dict]) -> list[dict]:
+        """Score items (no threshold) with their neighbours and persist them."""
+        neighbors = _neighbors_for(content)
+        claude.filter_tweets(
+            content, threshold=0, neighbors=neighbors,
+            profile=curator_profile(),
+        )
+        db.save_items(content)
+        return content
+
+    def curator_profile() -> str | None:
+        """Compiled profile text (or None → baseline), same as the daily run."""
+        if settings.profile_source != "compiled":
+            return None
+        try:
+            profiles = db.get_latest_profiles()
+        except Exception:
+            return None
+        return scoring_profile(profiles, claude.profile) if profiles else None
 
     # Create blog post like callback
     async def on_like_blog(url: str) -> dict | None:
         post = await asyncio.to_thread(blog_fetcher.fetch_blog_post, url)
         if not post:
             return None
-        # Build RAG context and score with Claude
-        rag_context = _build_rag_context([post])
-        control_key = settings.control_prompt
-        scored = await asyncio.to_thread(
-            claude.filter_tweets, [post], threshold=0, rag_context=rag_context,
-            prompt_key=settings.control_prompt,
-        )
-        if scored:
-            post = scored[0]
-        # Save to DB first (A/B test scores have FK to tweets table)
-        db.save_tweets([post])
-        # A/B test scoring
-        if ab_test_config["enabled"]:
-            try:
-                control_scores = [{
-                    "tweet_id": post["tweet_id"],
-                    "score": post.get("filter_score", 0),
-                    "reason": post.get("filter_reason", ""),
-                }]
-                challenger_scores = await asyncio.to_thread(
-                    claude.score_tweets_with_prompt,
-                    [post], ab_test_config["challenger_prompt"],
-                    rag_context=rag_context,
-                )
-                db.save_ab_test_scores(
-                    ab_test_config["experiment_id"],
-                    control_scores, control_key,
-                    challenger_scores, ab_test_config["challenger_prompt"],
-                )
-            except Exception as e:
-                logger.warning(f"A/B test scoring failed for blog post: {e}")
+        await asyncio.to_thread(_score_and_save, [post])
         return post
 
-    # Create newsletter callback
-    async def on_newsletter(url: str, ignored_sections: list[str] | None = None) -> list[dict]:
-        posts = await asyncio.to_thread(
-            blog_fetcher.parse_newsletter, url, ignored_sections=ignored_sections
+    # Capture: any URL or text the user sends becomes an item (+ implied like)
+    async def on_capture_url(url: str) -> dict | None:
+        def _capture():
+            existing = db.get_item_by_url(url)
+            if existing:
+                return existing
+            post = blog_fetcher.fetch_blog_post(url)
+            if not post:
+                post = minimal_url_item(url)
+            post["source"] = "telegram"
+            return _score_and_save([post])[0]
+        return await asyncio.to_thread(_capture)
+
+    async def on_capture_text(text: str, origin: dict | None = None) -> dict | None:
+        def _capture():
+            item = text_item(text, origin)
+            return _score_and_save([item])[0]
+        return await asyncio.to_thread(_capture)
+
+    # Newsletter: LLM extracts the linked items, they are scored like anything else
+    newsletter = NewsletterProcessor(claude, blog_fetcher, db, score=_score_and_save)
+
+    async def on_newsletter(url: str) -> dict:
+        result = await asyncio.to_thread(newsletter.from_page, url)
+        good = [
+            i for i in result["items"]
+            if (i.get("filter_score") or 0) >= settings.filter_threshold
+        ]
+        return {"entries": result["entries"], "items": good}
+
+    # Newsletters by email (IMAP), processed after the digest and on /inbox
+    mailbox = None
+    if settings.email_imap_host and settings.email_imap_user and settings.email_imap_password:
+        mailbox = MailboxFetcher(
+            host=settings.email_imap_host, user=settings.email_imap_user,
+            password=settings.email_imap_password, folder=settings.email_imap_folder,
+            delete_processed=settings.email_delete_processed,
         )
-        if not posts:
-            return []
-        # Build RAG context and score all posts with Claude
-        rag_context = _build_rag_context(posts)
-        control_key = settings.control_prompt
-        scored = await asyncio.to_thread(
-            claude.filter_tweets, posts, threshold=0, rag_context=rag_context,
-            prompt_key=settings.control_prompt,
-        )
-        if scored:
-            posts = scored
-        # Save to DB first (A/B test scores have FK to tweets table)
-        db.save_tweets(posts)
-        # A/B test scoring
-        if ab_test_config["enabled"]:
-            try:
-                control_scores = [
-                    {
-                        "tweet_id": p["tweet_id"],
-                        "score": p.get("filter_score", 0),
-                        "reason": p.get("filter_reason", ""),
-                    }
-                    for p in posts
-                ]
-                challenger_scores = await asyncio.to_thread(
-                    claude.score_tweets_with_prompt,
-                    posts, ab_test_config["challenger_prompt"],
-                    rag_context=rag_context,
-                )
-                db.save_ab_test_scores(
-                    ab_test_config["experiment_id"],
-                    control_scores, control_key,
-                    challenger_scores, ab_test_config["challenger_prompt"],
-                )
-            except Exception as e:
-                logger.warning(f"A/B test scoring failed for newsletter: {e}")
-        return posts
+        logger.info(f"Email ingestion enabled: {settings.email_imap_user} / {settings.email_imap_folder}")
 
-    # Create newsletter preferences callbacks
-    async def on_get_newsletter_prefs(domain: str) -> dict | None:
-        return db.get_newsletter_preferences(domain)
+    async def on_inbox() -> dict:
+        return await curator.process_inbox()
 
-    async def on_save_newsletter_prefs(
-        domain: str, ignored_sections: list[str], all_sections: list[str],
-    ) -> dict:
-        return db.save_newsletter_preferences(domain, ignored_sections, all_sections)
+    # Feeds
+    async def on_feed_add(url: str) -> dict | None:
+        def _add():
+            found = feed_fetcher.discover_feed(url)
+            if not found:
+                return None
+            row = db.save_feed(found["feed_url"], title=found.get("title"), site_url=found.get("site_url"))
+            row["entries"] = len(found.get("entries") or [])
+            return row
+        return await asyncio.to_thread(_add)
 
-    async def on_extract_sections(url: str) -> list[str]:
-        return await asyncio.to_thread(blog_fetcher.extract_sections, url)
+    async def on_feed_list() -> list[dict]:
+        return await asyncio.to_thread(db.get_feeds)
+
+    async def on_feed_remove(url: str) -> None:
+        await asyncio.to_thread(db.remove_feed, url)
 
     # Blocked keyword callbacks
     async def on_add_blocked_keyword(keyword: str) -> dict:
@@ -343,16 +392,6 @@ def init_components(settings, num_tweets=None, hours=None):
 
     async def on_remove_blocked_keyword(keyword: str) -> None:
         db.remove_blocked_keyword(keyword)
-
-    # A/B report callback (runs blocking report generation in a worker thread)
-    async def on_ab_report(experiment_id: str, threshold: int | None) -> str:
-        from scripts.ab_test_report import build_ab_report
-        if threshold is None:
-            threshold = settings.filter_threshold
-        return await asyncio.to_thread(build_ab_report, db, experiment_id, threshold)
-
-    async def on_list_ab_experiments() -> list[dict]:
-        return await asyncio.to_thread(db.list_ab_experiments)
 
     # Initialize Telegram bot
     telegram = TelegramCurator(
@@ -367,15 +406,23 @@ def init_components(settings, num_tweets=None, hours=None):
         thread_callback=on_fetch_thread,
         like_blog_callback=on_like_blog,
         newsletter_callback=on_newsletter,
-        get_newsletter_prefs_callback=on_get_newsletter_prefs,
-        save_newsletter_prefs_callback=on_save_newsletter_prefs,
-        extract_sections_callback=on_extract_sections,
+        feed_add_callback=on_feed_add,
+        feed_list_callback=on_feed_list,
+        feed_remove_callback=on_feed_remove,
+        inbox_callback=on_inbox if mailbox else None,
         add_blocked_keyword_callback=on_add_blocked_keyword,
         list_blocked_keywords_callback=on_list_blocked_keywords,
         remove_blocked_keyword_callback=on_remove_blocked_keyword,
-        ab_report_callback=on_ab_report,
-        list_ab_experiments_callback=on_list_ab_experiments,
-        ab_test_config=ab_test_config,
+        capture_url_callback=on_capture_url,
+        capture_text_callback=on_capture_text,
+        reason_callback=on_reason,
+        reason_confirm_callback=on_reason_confirm,
+        retract_vote_callback=on_retract_vote,
+        note_callback=on_note,
+        open_callback=on_open,
+        lookup_message_callback=on_lookup_message,
+        mark_sent_callback=on_mark_sent,
+        redirect_base_url=redirect_base_url,
     )
 
     # Initialize curator
@@ -391,9 +438,15 @@ def init_components(settings, num_tweets=None, hours=None):
         muted_threshold_offset=settings.muted_threshold_offset,
         starred_author_max_tweets=settings.starred_author_max_tweets,
         embedding_manager=embedding_manager,
-        ab_test_config=ab_test_config,
         rag_enabled=settings.rag_enabled,
-        control_prompt=settings.control_prompt,
+        neighbors_per_item=settings.rag_similarity_limit,
+        exploration_per_run=settings.exploration_per_run,
+        profile_source=settings.profile_source,
+        feed_fetcher=feed_fetcher,
+        feed_max_entries=settings.feed_max_entries_per_run,
+        newsletter=newsletter,
+        mailbox=mailbox,
+        email_max_per_run=settings.email_max_per_run,
     )
 
     logger.info(f"All components initialized (max_tweets={max_tweets}, fetch_hours={fetch_hours})")
@@ -447,6 +500,12 @@ async def run_scheduled(
         skip_weekdays=[
             d.strip() for d in settings.schedule_skip_weekdays.split(",") if d.strip()
         ],
+    )
+    curator.schedule_weekly_profile(
+        settings.profile_compile_weekday,
+        hour=settings.schedule_hour,
+        minute=30,
+        timezone=settings.schedule_timezone,
     )
 
     if run_once_on_startup:
@@ -528,7 +587,7 @@ async def run_test(settings) -> None:
     # Test Claude filter
     if tweets:
         logger.info("Testing Claude filter...")
-        claude = ClaudeFilter(api_key=settings.anthropic_api_key)
+        claude = ClaudeFilter(api_key=settings.anthropic_api_key, model=settings.claude_model)
         filtered = claude.filter_tweets(tweets[:3])
         logger.info(f"Claude filter OK - filtered {len(filtered)} tweets")
 
@@ -561,11 +620,30 @@ def main() -> int:
         return 1
 
     try:
-        if args.ab_report:
-            from scripts.ab_test_report import run_ab_report
+        if args.compile_profile:
+            _, _, telegram, db, curator, blog_fetcher = init_components(settings)
+            try:
+                async def _compile():
+                    await telegram.initialize()
+                    try:
+                        written = await curator.compile_profiles()
+                    finally:
+                        await telegram.shutdown()
+                    return written
+                written = asyncio.run(_compile())
+                logger.info(f"Compiled: {', '.join(written) if written else 'nothing'}")
+            finally:
+                blog_fetcher.close()
+            return 0
+        elif args.export_preferences:
             db = DatabaseClient(url=settings.supabase_url, key=settings.supabase_key)
-            threshold = args.threshold if args.threshold is not None else settings.filter_threshold
-            run_ab_report(db, args.ab_report, threshold=threshold)
+            profiles = db.get_latest_profiles()
+            if not profiles:
+                logger.error("No compiled profiles yet. Run --compile-profile first.")
+                return 1
+            with open(args.export_preferences, "w") as fh:
+                fh.write(render_preferences_md(profiles))
+            logger.info(f"Wrote {args.export_preferences} ({len(profiles)} sections)")
             return 0
         elif args.error_report:
             from scripts.error_report import run_error_report

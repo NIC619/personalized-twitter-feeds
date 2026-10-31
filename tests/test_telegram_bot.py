@@ -68,7 +68,7 @@ class TestFormatTweetMessage:
 
     def test_html_escaping_in_text(self, bot):
         tweet = {
-            "tweet_id": "1",
+            "item_id": "1",
             "author_username": "test",
             "text": "x < y & y > z",
             "url": "https://twitter.com/test/status/1",
@@ -86,7 +86,7 @@ class TestFormatTweetMessage:
 
     def test_large_metric_formatting(self, bot):
         tweet = {
-            "tweet_id": "1",
+            "item_id": "1",
             "author_username": "test",
             "text": "hi",
             "url": "https://twitter.com/test/status/1",
@@ -111,7 +111,7 @@ class TestFormatTweetMessage:
 
     def test_quoted_tweet_html_escaped(self, bot):
         tweet = {
-            "tweet_id": "1",
+            "item_id": "1",
             "author_username": "test",
             "text": "Quote this",
             "url": "https://twitter.com/test/status/1",
@@ -120,7 +120,7 @@ class TestFormatTweetMessage:
                 "author_username": "original",
                 "author_name": "Original",
                 "text": "x < y & y > z",
-                "tweet_id": "2",
+                "item_id": "2",
             },
         }
         msg = bot._format_tweet_message(tweet)
@@ -128,7 +128,7 @@ class TestFormatTweetMessage:
 
     def test_quoted_tweet_multiline_all_prefixed(self, bot):
         tweet = {
-            "tweet_id": "1",
+            "item_id": "1",
             "author_username": "test",
             "text": "Interesting",
             "url": "https://twitter.com/test/status/1",
@@ -137,7 +137,7 @@ class TestFormatTweetMessage:
                 "author_username": "original",
                 "author_name": "Original",
                 "text": "Line one\nLine two\nLine three",
-                "tweet_id": "2",
+                "item_id": "2",
             },
         }
         msg = bot._format_tweet_message(tweet)
@@ -145,7 +145,7 @@ class TestFormatTweetMessage:
 
     def test_score_and_reason_omitted(self, bot):
         tweet = {
-            "tweet_id": "1",
+            "item_id": "1",
             "author_username": "test",
             "text": "hello",
             "url": "https://twitter.com/test/status/1",
@@ -221,9 +221,10 @@ class TestMakeTweetButtons:
 
         rows = markup.inline_keyboard
         assert len(rows) == 2
-        # Row 1: thumbs up, thumbs down
-        assert rows[0][0].callback_data == "vote:tweet123:up"
-        assert rows[0][1].callback_data == "vote:tweet123:down"
+        # Row 1: strong like, like, dislike
+        assert rows[0][0].callback_data == "vote:tweet123:up:2"
+        assert rows[0][1].callback_data == "vote:tweet123:up:1"
+        assert rows[0][2].callback_data == "vote:tweet123:down:1"
         # Row 2: fav, mute
         assert rows[1][0].callback_data == "fav:alice:tweet123"
         assert rows[1][1].callback_data == "mute:alice:tweet123"
@@ -236,6 +237,10 @@ class TestMakeTweetButtons:
         rows = markup.inline_keyboard
         assert rows[1][0].text == "Starred"
         assert rows[1][1].text == "Silenced"
+
+    def test_no_author_row_for_blog_posts(self):
+        markup = TelegramCurator._make_tweet_buttons("blog_x", None)
+        assert len(markup.inline_keyboard) == 1
 
 
 # --- _extract_username ---
@@ -266,135 +271,418 @@ class TestExtractUsername:
         assert TelegramCurator._extract_username("ALICE") == "alice"
 
 
-# --- _extract_tweet_id ---
+# --- _extract_item_id ---
 
 class TestExtractTweetId:
     def test_twitter_url(self):
-        assert TelegramCurator._extract_tweet_id(
+        assert TelegramCurator._extract_item_id(
             "https://twitter.com/alice/status/123456789"
         ) == "123456789"
 
     def test_x_url(self):
-        assert TelegramCurator._extract_tweet_id(
+        assert TelegramCurator._extract_item_id(
             "https://x.com/bob_dev/status/987654321"
         ) == "987654321"
 
     def test_www_prefix(self):
-        assert TelegramCurator._extract_tweet_id(
+        assert TelegramCurator._extract_item_id(
             "https://www.twitter.com/alice/status/111"
         ) == "111"
 
     def test_raw_numeric_id(self):
-        assert TelegramCurator._extract_tweet_id("123456789") == "123456789"
+        assert TelegramCurator._extract_item_id("123456789") == "123456789"
 
     def test_invalid_input_returns_none(self):
-        assert TelegramCurator._extract_tweet_id("not_a_tweet") is None
+        assert TelegramCurator._extract_item_id("not_a_tweet") is None
 
     def test_profile_url_returns_none(self):
-        assert TelegramCurator._extract_tweet_id("https://twitter.com/alice") is None
+        assert TelegramCurator._extract_item_id("https://twitter.com/alice") is None
 
     def test_empty_string_returns_none(self):
-        assert TelegramCurator._extract_tweet_id("") is None
+        assert TelegramCurator._extract_item_id("") is None
 
 
-# --- like reason callback ---
+# --- vote flow ---
 
-class TestLikeReasonCallback:
-    @pytest.fixture
-    def bot_with_feedback(self):
-        async def fake_feedback(**kwargs):
-            pass
-        return TelegramCurator(
-            bot_token="fake:token",
-            chat_id="12345",
-            feedback_callback=fake_feedback,
-        )
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock
+
+from src.feedback_flow import Vote
+
+
+def _query(data, message_id=100, chat_id=12345):
+    query = AsyncMock()
+    query.data = data
+    query.message.message_id = message_id
+    query.message.chat_id = chat_id
+    query.answer = AsyncMock()
+    query.edit_message_reply_markup = AsyncMock()
+    query.edit_message_text = AsyncMock()
+    update = MagicMock()
+    update.callback_query = query
+    return update, query
+
+
+@pytest.fixture
+def vote_bot():
+    bot = TelegramCurator(
+        bot_token="fake:token",
+        chat_id="12345",
+        feedback_callback=AsyncMock(),
+        reason_callback=AsyncMock(return_value="deep dive on preconfs"),
+        reason_confirm_callback=AsyncMock(),
+        retract_vote_callback=AsyncMock(),
+        note_callback=AsyncMock(),
+        lookup_message_callback=AsyncMock(return_value=None),
+    )
+    bot.application = MagicMock()
+    bot.application.bot = AsyncMock()
+    bot.application.bot.send_message = AsyncMock(
+        return_value=SimpleNamespace(message_id=555)
+    )
+    bot._tweet_authors["42"] = "alice"
+    return bot
+
+
+async def _settle(bot):
+    """Let the bot's background tasks (reason proposals) finish."""
+    import asyncio
+    if bot._tasks:
+        await asyncio.gather(*list(bot._tasks), return_exceptions=True)
+
+
+class TestVoteButtons:
+    @pytest.mark.asyncio
+    async def test_vote_shows_undo_schedules_save_and_proposes_reason(self, vote_bot):
+        update, query = _query("vote:42:up:2")
+
+        await vote_bot._handle_feedback(update, MagicMock())
+        vote_bot.reason_callback.assert_not_awaited()  # proposal runs in the background
+        await _settle(vote_bot)
+
+        vote_bot.feedback_callback.assert_not_awaited()  # grace period
+        row = query.edit_message_reply_markup.call_args[1]["reply_markup"].inline_keyboard[0]
+        assert row[0].text == "🔥"
+        assert row[1].callback_data == "undo:42"
+        assert "42" in vote_bot._pending_feedback
+
+        vote_bot.reason_callback.assert_awaited_once_with("42", "up", 2)
+        kwargs = vote_bot.application.bot.send_message.call_args[1]
+        assert "deep dive on preconfs" in kwargs["text"]
+        assert kwargs["reply_to_message_id"] == 100
+        assert vote_bot._reason_prompts[555] == "42"
+
+        vote_bot._pending_feedback["42"]["task"].cancel()
 
     @pytest.mark.asyncio
-    async def test_like_reason_shows_undo_and_schedules_save(self, bot_with_feedback):
-        from unittest.mock import AsyncMock, MagicMock
-
-        feedback_mock = AsyncMock()
-        bot_with_feedback.feedback_callback = feedback_mock
-
-        query = AsyncMock()
-        query.data = "like_reason:42:tech"
-        query.message.message_id = 100
-        query.answer = AsyncMock()
-        query.edit_message_reply_markup = AsyncMock()
-
-        update = MagicMock()
-        update.callback_query = query
-        context = MagicMock()
-
-        await bot_with_feedback._handle_feedback(update, context)
-
-        # Feedback should NOT be called immediately (delayed by 10s)
-        feedback_mock.assert_not_awaited()
-
-        # Should show confirmation + undo button
-        query.edit_message_reply_markup.assert_awaited_once()
-        call_kwargs = query.edit_message_reply_markup.call_args[1]
-        buttons = call_kwargs["reply_markup"].inline_keyboard[0]
-        assert buttons[0].text == "👍 Tech content"
-        assert buttons[1].text == "↩ Undo"
-        assert buttons[1].callback_data == "like_undo:42"
-
-        # Pending feedback should be tracked
-        assert "42" in bot_with_feedback._pending_feedback
-
-        # Clean up the scheduled task
-        bot_with_feedback._pending_feedback["42"]["task"].cancel()
-
-    @pytest.mark.asyncio
-    async def test_like_undo_cancels_pending_feedback(self, bot_with_feedback):
+    async def test_undo_during_slow_proposal_is_not_blocked(self, vote_bot):
         import asyncio
-        from unittest.mock import AsyncMock, MagicMock
+        started = asyncio.Event()
+        release = asyncio.Event()
 
-        # First, trigger a like reason to create pending feedback
-        feedback_mock = AsyncMock()
-        bot_with_feedback.feedback_callback = feedback_mock
+        async def slow_reason(*_):
+            started.set()
+            await release.wait()
+            return "late guess"
+        vote_bot.reason_callback = AsyncMock(side_effect=slow_reason)
 
-        query1 = AsyncMock()
-        query1.data = "like_reason:42:tech"
-        query1.message.message_id = 100
-        query1.answer = AsyncMock()
-        query1.edit_message_reply_markup = AsyncMock()
+        update, _ = _query("vote:42:up:1")
+        await vote_bot._handle_feedback(update, MagicMock())
+        await started.wait()
+        update2, _ = _query("undo:42")
+        await vote_bot._handle_feedback(update2, MagicMock())  # returns while proposal still runs
+        assert "42" not in vote_bot._pending_feedback
+        release.set()
+        await _settle(vote_bot)
+        # The late proposal is dropped: no prompt for an undone vote
+        vote_bot.application.bot.send_message.assert_not_awaited()
+        vote_bot.feedback_callback.assert_not_awaited()
 
-        update1 = MagicMock()
-        update1.callback_query = query1
-        context = MagicMock()
+    @pytest.mark.asyncio
+    async def test_undo_then_same_vote_drops_stale_proposal(self, vote_bot):
+        import asyncio
+        gate = asyncio.Event()
+        calls = 0
 
-        await bot_with_feedback._handle_feedback(update1, context)
-        assert "42" in bot_with_feedback._pending_feedback
+        async def reason(*_):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                await gate.wait()
+                return "stale guess"
+            return "fresh guess"
+        vote_bot.reason_callback = AsyncMock(side_effect=reason)
 
-        # Now trigger undo
-        query2 = AsyncMock()
-        query2.data = "like_undo:42"
-        query2.message.message_id = 100
-        query2.answer = AsyncMock()
-        query2.edit_message_reply_markup = AsyncMock()
+        u1, _ = _query("vote:42:up:1")
+        await vote_bot._handle_feedback(u1, MagicMock())
+        await asyncio.sleep(0)
+        u2, _ = _query("undo:42")
+        await vote_bot._handle_feedback(u2, MagicMock())
+        u3, _ = _query("vote:42:up:1")
+        await vote_bot._handle_feedback(u3, MagicMock())
+        gate.set()
+        await _settle(vote_bot)
 
-        update2 = MagicMock()
-        update2.callback_query = query2
+        texts = [c[1]["text"] for c in vote_bot.application.bot.send_message.call_args_list]
+        assert any("fresh guess" in t for t in texts)
+        assert not any("stale guess" in t for t in texts)
+        assert vote_bot._item_prompts["42"][1] == "fresh guess"
+        vote_bot._pending_feedback["42"]["task"].cancel()
 
-        await bot_with_feedback._handle_feedback(update2, context)
+    @pytest.mark.asyncio
+    async def test_liked_item_message_id_is_persisted(self, vote_bot):
+        vote_bot.mark_sent_callback = AsyncMock()
+        assert await vote_bot._send_liked_item("42", "hello")
+        vote_bot.mark_sent_callback.assert_awaited_once_with("42", 555)
+        assert vote_bot._message_items[555] == "42"
+        vote_bot._pending_feedback["42"]["task"].cancel()
+        await _settle(vote_bot)
 
-        # Pending feedback should be removed
-        assert "42" not in bot_with_feedback._pending_feedback
+    @pytest.mark.asyncio
+    async def test_liked_item_with_reason_skips_proposal(self, vote_bot):
+        assert await vote_bot._send_liked_item("42", "hello", reason="great read")
+        await _settle(vote_bot)
+        vote_bot.reason_callback.assert_not_awaited()
+        assert vote_bot._pending_reasons["42"] == "great read"
+        vote_bot._pending_feedback["42"]["task"].cancel()
 
-        # Should restore reason buttons
-        query2.edit_message_reply_markup.assert_awaited_once()
-        call_kwargs = query2.edit_message_reply_markup.call_args[1]
-        rows = call_kwargs["reply_markup"].inline_keyboard
-        assert len(rows) == 2
-        assert rows[0][0].callback_data == "like_reason:42:tech"
-        assert rows[0][1].callback_data == "like_reason:42:non_tech"
-        assert rows[1][0].callback_data == "like_reason:42:soft_skills"
-        assert rows[1][1].callback_data == "like_reason:42:life_wisdom"
+    @pytest.mark.asyncio
+    async def test_undo_cancels_vote_and_deletes_prompt(self, vote_bot):
+        update, _ = _query("vote:42:down:1")
+        await vote_bot._handle_feedback(update, MagicMock())
+        await _settle(vote_bot)
 
-        # Feedback should never have been saved
-        feedback_mock.assert_not_awaited()
+        update2, query2 = _query("undo:42")
+        await vote_bot._handle_feedback(update2, MagicMock())
+
+        assert "42" not in vote_bot._pending_feedback
+        assert "42" not in vote_bot._item_prompts
+        vote_bot.application.bot.delete_message.assert_awaited_once()
+        rows = query2.edit_message_reply_markup.call_args[1]["reply_markup"].inline_keyboard
+        assert rows[0][1].callback_data == "vote:42:up:1"
+        vote_bot.feedback_callback.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_reason_ok_before_save_is_carried_into_save(self, vote_bot):
+        update, _ = _query("vote:42:up:1")
+        await vote_bot._handle_feedback(update, MagicMock())
+        await _settle(vote_bot)
+
+        ok_update, _ = _query("rsn_ok:42", message_id=555)
+        await vote_bot._handle_feedback(ok_update, MagicMock())
+
+        # Not saved yet, so the reason is parked for the delayed save
+        assert vote_bot._pending_reasons["42"] == "deep dive on preconfs"
+        vote_bot.reason_confirm_callback.assert_not_awaited()
+        vote_bot.application.bot.edit_message_text.assert_awaited_once()
+        vote_bot._pending_feedback["42"]["task"].cancel()
+
+    @pytest.mark.asyncio
+    async def test_reason_ok_after_save_updates_db(self, vote_bot):
+        vote_bot._item_prompts["42"] = (555, "guess")
+        vote_bot._reason_prompts[555] = "42"
+        vote_bot._item_votes["42"] = Vote("up", 1)
+
+        ok_update, _ = _query("rsn_ok:42", message_id=555)
+        await vote_bot._handle_feedback(ok_update, MagicMock())
+
+        vote_bot.reason_confirm_callback.assert_awaited_once_with("42", "guess")
+        assert 555 not in vote_bot._reason_prompts
+
+    @pytest.mark.asyncio
+    async def test_reason_edit_then_typed_reply(self, vote_bot):
+        vote_bot._item_prompts["42"] = (555, "guess")
+        vote_bot._reason_prompts[555] = "42"
+
+        edit_update, query = _query("rsn_edit:42", message_id=555)
+        await vote_bot._handle_feedback(edit_update, MagicMock())
+        assert vote_bot._awaiting_reason["12345"] == "42"
+
+        msg = MagicMock()
+        msg.text = "because it quantifies L1 inclusion delay"
+        msg.chat_id = 12345
+        msg.reply_to_message = None
+        msg.reply_text = AsyncMock()
+        update = MagicMock(); update.message = msg
+
+        consumed = await vote_bot._handle_text_signals(update)
+
+        assert consumed
+        vote_bot.reason_confirm_callback.assert_awaited_once_with(
+            "42", "because it quantifies L1 inclusion delay"
+        )
+        assert "12345" not in vote_bot._awaiting_reason
+
+    @pytest.mark.asyncio
+    async def test_reply_to_item_saves_note(self, vote_bot):
+        vote_bot._message_items[100] = "42"
+        msg = MagicMock()
+        msg.text = "revisit when the spec lands"
+        msg.chat_id = 12345
+        msg.reply_to_message = SimpleNamespace(message_id=100)
+        msg.reply_text = AsyncMock()
+        update = MagicMock(); update.message = msg
+
+        assert await vote_bot._handle_text_signals(update)
+        vote_bot.note_callback.assert_awaited_once_with("42", "revisit when the spec lands", 100)
+
+    @pytest.mark.asyncio
+    async def test_plain_text_not_consumed(self, vote_bot):
+        msg = MagicMock()
+        msg.text = "@someone"
+        msg.chat_id = 12345
+        msg.reply_to_message = None
+        update = MagicMock(); update.message = msg
+        assert not await vote_bot._handle_text_signals(update)
+
+
+class TestReactions:
+    def _reaction_update(self, message_id, new, old, chat_id=12345):
+        mr = SimpleNamespace(
+            chat=SimpleNamespace(id=chat_id),
+            message_id=message_id,
+            new_reaction=[SimpleNamespace(emoji=e) for e in new],
+            old_reaction=[SimpleNamespace(emoji=e) for e in old],
+        )
+        update = MagicMock(); update.message_reaction = mr
+        return update
+
+    @pytest.mark.asyncio
+    async def test_reaction_votes_immediately(self, vote_bot):
+        vote_bot._message_items[100] = "42"
+
+        await vote_bot._handle_reaction(self._reaction_update(100, ["🔥"], []), MagicMock())
+        await _settle(vote_bot)
+
+        vote_bot.feedback_callback.assert_awaited_once()
+        kwargs = vote_bot.feedback_callback.call_args[1]
+        assert (kwargs["vote"], kwargs["strength"], kwargs["source"]) == ("up", 2, "reaction")
+        assert "42" not in vote_bot._pending_feedback
+        vote_bot.reason_callback.assert_awaited_once_with("42", "up", 2)
+
+    @pytest.mark.asyncio
+    async def test_reaction_removal_retracts(self, vote_bot):
+        vote_bot._message_items[100] = "42"
+        vote_bot._item_votes["42"] = Vote("up", 1)
+
+        await vote_bot._handle_reaction(self._reaction_update(100, [], ["👍"]), MagicMock())
+
+        vote_bot.retract_vote_callback.assert_awaited_once_with("42")
+        assert "42" not in vote_bot._item_votes
+        vote_bot.feedback_callback.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_reaction_change_retracts_then_votes(self, vote_bot):
+        vote_bot._message_items[100] = "42"
+        vote_bot._item_votes["42"] = Vote("up", 1)
+
+        await vote_bot._handle_reaction(self._reaction_update(100, ["👎"], ["👍"]), MagicMock())
+
+        vote_bot.retract_vote_callback.assert_awaited_once_with("42")
+        assert vote_bot.feedback_callback.call_args[1]["vote"] == "down"
+
+    @pytest.mark.asyncio
+    async def test_change_after_restart_uses_old_reaction(self, vote_bot):
+        """Persisted 👍, bot restarted (no in-memory vote), user switches to 👎."""
+        vote_bot._message_items[100] = "42"
+        assert "42" not in vote_bot._item_votes
+
+        await vote_bot._handle_reaction(self._reaction_update(100, ["👎"], ["👍"]), MagicMock())
+
+        vote_bot.retract_vote_callback.assert_awaited_once_with("42")
+        assert vote_bot.feedback_callback.call_args[1]["vote"] == "down"
+
+    @pytest.mark.asyncio
+    async def test_unknown_message_falls_back_to_lookup(self, vote_bot):
+        vote_bot.lookup_message_callback = AsyncMock(
+            return_value={"item_id": "77", "author_username": "bob"}
+        )
+        await vote_bot._handle_reaction(self._reaction_update(900, ["👍"], []), MagicMock())
+        vote_bot.lookup_message_callback.assert_awaited_once_with(900)
+        assert vote_bot.feedback_callback.call_args[1]["item_id"] == "77"
+
+    @pytest.mark.asyncio
+    async def test_other_chat_ignored(self, vote_bot):
+        vote_bot._message_items[100] = "42"
+        await vote_bot._handle_reaction(
+            self._reaction_update(100, ["👍"], [], chat_id=999), MagicMock()
+        )
+        vote_bot.feedback_callback.assert_not_awaited()
+
+
+class TestPlainMessages:
+    def _update(self, text, forward=None):
+        msg = MagicMock()
+        msg.text = text
+        msg.chat_id = 12345
+        msg.reply_to_message = None
+        msg.forward_origin = forward
+        msg.reply_text = AsyncMock()
+        update = MagicMock(); update.message = msg
+        return update
+
+    @pytest.mark.asyncio
+    async def test_url_with_words_is_liked_with_reason(self, vote_bot):
+        vote_bot.capture_url_callback = AsyncMock(return_value={
+            "item_id": "blog_1", "author_username": "example.com", "text": "Post", "url": "https://example.com/p",
+            "content_type": "blog_post",
+        })
+        update = self._update("great read https://example.com/p the preconf section")
+        await vote_bot._handle_default_message(update, MagicMock())
+        await _settle(vote_bot)
+
+        vote_bot.capture_url_callback.assert_awaited_once_with("https://example.com/p")
+        assert vote_bot._pending_reasons["blog_1"] == "great read the preconf section"
+        vote_bot.reason_callback.assert_not_awaited()
+        vote_bot._pending_feedback["blog_1"]["task"].cancel()
+
+    @pytest.mark.asyncio
+    async def test_dislike_verb_records_downvote(self, vote_bot):
+        vote_bot.capture_url_callback = AsyncMock(return_value={
+            "item_id": "blog_2", "author_username": "example.com", "text": "Post", "url": "https://example.com/q",
+            "content_type": "blog_post",
+        })
+        await vote_bot._handle_default_message(self._update(":dislike https://example.com/q shallow"), MagicMock())
+        await _settle(vote_bot)
+        assert vote_bot._item_votes["blog_2"] == Vote("down", 1)
+        assert vote_bot._pending_reasons["blog_2"] == "shallow"
+        vote_bot._pending_feedback["blog_2"]["task"].cancel()
+
+    @pytest.mark.asyncio
+    async def test_star_verb(self, vote_bot):
+        vote_bot.favorite_author_callback = AsyncMock(return_value="favorited")
+        update = self._update(":star @dankrad")
+        await vote_bot._handle_default_message(update, MagicMock())
+        vote_bot.favorite_author_callback.assert_awaited_once_with(username="dankrad")
+
+    @pytest.mark.asyncio
+    async def test_plain_text_gets_usage_not_capture(self, vote_bot):
+        vote_bot.capture_text_callback = AsyncMock()
+        update = self._update("Based rollups only make sense if L1 inclusion is cheap and fast.")
+        await vote_bot._handle_default_message(update, MagicMock())
+        vote_bot.capture_text_callback.assert_not_awaited()
+        assert ":note" in update.message.reply_text.call_args[0][0]
+
+    @pytest.mark.asyncio
+    async def test_note_verb_captures_text(self, vote_bot):
+        vote_bot.capture_text_callback = AsyncMock(return_value={
+            "item_id": "note_1", "author_username": "me", "text": "A thought", "content_type": "note",
+        })
+        await vote_bot._handle_default_message(self._update(":note A thought"), MagicMock())
+        await _settle(vote_bot)
+        vote_bot.capture_text_callback.assert_awaited_once_with("A thought", None)
+        vote_bot._pending_feedback["note_1"]["task"].cancel()
+
+
+class TestTrackingLinks:
+    def test_direct_link_without_redirect_base(self, bot):
+        assert bot._link({"item_id": "42", "url": "https://x.com/a/status/42"}) == "https://x.com/a/status/42"
+
+    def test_redirect_link_when_configured(self):
+        tracked = TelegramCurator(
+            bot_token="fake:token", chat_id="1", redirect_base_url="https://app.example"
+        )
+        assert tracked._link({"item_id": "42", "url": "https://x.com/a/status/42"}) == "https://app.example/r/42"
 
 
 # --- _format_thread_message ---
@@ -404,7 +692,7 @@ class TestFormatThreadMessage:
         """Generate n tweet dicts for a thread."""
         return [
             {
-                "tweet_id": str(i),
+                "item_id": str(i),
                 "author_username": "alice",
                 "author_name": "Alice",
                 "text": f"Tweet number {i}",
@@ -459,136 +747,3 @@ class TestFormatThreadMessage:
 
         assert "1 tweets" in msg
         assert "[1/1]" in msg
-
-
-# --- _parse_ab_report_args ---
-
-class TestParseAbReportArgs:
-    def test_no_args_uses_default_experiment(self):
-        exp, threshold = TelegramCurator._parse_ab_report_args([], "exp_003")
-        assert exp == "exp_003"
-        assert threshold is None
-
-    def test_explicit_experiment(self):
-        exp, threshold = TelegramCurator._parse_ab_report_args(["exp_001"], "exp_003")
-        assert exp == "exp_001"
-        assert threshold is None
-
-    def test_experiment_and_threshold(self):
-        exp, threshold = TelegramCurator._parse_ab_report_args(
-            ["exp_001", "50"], "exp_003"
-        )
-        assert exp == "exp_001"
-        assert threshold == 50
-
-    def test_bare_threshold_uses_default_experiment(self):
-        exp, threshold = TelegramCurator._parse_ab_report_args(["60"], "exp_003")
-        assert exp == "exp_003"
-        assert threshold == 60
-
-    def test_no_args_no_default_raises(self):
-        with pytest.raises(ValueError, match="No experiment configured"):
-            TelegramCurator._parse_ab_report_args([], "")
-
-    def test_bad_threshold_raises(self):
-        with pytest.raises(ValueError, match="Invalid threshold"):
-            TelegramCurator._parse_ab_report_args(["exp_001", "abc"], "exp_003")
-
-
-# --- _format_ab_info_message ---
-
-class TestFormatAbInfoMessage:
-    CONFIG = {
-        "enabled": True,
-        "experiment_id": "exp_003",
-        "challenger_prompt": "V4",
-    }
-    EXPERIMENTS = [
-        {
-            "experiment_id": "exp_003",
-            "control_prompt": "V1/V2",
-            "challenger_prompt": "V4",
-            "pairs": 42,
-            "first_scored": "2026-06-01T08:00:00+00:00",
-            "last_scored": "2026-07-15T08:00:00+00:00",
-        },
-        {
-            "experiment_id": "exp_002",
-            "control_prompt": "V1",
-            "challenger_prompt": "V3",
-            "pairs": 30,
-            "first_scored": "2026-04-01T08:00:00+00:00",
-            "last_scored": "2026-05-20T08:00:00+00:00",
-        },
-    ]
-
-    def test_current_config_shown(self):
-        msg = TelegramCurator._format_ab_info_message(self.CONFIG, self.EXPERIMENTS)
-        assert "exp_003" in msg
-        assert "Challenger: V4" in msg
-
-    def test_experiments_listed_with_pairs_and_dates(self):
-        msg = TelegramCurator._format_ab_info_message(self.CONFIG, self.EXPERIMENTS)
-        assert "exp_002" in msg
-        assert "42 pairs" in msg
-        assert "2026-06-01 → 2026-07-15" in msg
-
-    def test_prompt_descriptions_included(self):
-        msg = TelegramCurator._format_ab_info_message(self.CONFIG, self.EXPERIMENTS)
-        assert "V4: Interests-only + RAG context" in msg
-
-    def test_disabled_config(self):
-        msg = TelegramCurator._format_ab_info_message({"enabled": False}, [])
-        assert "disabled" in msg
-        assert "No A/B test scores recorded yet." in msg
-
-
-class TestFormatAbInfoRagAndControl:
-    def test_pinned_control_shown(self):
-        config = {
-            "enabled": True,
-            "experiment_id": "exp_004",
-            "challenger_prompt": "V6",
-            "control_prompt": "V5",
-            "rag_enabled": True,
-        }
-        msg = TelegramCurator._format_ab_info_message(config, [])
-        assert "Control: V5" in msg
-        assert "set via CONTROL_PROMPT" in msg
-
-    def test_rag_enabled_shown(self):
-        config = {"enabled": False, "rag_enabled": True}
-        msg = TelegramCurator._format_ab_info_message(config, [])
-        assert "RAG: enabled" in msg
-        assert "⚠️" not in msg
-
-    def test_rag_disabled_warns_for_rag_challenger(self):
-        config = {
-            "enabled": True,
-            "experiment_id": "exp_004",
-            "challenger_prompt": "V5",
-            "rag_enabled": False,
-        }
-        msg = TelegramCurator._format_ab_info_message(config, [])
-        assert "RAG: disabled" in msg
-        assert "⚠️ V5 expects RAG context" in msg
-
-    def test_rag_disabled_warns_for_pinned_rag_control(self):
-        config = {
-            "enabled": False,
-            "control_prompt": "V2",
-            "rag_enabled": False,
-        }
-        msg = TelegramCurator._format_ab_info_message(config, [])
-        assert "⚠️ V2 expects RAG context" in msg
-
-    def test_rag_disabled_no_warning_for_non_rag_prompts(self):
-        config = {
-            "enabled": True,
-            "experiment_id": "exp_004",
-            "challenger_prompt": "V3",
-            "control_prompt": "V1",
-            "rag_enabled": False,
-        }
-        msg = TelegramCurator._format_ab_info_message(config, [])
-        assert "⚠️" not in msg

@@ -184,7 +184,7 @@ class TwitterClient:
         Args:
             tweet: Tweet dict from XDK response
             author: User dict from XDK response includes
-            referenced_tweets_map: Optional dict of tweet_id → tweet dicts
+            referenced_tweets_map: Optional dict of item_id → tweet dicts
                 from response.includes["tweets"]
             users: Optional dict of user_id → user dicts
                 from response.includes["users"]
@@ -220,7 +220,7 @@ class TwitterClient:
                     retweeted_from = {
                         "author_username": ref_username,
                         "author_name": ref_name,
-                        "tweet_id": str(ref_tweet["id"]),
+                        "item_id": str(ref_tweet["id"]),
                     }
                     ref_tweet_for_retweet = ref_tweet
                 else:
@@ -228,7 +228,7 @@ class TwitterClient:
                         "author_username": ref_username,
                         "author_name": ref_name,
                         "text": _full_tweet_text(ref_tweet),
-                        "tweet_id": str(ref_tweet["id"]),
+                        "item_id": str(ref_tweet["id"]),
                     }
             break
 
@@ -255,7 +255,7 @@ class TwitterClient:
         created_at = tweet.get("created_at")
 
         return {
-            "tweet_id": str(tweet["id"]),
+            "item_id": str(tweet["id"]),
             "author_username": author["username"],
             "author_name": author["name"],
             "text": full_text,
@@ -419,11 +419,11 @@ class TwitterClient:
                 else:
                     raise
 
-    def fetch_tweet(self, tweet_id: str) -> dict | None:
+    def fetch_tweet(self, item_id: str) -> dict | None:
         """Fetch a single tweet by ID.
 
         Args:
-            tweet_id: Tweet ID
+            item_id: Tweet ID
 
         Returns:
             Normalized tweet dict, or None if not found
@@ -443,7 +443,7 @@ class TwitterClient:
         for attempt in range(3):
             try:
                 response = self.client.posts.get_by_id(
-                    id=tweet_id,
+                    id=item_id,
                     tweet_fields=tweet_fields,
                     user_fields=user_fields,
                     expansions=expansions,
@@ -454,7 +454,7 @@ class TwitterClient:
                     wait_time = 2 ** (attempt + 1)
                     logger.warning(
                         "Error fetching tweet %s (attempt %d): %s. Retrying in %ds...",
-                        tweet_id, attempt + 1, e, wait_time,
+                        item_id, attempt + 1, e, wait_time,
                     )
                     time.sleep(wait_time)
                 else:
@@ -479,19 +479,19 @@ class TwitterClient:
 
         author = users.get(tweet.get("author_id"))
         if not author:
-            logger.warning("No author found for tweet %s", tweet_id)
+            logger.warning("No author found for tweet %s", item_id)
             return None
 
         return self._normalize_tweet(tweet, author, ref_tweets_map, users)
 
-    def fetch_thread(self, tweet_id: str, max_tweets: int = 50) -> list[dict] | None:
+    def fetch_thread(self, item_id: str, max_tweets: int = 50) -> list[dict] | None:
         """Fetch a full thread by walking the reply chain backwards from a tweet.
 
         Starting from the given tweet, follows replied_to references upward
         until reaching the root tweet (no more replied_to references).
 
         Args:
-            tweet_id: Tweet ID of the last tweet in the thread
+            item_id: Tweet ID of the last tweet in the thread
             max_tweets: Safety cap to avoid runaway chains (default 50)
 
         Returns:
@@ -499,7 +499,7 @@ class TwitterClient:
             or None if the starting tweet was not found
         """
         tweets = []
-        current_id = tweet_id
+        current_id = item_id
 
         for _ in range(max_tweets):
             tweet = self.fetch_tweet(current_id)
@@ -560,14 +560,14 @@ class TwitterClient:
         return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
 
     @staticmethod
-    def get_tweet_url(tweet_id: str, username: str) -> str:
+    def get_tweet_url(item_id: str, username: str) -> str:
         """Generate tweet URL.
 
         Args:
-            tweet_id: Tweet ID
+            item_id: Tweet ID
             username: Author's username
 
         Returns:
             Full URL to the tweet
         """
-        return f"https://twitter.com/{username}/status/{tweet_id}"
+        return f"https://twitter.com/{username}/status/{item_id}"

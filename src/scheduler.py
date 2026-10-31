@@ -2,17 +2,19 @@
 
 import asyncio
 import logging
-from datetime import datetime
+import random
+from datetime import datetime, timezone
 from typing import Optional
 
 import schedule
 
 from src.twitter_client import TwitterClient
-from src.claude_filter import ClaudeFilter, DEFAULT_CONTROL_PROMPT
+from src.claude_filter import ClaudeFilter
 from src.telegram_bot import TelegramCurator
 from src.database import DatabaseClient
 from src.embeddings import EmbeddingManager
 from src.keyword_filter import filter_blocked_keywords
+from src.profile_compiler import ProfileCompiler, scoring_profile
 
 logger = logging.getLogger(__name__)
 
@@ -33,9 +35,15 @@ class DailyCurator:
         muted_threshold_offset: int = 15,
         starred_author_max_tweets: int = 10,
         embedding_manager: Optional[EmbeddingManager] = None,
-        ab_test_config: Optional[dict] = None,
         rag_enabled: bool = True,
-        control_prompt: str = DEFAULT_CONTROL_PROMPT,
+        neighbors_per_item: int = 3,
+        exploration_per_run: int = 2,
+        profile_source: str = "compiled",
+        feed_fetcher=None,
+        feed_max_entries: int = 10,
+        newsletter=None,
+        mailbox=None,
+        email_max_per_run: int = 10,
     ):
         """Initialize daily curator with all components.
 
@@ -51,9 +59,19 @@ class DailyCurator:
             muted_threshold_offset: How much higher for muted authors
             starred_author_max_tweets: Max tweets per starred author timeline
             embedding_manager: Optional EmbeddingManager for RAG
-            ab_test_config: Optional dict with keys: enabled, experiment_id, challenger_prompt
-            rag_enabled: Whether to use RAG context in Claude prompts
-            control_prompt: PROMPT_REGISTRY key for the production/control prompt
+            rag_enabled: Whether to attach voted neighbours to items for scoring
+            neighbors_per_item: Nearest voted neighbours attached to each item
+            exploration_per_run: Random below-threshold items sent per run
+                (marked 🎲) so recall below the threshold can be measured
+            profile_source: 'compiled' loads the latest compiled profiles
+                for the scoring prompt, 'static' uses the built-in baseline
+            feed_fetcher: Optional FeedFetcher; subscribed RSS/Atom feeds are
+                polled each run and their new entries scored like tweets
+            feed_max_entries: Newest entries fetched per feed per run
+            newsletter: Optional NewsletterProcessor (issue text → scored items)
+            mailbox: Optional MailboxFetcher; unseen emails are processed as
+                newsletter issues after the digest (and on demand)
+            email_max_per_run: Max emails processed per run
         """
         self.twitter = twitter
         self.claude = claude
@@ -68,9 +86,16 @@ class DailyCurator:
         self.muted_author_threshold = filter_threshold + muted_threshold_offset
         # Claude floor = lowest tier so all potentially relevant tweets get scored
         self.filter_threshold = self.favorite_author_threshold
-        self.ab_test_config = ab_test_config or {}
         self.rag_enabled = rag_enabled
-        self.control_prompt = control_prompt
+        self.neighbors_per_item = neighbors_per_item
+        self.exploration_per_run = exploration_per_run
+        self.profile_source = profile_source
+        self.feed_fetcher = feed_fetcher
+        self.feed_max_entries = feed_max_entries
+        self.newsletter = newsletter
+        self.mailbox = mailbox
+        self.email_max_per_run = email_max_per_run
+        self._inbox_lock = asyncio.Lock()
         logger.info(
             f"DailyCurator initialized (thresholds: favorite={self.favorite_author_threshold}, "
             f"default={self.default_threshold}, muted={self.muted_author_threshold})"
@@ -94,292 +119,11 @@ class DailyCurator:
             "filtered": 0,
             "sent": 0,
             "errors": [],
-            "started_at": datetime.utcnow().isoformat(),
+            "started_at": datetime.now(timezone.utc).isoformat(),
         }
 
         try:
-            # Step 1: Fetch tweets from Twitter
-            logger.info("Step 1: Fetching tweets from Twitter...")
-            tweets = self.twitter.fetch_timeline(
-                max_results=self.max_tweets,
-                hours=self.fetch_hours,
-            )
-            stats["fetched"] = len(tweets)
-            logger.info(f"Fetched {len(tweets)} tweets from home timeline")
-
-            # Step 1a: Fetch tweets from starred authors' timelines
-            favorite_authors = list(self.db.get_favorite_authors())
-            if favorite_authors:
-                logger.info(
-                    f"Step 1a: Fetching tweets from {len(favorite_authors)} starred authors..."
-                )
-                starred_tweets = self.twitter.fetch_user_tweets(
-                    usernames=favorite_authors,
-                    max_per_user=self.starred_author_max_tweets,
-                    hours=self.fetch_hours,
-                )
-                stats["starred_fetched"] = len(starred_tweets)
-
-                # Merge and deduplicate by tweet_id
-                seen_ids = {t["tweet_id"] for t in tweets}
-                new_from_starred = 0
-                for st in starred_tweets:
-                    if st["tweet_id"] not in seen_ids:
-                        tweets.append(st)
-                        seen_ids.add(st["tweet_id"])
-                        new_from_starred += 1
-
-                stats["starred_new"] = new_from_starred
-                logger.info(
-                    f"Starred authors: {len(starred_tweets)} total, "
-                    f"{new_from_starred} new (not in home timeline)"
-                )
-
-            if not tweets:
-                logger.info("No tweets to process")
-                return stats
-
-            stats["fetched"] = len(tweets)
-
-            # Step 1b: Deduplicate - remove tweets already processed
-            new_tweets = self._deduplicate_tweets(tweets)
-            stats["new"] = len(new_tweets)
-            stats["skipped_duplicates"] = len(tweets) - len(new_tweets)
-
-            if stats["skipped_duplicates"] > 0:
-                logger.info(
-                    f"Skipped {stats['skipped_duplicates']} already-processed tweets"
-                )
-
-            if not new_tweets:
-                logger.info("No new tweets to process")
-                return stats
-
-            # Step 1c: Load author tiers
-            if not favorite_authors:
-                favorite_authors = list(self.db.get_favorite_authors())
-            favorite_authors_set = set(favorite_authors)
-            muted_authors = set(self.db.get_muted_authors())
-
-            # Skip retweets from non-favorite authors
-            tweets_for_filtering = []
-            skipped_retweets = 0
-            for tweet in new_tweets:
-                if tweet.get("is_retweet") and tweet["author_username"].lower() not in favorite_authors_set:
-                    skipped_retweets += 1
-                else:
-                    tweets_for_filtering.append(tweet)
-
-            stats["skipped_retweets"] = skipped_retweets
-            if skipped_retweets > 0:
-                logger.info(
-                    f"Skipped {skipped_retweets} retweets from non-favorite authors"
-                )
-
-            if not tweets_for_filtering:
-                logger.info("No tweets remaining after retweet filter")
-                return stats
-
-            # Step 1c2: Apply keyword blocklist (pre-LLM, favorite authors exempt)
-            blocked_keywords = self.db.get_blocked_keywords()
-            if blocked_keywords:
-                kept, blocked = filter_blocked_keywords(
-                    tweets_for_filtering,
-                    blocked_keywords,
-                    exempt_authors=favorite_authors_set,
-                )
-                stats["skipped_blocked_keywords"] = len(blocked)
-                if blocked:
-                    logger.info(
-                        f"Skipped {len(blocked)} items by keyword blocklist "
-                        f"({len(blocked_keywords)} keywords active)"
-                    )
-                tweets_for_filtering = kept
-
-            if not tweets_for_filtering:
-                logger.info("No tweets remaining after keyword blocklist")
-                return stats
-
-            # Step 1d: Build RAG context from similar voted tweets
-            rag_context = None
-            if self.rag_enabled and self.embedding_manager and self.embedding_manager.enabled:
-                logger.info("Step 1d: Building RAG context from similar voted tweets...")
-                try:
-                    similar = self.embedding_manager.find_similar_voted_tweets(
-                        tweets_for_filtering
-                    )
-                    if similar:
-                        rag_context = self._format_rag_context(similar)
-                        stats["rag_matches"] = len(similar)
-                        logger.info(f"RAG context built with {len(similar)} similar voted tweets")
-                    else:
-                        logger.info("No similar voted tweets found for RAG context")
-                except Exception as e:
-                    logger.warning(f"RAG context generation failed, continuing without: {e}")
-
-            # Step 2: Score tweets with Claude (floor threshold gets all 50+ tweets)
-            logger.info("Step 2: Scoring tweets with Claude...")
-            scored_tweets = self.claude.filter_tweets(
-                tweets_for_filtering,
-                threshold=self.filter_threshold,
-                rag_context=rag_context,
-                prompt_key=self.control_prompt,
-            )
-
-            # Step 2a: A/B test shadow scoring (score now, save after Step 3)
-            ab_test_data = None
-            if self.ab_test_config.get("enabled"):
-                try:
-                    experiment_id = self.ab_test_config["experiment_id"]
-                    challenger_key = self.ab_test_config["challenger_prompt"]
-                    control_key = self.control_prompt
-
-                    logger.info(
-                        f"A/B test '{experiment_id}': control={control_key} vs challenger={challenger_key} "
-                        f"(RAG={'on' if rag_context else 'off'})"
-                    )
-                    challenger_scores = self.claude.score_tweets_with_prompt(
-                        tweets_for_filtering, challenger_key, rag_context=rag_context
-                    )
-
-                    # Build control scores from the scored_tweets (already scored above)
-                    control_scores = []
-                    for tweet in tweets_for_filtering:
-                        if tweet.get("filter_score") is not None:
-                            control_scores.append({
-                                "tweet_id": tweet["tweet_id"],
-                                "score": tweet["filter_score"],
-                                "reason": tweet.get("filter_reason", ""),
-                            })
-
-                    ab_test_data = {
-                        "experiment_id": experiment_id,
-                        "control_scores": control_scores,
-                        "control_key": control_key,
-                        "challenger_scores": challenger_scores,
-                        "challenger_key": challenger_key,
-                    }
-                except Exception as e:
-                    logger.warning(f"A/B test shadow scoring failed (non-fatal): {e}")
-                    stats["ab_test_error"] = str(e)
-
-            # Step 2b: Apply per-author thresholds
-            filtered_tweets = []
-            tier_counts = {"favorite": 0, "muted": 0, "default": 0}
-            for tweet in scored_tweets:
-                author = tweet["author_username"].lower()
-                score = tweet.get("filter_score", 0)
-
-                if author in muted_authors:
-                    tier = "muted"
-                    threshold = self.muted_author_threshold
-                elif author in favorite_authors_set:
-                    tier = "favorite"
-                    threshold = self.favorite_author_threshold
-                else:
-                    tier = "default"
-                    threshold = self.default_threshold
-
-                passed = score >= threshold
-                tweet["filtered"] = passed
-                tier_counts[tier] += 1
-
-                if passed:
-                    filtered_tweets.append(tweet)
-                    logger.info(
-                        f"[{tier}] @{author} score={score} threshold={threshold} → PASS"
-                    )
-                else:
-                    logger.info(
-                        f"[{tier}] @{author} score={score} threshold={threshold} → SKIP"
-                    )
-
-            stats["filtered"] = len(filtered_tweets)
-            stats["tier_breakdown"] = tier_counts
-            logger.info(
-                f"Filtered to {len(filtered_tweets)} tweets "
-                f"(favorite={tier_counts['favorite']}, default={tier_counts['default']}, muted={tier_counts['muted']})"
-            )
-
-            # Step 3: Save all tweets to database (including non-filtered)
-            logger.info("Step 3: Saving tweets to database...")
-            # Update original tweets with filter results
-            tweet_map = {t["tweet_id"]: t for t in new_tweets}
-            for ft in filtered_tweets:
-                tweet_map[ft["tweet_id"]] = ft
-
-            self.db.save_tweets(list(tweet_map.values()))
-            logger.info(f"Saved {len(tweet_map)} tweets to database")
-
-            # Step 3a: Save A/B test scores (after tweets exist in DB)
-            if ab_test_data:
-                try:
-                    # Filter out scores for tweet IDs not in DB (e.g. hallucinated by Claude)
-                    valid_ids = set(tweet_map.keys())
-                    ab_test_data["control_scores"] = [
-                        s for s in ab_test_data["control_scores"]
-                        if s["tweet_id"] in valid_ids
-                    ]
-                    ab_test_data["challenger_scores"] = [
-                        s for s in ab_test_data["challenger_scores"]
-                        if s["tweet_id"] in valid_ids
-                    ]
-                    self.db.save_ab_test_scores(
-                        experiment_id=ab_test_data["experiment_id"],
-                        control_scores=ab_test_data["control_scores"],
-                        control_key=ab_test_data["control_key"],
-                        challenger_scores=ab_test_data["challenger_scores"],
-                        challenger_key=ab_test_data["challenger_key"],
-                    )
-                    stats["ab_test_control_scores"] = len(ab_test_data["control_scores"])
-                    stats["ab_test_challenger_scores"] = len(ab_test_data["challenger_scores"])
-                    logger.info(
-                        f"A/B test '{ab_test_data['experiment_id']}': saved "
-                        f"{len(ab_test_data['control_scores'])} control({ab_test_data['control_key']}) + "
-                        f"{len(ab_test_data['challenger_scores'])} challenger({ab_test_data['challenger_key']}) scores"
-                    )
-                except Exception as e:
-                    logger.warning(f"A/B test score saving failed (non-fatal): {e}")
-                    stats["ab_test_error"] = str(e)
-
-                # Step 3b: Trim scores from experiments older than
-                # current + previous (keeps the table from growing unbounded)
-                try:
-                    trimmed = self.db.trim_ab_experiments(
-                        ab_test_data["experiment_id"], keep=2
-                    )
-                    if trimmed:
-                        stats["ab_test_trimmed"] = trimmed
-                        logger.info(
-                            f"Trimmed old A/B experiments: {', '.join(trimmed)}"
-                        )
-                except Exception as e:
-                    logger.warning(f"A/B experiment trim failed (non-fatal): {e}")
-
-            # Step 4: Group by thread and send filtered tweets to Telegram
-            if filtered_tweets:
-                logger.info("Step 4: Sending filtered tweets to Telegram...")
-                tweet_groups = self._group_by_thread(filtered_tweets)
-                thread_count = sum(1 for g in tweet_groups if len(g) > 1)
-                if thread_count:
-                    logger.info(
-                        f"Grouped into {len(tweet_groups)} groups "
-                        f"({thread_count} threads)"
-                    )
-                sent_pairs = await self.telegram.send_daily_digest(tweet_groups)
-                stats["sent"] = len(sent_pairs)
-
-                # Mark tweets as sent
-                for tweet, msg_id in sent_pairs:
-                    if msg_id:
-                        self.db.mark_tweet_sent(tweet["tweet_id"], msg_id)
-            else:
-                logger.info("No filtered tweets to send")
-
-            stats["completed_at"] = datetime.utcnow().isoformat()
-            logger.info(f"Curation complete: {stats}")
-            return stats
-
+            await self._curate_twitter(stats)
         except Exception as e:
             error_msg = f"Curation error: {str(e)}"
             logger.error(error_msg, exc_info=True)
@@ -391,33 +135,403 @@ class DailyCurator:
             except Exception as notify_error:
                 logger.error(f"Failed to send error notification: {notify_error}")
 
-            return stats
+        # Step 5: newsletters that arrived by email, each sent as its own digest
+        if self.mailbox and self.newsletter:
+            try:
+                stats["inbox"] = await self.process_inbox()
+            except Exception as e:
+                logger.error(f"Inbox processing failed: {e}", exc_info=True)
+                stats["errors"].append(f"Inbox error: {e}")
 
-    @staticmethod
-    def _format_rag_context(similar_tweets: list[dict]) -> str:
-        """Format similar voted tweets into RAG context string for Claude."""
-        liked = [t for t in similar_tweets if t["vote"] == "up"]
-        disliked = [t for t in similar_tweets if t["vote"] == "down"]
+        stats["completed_at"] = datetime.now(timezone.utc).isoformat()
+        logger.info(f"Curation complete: {stats}")
+        return stats
 
-        lines = []
-        if liked:
-            lines.append("Liked tweets (boost similar content):")
-            for t in liked:
-                text_preview = t["text"][:120].replace("\n", " ")
-                lines.append(
-                    f'- @{t["author_username"]}: "{text_preview}" (similarity: {t["similarity"]:.2f})'
+    async def _curate_twitter(self, stats: dict) -> None:
+        """Steps 1-4: fetch, filter, score, save, send. Mutates ``stats``."""
+        # Step 1: Fetch tweets from Twitter
+        logger.info("Step 1: Fetching tweets from Twitter...")
+        tweets = self.twitter.fetch_timeline(
+            max_results=self.max_tweets,
+            hours=self.fetch_hours,
+        )
+        stats["fetched"] = len(tweets)
+        logger.info(f"Fetched {len(tweets)} tweets from home timeline")
+
+        # Step 1a: Fetch tweets from starred authors' timelines
+        favorite_authors = list(self.db.get_favorite_authors())
+        if favorite_authors:
+            logger.info(
+                f"Step 1a: Fetching tweets from {len(favorite_authors)} starred authors..."
+            )
+            starred_tweets = self.twitter.fetch_user_tweets(
+                usernames=favorite_authors,
+                max_per_user=self.starred_author_max_tweets,
+                hours=self.fetch_hours,
+            )
+            stats["starred_fetched"] = len(starred_tweets)
+
+            # Merge and deduplicate by item_id
+            seen_ids = {t["item_id"] for t in tweets}
+            new_from_starred = 0
+            for st in starred_tweets:
+                if st["item_id"] not in seen_ids:
+                    tweets.append(st)
+                    seen_ids.add(st["item_id"])
+                    new_from_starred += 1
+
+            stats["starred_new"] = new_from_starred
+            logger.info(
+                f"Starred authors: {len(starred_tweets)} total, "
+                f"{new_from_starred} new (not in home timeline)"
+            )
+
+        # Step 1b: New entries from subscribed feeds join the batch here,
+        # before the dedup / retweet / keyword steps, so they are blocked
+        # by the keyword list like anything else and are still processed
+        # on days when Twitter yields nothing new.
+        feed_items = self._fetch_feed_items()
+        if feed_items:
+            stats["feed_items"] = len(feed_items)
+            tweets.extend(feed_items)
+
+        if not tweets:
+            logger.info("No tweets to process")
+            return
+
+        stats["fetched"] = len(tweets)
+
+        # Step 1c: Deduplicate - remove tweets already processed
+        new_tweets = self._deduplicate_tweets(tweets)
+        stats["new"] = len(new_tweets)
+        stats["skipped_duplicates"] = len(tweets) - len(new_tweets)
+
+        if stats["skipped_duplicates"] > 0:
+            logger.info(
+                f"Skipped {stats['skipped_duplicates']} already-processed tweets"
+            )
+
+        if not new_tweets:
+            logger.info("No new tweets to process")
+            return
+
+        # Step 1d: Load author tiers
+        if not favorite_authors:
+            favorite_authors = list(self.db.get_favorite_authors())
+        favorite_authors_set = set(favorite_authors)
+        muted_authors = set(self.db.get_muted_authors())
+
+        # Skip retweets from non-favorite authors
+        tweets_for_filtering = []
+        skipped_retweets = 0
+        for tweet in new_tweets:
+            if tweet.get("is_retweet") and (tweet.get("author_username") or "").lower() not in favorite_authors_set:
+                skipped_retweets += 1
+            else:
+                tweets_for_filtering.append(tweet)
+
+        stats["skipped_retweets"] = skipped_retweets
+        if skipped_retweets > 0:
+            logger.info(
+                f"Skipped {skipped_retweets} retweets from non-favorite authors"
+            )
+
+        if not tweets_for_filtering:
+            logger.info("No tweets remaining after retweet filter")
+            return
+
+        # Step 1e: Apply keyword blocklist (pre-LLM, favorite authors exempt)
+        blocked_keywords = self.db.get_blocked_keywords()
+        if blocked_keywords:
+            kept, blocked = filter_blocked_keywords(
+                tweets_for_filtering,
+                blocked_keywords,
+                exempt_authors=favorite_authors_set,
+            )
+            stats["skipped_blocked_keywords"] = len(blocked)
+            if blocked:
+                logger.info(
+                    f"Skipped {len(blocked)} items by keyword blocklist "
+                    f"({len(blocked_keywords)} keywords active)"
                 )
-            lines.append("")
+            tweets_for_filtering = kept
 
-        if disliked:
-            lines.append("Disliked tweets (penalize similar content):")
-            for t in disliked:
-                text_preview = t["text"][:120].replace("\n", " ")
-                lines.append(
-                    f'- @{t["author_username"]}: "{text_preview}" (similarity: {t["similarity"]:.2f})'
+        if not tweets_for_filtering:
+            logger.info("No tweets remaining after keyword blocklist")
+            return
+
+        # Step 1f: Per-item nearest voted neighbours (RAG)
+        neighbors: dict[str, list[dict]] = {}
+        if self.rag_enabled and self.embedding_manager and self.embedding_manager.enabled:
+            logger.info("Step 1f: Finding voted neighbours for each item...")
+            try:
+                neighbors = self.embedding_manager.find_neighbors(
+                    tweets_for_filtering, k=self.neighbors_per_item
+                )
+                stats["rag_items_with_neighbors"] = len(neighbors)
+                logger.info(
+                    f"Neighbours found for {len(neighbors)}/{len(tweets_for_filtering)} items"
+                )
+            except Exception as e:
+                logger.warning(f"Neighbour lookup failed, continuing without: {e}")
+
+        # Step 2: Score tweets with Claude (floor threshold gets all 50+ tweets)
+        logger.info("Step 2: Scoring tweets with Claude...")
+        profile = self.load_scoring_profile()
+        scored_tweets = self.claude.filter_tweets(
+            tweets_for_filtering,
+            threshold=self.filter_threshold,
+            neighbors=neighbors or None,
+            profile=profile,
+        )
+
+        # Step 2b: Apply per-author thresholds
+        filtered_tweets = []
+        tier_counts = {"favorite": 0, "muted": 0, "default": 0}
+        for tweet in scored_tweets:
+            author = tweet["author_username"].lower()
+            score = tweet.get("filter_score")
+            if score is None:
+                tweet["filtered"] = False
+                logger.info(f"@{author} not scored; will be retried next run")
+                continue
+
+            if author in muted_authors:
+                tier = "muted"
+                threshold = self.muted_author_threshold
+            elif author in favorite_authors_set:
+                tier = "favorite"
+                threshold = self.favorite_author_threshold
+            else:
+                tier = "default"
+                threshold = self.default_threshold
+
+            passed = score >= threshold
+            tweet["filtered"] = passed
+            tier_counts[tier] += 1
+
+            if passed:
+                filtered_tweets.append(tweet)
+                logger.info(
+                    f"[{tier}] @{author} score={score} threshold={threshold} → PASS"
+                )
+            else:
+                logger.info(
+                    f"[{tier}] @{author} score={score} threshold={threshold} → SKIP"
                 )
 
-        return "\n".join(lines)
+        # Step 2c: Exploration — a few random below-threshold items,
+        # marked so the user knows, to measure recall below the threshold.
+        explored = self._pick_exploration(tweets_for_filtering, filtered_tweets)
+        for tweet in explored:
+            tweet["exploration"] = True
+            tweet["filtered"] = True
+            filtered_tweets.append(tweet)
+        stats["exploration"] = len(explored)
+        stats["exploration_ids"] = [t["item_id"] for t in explored]
+
+        stats["filtered"] = len(filtered_tweets)
+        stats["tier_breakdown"] = tier_counts
+        logger.info(
+            f"Filtered to {len(filtered_tweets)} tweets "
+            f"(favorite={tier_counts['favorite']}, default={tier_counts['default']}, muted={tier_counts['muted']})"
+        )
+
+        # Step 3: Save all tweets to database (including non-filtered)
+        logger.info("Step 3: Saving tweets to database...")
+        # Update original tweets with filter results
+        tweet_map = {t["item_id"]: t for t in new_tweets}
+        for ft in filtered_tweets:
+            tweet_map[ft["item_id"]] = ft
+
+        self.db.save_items(list(tweet_map.values()))
+        logger.info(f"Saved {len(tweet_map)} tweets to database")
+
+        # Step 4: Group by thread and send filtered tweets to Telegram
+        if filtered_tweets:
+            logger.info("Step 4: Sending filtered tweets to Telegram...")
+            tweet_groups = self._group_by_thread(filtered_tweets)
+            thread_count = sum(1 for g in tweet_groups if len(g) > 1)
+            if thread_count:
+                logger.info(
+                    f"Grouped into {len(tweet_groups)} groups "
+                    f"({thread_count} threads)"
+                )
+            sent_pairs = await self.telegram.send_daily_digest(tweet_groups)
+            stats["sent"] = len(sent_pairs)
+
+            # Mark tweets as sent
+            for tweet, msg_id in sent_pairs:
+                if msg_id:
+                    self.db.mark_item_sent(tweet["item_id"], msg_id)
+        else:
+            logger.info("No filtered tweets to send")
+
+    async def process_inbox(self) -> dict:
+        """Read unseen newsletter emails, extract and score their links, send
+        the ones above the default threshold (one digest per issue).
+
+        An email is acknowledged (marked seen / deleted) only once every item
+        above the threshold was delivered; otherwise it stays unseen and the
+        next run re-sends just the items that did not go out. Runs are
+        serialised so /inbox cannot overlap the scheduled job.
+
+        Returns:
+            {"emails": n, "entries": n, "sent": n} (+ "busy": True if skipped)
+        """
+        summary = {"emails": 0, "entries": 0, "sent": 0}
+        if not (self.mailbox and self.newsletter):
+            return summary
+        if self._inbox_lock.locked():
+            logger.info("Inbox already being processed; skipping")
+            return {**summary, "busy": True}
+        async with self._inbox_lock:
+            emails = await asyncio.to_thread(self.mailbox.fetch_unseen, self.email_max_per_run)
+            for mail in emails:
+                try:
+                    result = await asyncio.to_thread(self.newsletter.from_email, mail)
+                except Exception as e:
+                    logger.error(f"Newsletter email '{mail.get('subject')}' failed: {e}", exc_info=True)
+                    continue  # stays unseen → retried next run
+                summary["emails"] += 1
+                summary["entries"] += result["entries"]
+                unscored = [i for i in result["items"] if i.get("filter_score") is None]
+                good = [
+                    i for i in result["items"]
+                    if i.get("filter_score") is not None
+                    and i["filter_score"] >= self.default_threshold
+                ]
+                pending = [i for i in good if not i.get("sent_to_telegram")]
+                if pending:
+                    sent_pairs = await self.telegram.send_issue_digest(
+                        result["title"], pending, total=result["entries"],
+                    )
+                    for item, msg_id in sent_pairs:
+                        try:
+                            self.db.mark_item_sent(item["item_id"], msg_id)
+                        except Exception as e:
+                            logger.warning(f"mark_item_sent failed for {item['item_id']}: {e}")
+                    summary["sent"] += len(sent_pairs)
+                    if len(sent_pairs) < len(pending):
+                        logger.warning(
+                            f"'{result['title']}': {len(pending) - len(sent_pairs)} items not "
+                            "delivered; email left unseen for retry"
+                        )
+                        continue
+                if unscored:
+                    # A scoring batch failed; the unscored links are retried
+                    # with the email next run (scored ones are not re-sent).
+                    logger.warning(
+                        f"'{result['title']}': {len(unscored)} links unscored; email left unseen for retry"
+                    )
+                    continue
+                await asyncio.to_thread(self.mailbox.acknowledge, mail["uid"])
+        if summary["emails"]:
+            logger.info(f"Inbox: {summary}")
+        return summary
+
+    def score_items(self, items: list[dict]) -> list[dict]:
+        """Score and persist items outside the daily batch (newsletters,
+        captures): neighbours + compiled profile, no threshold."""
+        neighbors = None
+        if self.rag_enabled and self.embedding_manager and self.embedding_manager.enabled:
+            try:
+                neighbors = self.embedding_manager.find_neighbors(items, k=self.neighbors_per_item) or None
+            except Exception as e:
+                logger.warning(f"Neighbour lookup failed: {e}")
+        self.claude.filter_tweets(
+            items, threshold=0, neighbors=neighbors, profile=self.load_scoring_profile(),
+        )
+        self.db.save_items(items)
+        return items
+
+    def _fetch_feed_items(self) -> list[dict]:
+        """Unscored entries from active feeds, as pipeline items."""
+        if not self.feed_fetcher:
+            return []
+        try:
+            feeds = self.db.get_feeds()
+        except Exception as e:
+            logger.warning(f"Could not load feeds: {e}")
+            return []
+        if not feeds:
+            return []
+        logger.info(f"Step 1b: Polling {len(feeds)} feeds...")
+        items: list[dict] = []
+        for feed in feeds:
+            try:
+                entries = self.feed_fetcher.fetch_entries(feed["url"])
+                candidates = [e for e in entries if e.get("url")]
+                ids = [self.feed_fetcher.blog_fetcher.build_post(
+                    url=e["url"], title=e.get("title") or e["url"])["item_id"] for e in candidates]
+                scored = self.db.get_scored_ids(ids)
+                fresh = [e for e, iid in zip(candidates, ids) if iid not in scored]
+                new_items = self.feed_fetcher.entries_to_items(
+                    feed, fresh, max_items=self.feed_max_entries
+                )
+                items.extend(new_items)
+                self.db.update_feed_state(feed["url"])
+                logger.info(f"  {feed.get('title') or feed['url']}: {len(new_items)} new")
+            except Exception as e:
+                logger.warning(f"Feed {feed['url']} failed: {e}")
+                self.db.update_feed_state(feed["url"], error=str(e))
+        return items
+
+    def load_scoring_profile(self) -> Optional[str]:
+        """Profile text for the scoring prompt (compiled when available)."""
+        if self.profile_source != "compiled":
+            return None
+        try:
+            profiles = self.db.get_latest_profiles()
+        except Exception as e:
+            logger.warning(f"Could not load compiled profiles, using baseline: {e}")
+            return None
+        if not isinstance(profiles, dict) or not profiles:
+            return None
+        text = scoring_profile(profiles, self.claude.profile)
+        logger.info(
+            f"Using compiled profile ({len(profiles)} sections, {len(text)} chars) for scoring"
+        )
+        return text
+
+    async def compile_profiles(self) -> dict[str, str]:
+        """Recompile preference profiles from signals (weekly job / CLI)."""
+        compiler = ProfileCompiler(self.claude.client, self.claude.model, self.db)
+        try:
+            written = await asyncio.to_thread(compiler.compile_all)
+        except Exception as e:
+            logger.error(f"Profile compilation failed: {e}", exc_info=True)
+            try:
+                await self.telegram.send_error_notification(f"Profile compilation failed: {e}")
+            except Exception:
+                pass
+            return {}
+        if written:
+            logger.info(f"Compiled profiles: {', '.join(written)}")
+            try:
+                await self.telegram.send_profile_update(written)
+            except Exception as e:
+                logger.warning(f"Could not announce profile update: {e}")
+        else:
+            logger.info("Profile compilation wrote nothing (not enough votes per domain)")
+        return written
+
+    def _pick_exploration(
+        self, scored: list[dict], passed: list[dict]
+    ) -> list[dict]:
+        """Pick random below-threshold items to send as exploration."""
+        if self.exploration_per_run <= 0:
+            return []
+        passed_ids = {t["item_id"] for t in passed}
+        candidates = [
+            t for t in scored
+            if t["item_id"] not in passed_ids
+            and t.get("filter_score") is not None
+            and t.get("filter_reason") != "Not scored by Claude"
+        ]
+        if not candidates:
+            return []
+        return random.sample(candidates, min(self.exploration_per_run, len(candidates)))
 
     @staticmethod
     def _group_by_thread(tweets: list[dict]) -> list[list[dict]]:
@@ -425,7 +539,7 @@ class DailyCurator:
 
         Tweets sharing a conversation_id are grouped together and sorted
         chronologically.  A tweet whose conversation_id equals its own
-        tweet_id and has no siblings in the batch stays as a single-item group.
+        item_id and has no siblings in the batch stays as a single-item group.
 
         Args:
             tweets: Filtered tweet list (each must have raw_data with
@@ -438,7 +552,7 @@ class DailyCurator:
 
         groups: OrderedDict[str, list[dict]] = OrderedDict()
         for tweet in tweets:
-            conv_id = tweet.get("raw_data", {}).get("conversation_id", tweet["tweet_id"])
+            conv_id = tweet.get("raw_data", {}).get("conversation_id", tweet["item_id"])
             groups.setdefault(conv_id, []).append(tweet)
 
         result: list[list[dict]] = []
@@ -450,25 +564,36 @@ class DailyCurator:
         return result
 
     def _deduplicate_tweets(self, tweets: list[dict]) -> list[dict]:
-        """Remove tweets that are already in the database.
+        """Drop tweets that already have a filter score in the database.
 
-        Skips tweets that have already been:
-        - Sent to Telegram, OR
-        - Already scored by Claude (filtered or not)
-
-        Args:
-            tweets: List of tweet dictionaries
-
-        Returns:
-            List of new tweets not yet processed
+        One batched ``IN`` query instead of a round trip per tweet.
         """
-        new_tweets = []
-        for tweet in tweets:
-            existing = self.db.get_tweet_by_id(tweet["tweet_id"])
-            if existing and existing.get("filter_score") is not None:
-                continue
-            new_tweets.append(tweet)
-        return new_tweets
+        if not tweets:
+            return []
+        scored_ids = self.db.get_scored_ids([t["item_id"] for t in tweets])
+        return [t for t in tweets if t["item_id"] not in scored_ids]
+
+    def schedule_weekly_profile(
+        self, weekday: str, hour: int = 9, minute: int = 30,
+        timezone: Optional[str] = None,
+    ) -> None:
+        """Recompile profiles once a week (after that day's digest)."""
+        weekday = (weekday or "").strip().lower()
+        if not weekday:
+            logger.info("Weekly profile compilation disabled")
+            return
+        every = getattr(schedule.every(), weekday, None)
+        if every is None:
+            raise ValueError(f"Unknown weekday for profile compilation: {weekday!r}")
+        time_str = f"{hour:02d}:{minute:02d}"
+
+        def _launch() -> None:
+            task = asyncio.create_task(self.compile_profiles())
+            task.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
+
+        job = every.at(time_str, timezone) if timezone else every.at(time_str)
+        job.do(_launch)
+        logger.info(f"Scheduled weekly profile compilation on {weekday} at {time_str}")
 
     def schedule_daily(
         self,
@@ -539,45 +664,55 @@ class DailyCurator:
 
 async def feedback_handler(
     db: DatabaseClient,
-    tweet_id: str,
+    item_id: str,
     vote: str,
     telegram_message_id: int,
     notes: str = None,
     embedding_manager: Optional[EmbeddingManager] = None,
+    strength: int = 1,
+    source: str = "button",
 ) -> None:
-    """Handle feedback from Telegram buttons.
+    """Handle a vote from Telegram (button, reaction or /like).
 
-    Saves feedback and embeds the tweet for future RAG context.
+    Appends a vote signal and embeds the item for future neighbour lookups.
 
     Args:
         db: Database client
-        tweet_id: Twitter ID of the tweet
+        item_id: Item ID
         vote: 'up' or 'down'
         telegram_message_id: Telegram message ID
         notes: Optional reason for the vote
-        embedding_manager: Optional EmbeddingManager to embed voted tweet
+        embedding_manager: Optional EmbeddingManager to embed voted item
+        strength: 1 normal, 2 strong (🔥)
+        source: 'button' | 'reaction' | 'like_cmd'
     """
     try:
-        db.save_feedback(
-            tweet_id=tweet_id,
-            vote=vote,
+        db.save_signal(
+            item_id=item_id,
+            kind="vote",
+            value=vote,
+            strength=strength,
+            reason=notes,
+            source=source,
             telegram_message_id=telegram_message_id,
-            notes=notes,
         )
-        logger.info(f"Saved feedback: tweet={tweet_id}, vote={vote}, notes={notes}")
+        logger.info(
+            f"Saved vote: item={item_id}, vote={vote}, strength={strength}, "
+            f"source={source}, notes={notes}"
+        )
     except Exception as e:
-        logger.error(f"Error saving feedback: {e}")
+        logger.error(f"Error saving vote: {e}")
         return
 
-    # Embed the tweet for RAG (skip if already embedded)
+    # Embed the item for RAG (skip if already embedded)
     if embedding_manager and embedding_manager.enabled:
         try:
-            if not db.has_embedding(tweet_id):
-                tweet = db.get_tweet_by_id(tweet_id)
-                if tweet and tweet.get("text"):
-                    embedding = embedding_manager.generate_embedding(tweet["text"])
+            if not db.has_embedding(item_id):
+                item = db.get_item(item_id)
+                if item and item.get("text"):
+                    embedding = embedding_manager.generate_embedding(item["text"])
                     if embedding:
-                        db.save_embedding(tweet_id, embedding)
-                        logger.info(f"Embedded voted tweet {tweet_id} for RAG")
+                        db.save_embedding(item_id, embedding)
+                        logger.info(f"Embedded voted item {item_id} for RAG")
         except Exception as e:
-            logger.warning(f"Failed to embed voted tweet {tweet_id}: {e}")
+            logger.warning(f"Failed to embed voted item {item_id}: {e}")

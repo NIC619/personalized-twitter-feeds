@@ -39,8 +39,13 @@ This project deploys as a single always-on **Web** service on Railway. One proce
 - `SCHEDULE_SKIP_WEEKDAYS` (default empty) — comma-separated weekday names to skip (e.g. `sunday` or `saturday,sunday`). Weekday is evaluated in `SCHEDULE_TIMEZONE`.
 - `FETCH_HOURS`, `MAX_TWEETS`, `FILTER_THRESHOLD`
 - `FAVORITE_THRESHOLD_OFFSET`, `MUTED_THRESHOLD_OFFSET`, `STARRED_AUTHOR_MAX_TWEETS`
-- `RAG_ENABLED`, `EMBEDDING_MODEL`, `RAG_SIMILARITY_LIMIT`
-- `AB_TEST_ENABLED`, `AB_TEST_EXPERIMENT_ID`, `AB_TEST_CHALLENGER_PROMPT`
+- `RAG_ENABLED`, `EMBEDDING_MODEL`, `RAG_SIMILARITY_LIMIT` (neighbours per item)
+- `EXPLORATION_PER_RUN`, `CLAUDE_MODEL`
+- `FEED_MAX_ENTRIES_PER_RUN` (default `10`)
+- `EMAIL_IMAP_HOST`, `EMAIL_IMAP_USER`, `EMAIL_IMAP_PASSWORD` (all three enable newsletter email ingestion), `EMAIL_IMAP_FOLDER` (default `INBOX`), `EMAIL_MAX_PER_RUN` (default `10`), `EMAIL_DELETE_PROCESSED` (default `false`)
+- `PROFILE_SOURCE` (default `compiled`), `PROFILE_COMPILE_WEEKDAY` (default `sunday`, runs at `SCHEDULE_HOUR`:30)
+- `REDIRECT_BASE_URL` (defaults to `WEBHOOK_URL`) — base for `/r/<item_id>` click-tracking links served by the bot's own HTTP server, which also serves the Telegram webhook at `/<token>` and `/health`
+- Removed (ignored if still set): `CONTROL_PROMPT`, `AB_TEST_ENABLED`, `AB_TEST_EXPERIMENT_ID`, `AB_TEST_CHALLENGER_PROMPT`
 
 ### Timezone: `SCHEDULE_TIMEZONE` vs Railway's `TZ`
 
@@ -50,6 +55,17 @@ There are two separate timezone concerns — keep them in mind:
 2. **Container local time** — controlled by Railway's `TZ` env var. Affects log timestamps and any `datetime.now()` calls without a tz. Railway containers default to **UTC**. If you want log timestamps to match your local clock, set `TZ=Asia/Taipei` (or whatever you prefer) as a Railway env var. This is cosmetic — it does **not** affect the curation schedule.
 
 Recommended: set **both** to the same value to avoid confusion.
+
+### Reactions
+The webhook is registered with `allowed_updates=ALL_TYPES` so emoji reactions on sent items reach the bot. If you ever registered the webhook by hand, redeploying re-registers it with the right update types.
+
+## Database migrations
+
+Before deploying a version that needs new tables, run the matching file(s) in
+`scripts/migrations/` in the Supabase SQL Editor, in date order. They are
+idempotent. Phase 3 (`2026-10-31_phase3_items.sql`) creates `items`, `signals`,
+`item_embeddings`, `preference_profiles` and copies the legacy tables into them;
+the code only reads the new tables from that version on. Phase 4 (`2026-10-31_phase4_feeds.sql`) adds the `feeds` table.
 
 ## Operational notes
 
