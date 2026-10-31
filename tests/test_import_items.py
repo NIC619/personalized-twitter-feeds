@@ -10,6 +10,17 @@ import_items = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(import_items)
 
 
+class TestVoteSignal:
+    def test_created_at_falls_back_to_import_time(self):
+        sig = import_items.vote_signal({"item_id": "x", "source": "import:t", "_note": "n"}, "2026-10-31T00:00:00+00:00")
+        assert sig["created_at"] == "2026-10-31T00:00:00+00:00" and sig["reason"] == "n"
+        assert sig["kind"] == "vote" and sig["value"] == "up"
+
+    def test_item_timestamp_wins(self):
+        sig = import_items.vote_signal({"item_id": "x", "source": "s", "created_at": "2024-01-01T00:00:00+00:00"}, "now")
+        assert sig["created_at"] == "2024-01-01T00:00:00+00:00"
+
+
 class TestParseCsv:
     def test_generic_csv(self, tmp_path):
         p = tmp_path / "likes.csv"

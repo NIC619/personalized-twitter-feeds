@@ -16,6 +16,8 @@ from src.embeddings import EmbeddingManager
 from src.scheduler import DailyCurator, feedback_handler
 from src.blog_fetcher import BlogFetcher
 from src.feeds import FeedFetcher
+from src.email_ingest import MailboxFetcher
+from src.newsletter import NewsletterProcessor
 from src.error_logger import attach_db_error_handler
 from src.capture import minimal_url_item, text_item
 from src.profile_compiler import render_preferences_md, scoring_profile
@@ -232,6 +234,9 @@ def init_components(settings, num_tweets=None, hours=None):
     async def on_lookup_message(telegram_message_id: int) -> dict | None:
         return await asyncio.to_thread(db.get_item_by_message_id, telegram_message_id)
 
+    async def on_mark_sent(item_id: str, telegram_message_id: int) -> None:
+        await asyncio.to_thread(db.mark_item_sent, item_id, telegram_message_id)
+
     redirect_base_url = settings.redirect_base_url
     if redirect_base_url is None and not settings.development_mode:
         redirect_base_url = settings.webhook_url
@@ -338,38 +343,27 @@ def init_components(settings, num_tweets=None, hours=None):
         return await asyncio.to_thread(_capture)
 
     # Newsletter: LLM extracts the linked items, they are scored like anything else
+    newsletter = NewsletterProcessor(claude, blog_fetcher, db, score=_score_and_save)
+
     async def on_newsletter(url: str) -> dict:
-        def _run():
-            page = blog_fetcher.fetch_page(url)
-            if not page:
-                return {"entries": 0, "items": []}
-            entries = claude.extract_newsletter_entries(page["title"], page["text"])
-            if not entries:
-                return {"entries": 0, "items": []}
-            items = []
-            for e in entries:
-                post = blog_fetcher.build_post(
-                    url=e["url"], title=e["title"], body=e.get("summary") or "",
-                    author=e.get("author"), source="newsletter",
-                    original_url=url,
-                    extra_raw={"newsletter_url": url, "newsletter_title": page["title"],
-                               "section": e.get("section")},
-                )
-                items.append(post)
-            # Skip ones already scored (same link in several issues)
-            already = db.get_scored_ids([i["item_id"] for i in items])
-            fresh = [i for i in items if i["item_id"] not in already]
-            if fresh:
-                _score_and_save(fresh)
-            scored = {i["item_id"]: i for i in fresh}
-            known = db.get_items([i["item_id"] for i in items if i["item_id"] in already])
-            ordered = [scored.get(i["item_id"]) or known.get(i["item_id"]) for i in items]
-            good = [
-                i for i in ordered
-                if i and (i.get("filter_score") or 0) >= settings.filter_threshold
-            ]
-            return {"entries": len(entries), "items": good}
-        return await asyncio.to_thread(_run)
+        result = await asyncio.to_thread(newsletter.from_page, url)
+        good = [
+            i for i in result["items"]
+            if (i.get("filter_score") or 0) >= settings.filter_threshold
+        ]
+        return {"entries": result["entries"], "items": good}
+
+    # Newsletters by email (IMAP), processed after the digest and on /inbox
+    mailbox = None
+    if settings.email_imap_host and settings.email_imap_user and settings.email_imap_password:
+        mailbox = MailboxFetcher(
+            host=settings.email_imap_host, user=settings.email_imap_user,
+            password=settings.email_imap_password, folder=settings.email_imap_folder,
+        )
+        logger.info(f"Email ingestion enabled: {settings.email_imap_user} / {settings.email_imap_folder}")
+
+    async def on_inbox() -> dict:
+        return await curator.process_inbox()
 
     # Feeds
     async def on_feed_add(url: str) -> dict | None:
@@ -414,6 +408,7 @@ def init_components(settings, num_tweets=None, hours=None):
         feed_add_callback=on_feed_add,
         feed_list_callback=on_feed_list,
         feed_remove_callback=on_feed_remove,
+        inbox_callback=on_inbox if mailbox else None,
         add_blocked_keyword_callback=on_add_blocked_keyword,
         list_blocked_keywords_callback=on_list_blocked_keywords,
         remove_blocked_keyword_callback=on_remove_blocked_keyword,
@@ -425,6 +420,7 @@ def init_components(settings, num_tweets=None, hours=None):
         note_callback=on_note,
         open_callback=on_open,
         lookup_message_callback=on_lookup_message,
+        mark_sent_callback=on_mark_sent,
         redirect_base_url=redirect_base_url,
     )
 
@@ -447,6 +443,9 @@ def init_components(settings, num_tweets=None, hours=None):
         profile_source=settings.profile_source,
         feed_fetcher=feed_fetcher,
         feed_max_entries=settings.feed_max_entries_per_run,
+        newsletter=newsletter,
+        mailbox=mailbox,
+        email_max_per_run=settings.email_max_per_run,
     )
 
     logger.info(f"All components initialized (max_tweets={max_tweets}, fetch_hours={fetch_hours})")

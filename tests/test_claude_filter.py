@@ -126,7 +126,7 @@ class TestFilterTweets:
         assert kwargs["tool_choice"] == {"type": "auto", "disable_parallel_tool_use": True}
         assert "temperature" not in kwargs
         assert kwargs["output_config"] == {"effort": "medium"}
-        assert kwargs["model"] == "claude-sonnet-4-6"
+        assert kwargs["model"] == "claude-sonnet-5-5"
 
     def test_default_profile_in_prompt(self, claude_filter, sample_tweet):
         claude_filter.client.messages.create.return_value = tool_response([])

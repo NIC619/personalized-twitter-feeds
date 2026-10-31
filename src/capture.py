@@ -1,7 +1,22 @@
 """Turn things the user sends to the bot into items.
 
-Pure helpers: classify a message, build minimal items for URLs that could
-not be fetched and for free text / forwarded posts.
+Pure helpers: parse a message into an explicit instruction, build minimal
+items for URLs that could not be fetched and for free text / forwarded posts.
+
+The grammar is deliberately small and explicit (no guessing from word
+counts). A message is one of:
+
+* ``:like <url|tweet id>... [comment]`` → upvote each target; the comment is
+  saved as the reason. ``:dislike`` (alias ``:down``) does the same with a
+  downvote.
+* ``:star <@handle|profile url>...`` → toggle starred authors.
+* ``:note <text>`` → save the text as a note item (upvoted).
+* A message containing URLs and no verb → the URLs are liked (tweet or any
+  page); profile URLs star their author; the remaining words are the reason.
+* A forwarded post → saved as an item with its origin (upvoted).
+* A reply to a delivered item → a note on it (handled before this module).
+
+Anything else is not captured; the bot answers with the grammar.
 """
 
 import hashlib
@@ -13,34 +28,99 @@ from urllib.parse import urlparse
 
 from src.content import generate_blog_id, is_http_url, is_tweet_url, is_twitter_profile_url
 
-# Shortest free text worth storing as an item on its own
-MIN_TEXT_CAPTURE = 20
 USERNAME_RE = re.compile(r"^@?[A-Za-z0-9_]{1,15}$")
+VERBS = {
+    ":like": "like",
+    ":dislike": "dislike",
+    ":down": "dislike",
+    ":star": "star",
+    ":note": "note",
+}
+USAGE = (
+    "I didn't catch that. You can send:\n"
+    "• a URL (tweet, article, anything), optionally with words → liked, words saved as the reason\n"
+    "• :like URL [why]  ·  :dislike URL [why]\n"
+    "• :star @handle (or a profile URL)\n"
+    "• :note your thought\n"
+    "• a forwarded post → saved\n"
+    "• a reply to any item → note on it"
+)
 
 
 @dataclass
 class Classified:
+    action: Optional[str] = None                          # like | dislike | star | note | None
     tweet_refs: list[str] = field(default_factory=list)   # tweet URLs or numeric ids
     urls: list[str] = field(default_factory=list)         # other http(s) URLs
     usernames: list[str] = field(default_factory=list)    # profile URLs / @handles
-    text: Optional[str] = None                            # free text worth capturing
+    text: Optional[str] = None                            # note text (":note", forwards)
+    comment: Optional[str] = None                         # words around the targets (vote reason)
     unknown: list[str] = field(default_factory=list)
+
+    @property
+    def vote(self) -> Optional[str]:
+        return {"like": "up", "dislike": "down"}.get(self.action or "")
 
 
 def classify_message(text: str, forwarded: bool = False) -> Classified:
-    """Decide what a plain message asks for.
-
-    - tweet URLs / numeric ids → like that tweet
-    - profile URLs / @handles (whole message is handles) → star
-    - any other URL → capture the page
-    - forwarded posts, or free text of MIN_TEXT_CAPTURE+ chars without URLs → capture the text
-    """
+    """Parse a plain message into an instruction (see module docstring)."""
     out = Classified()
     text = (text or "").strip()
     if not text:
         return out
     tokens = text.split()
 
+    verb = VERBS.get(tokens[0].lower())
+    if verb:
+        out.action = verb
+        rest = tokens[1:]
+        if verb == "note":
+            body = text[len(tokens[0]):].strip()
+            if body:
+                out.text = body
+            else:
+                out.unknown.append(text)
+            return out
+        if verb == "star":
+            for tok in rest:
+                if is_twitter_profile_url(tok) or USERNAME_RE.match(tok):
+                    out.usernames.append(tok)
+                else:
+                    out.unknown.append(tok)
+            if not out.usernames:
+                out.unknown.append(text)
+            return out
+        # like / dislike
+        words = _split_targets(rest, out)
+        if not (out.tweet_refs or out.urls):
+            out.unknown.append(text)
+        elif words:
+            out.comment = " ".join(words)
+        return out
+
+    # No verb: URLs decide
+    words = _split_targets(tokens, out, allow_numeric=False)
+    if out.tweet_refs or out.urls or out.usernames:
+        if out.tweet_refs or out.urls:
+            out.action = "like"
+        elif out.usernames:
+            out.action = "star"
+        if words and out.action == "like":
+            out.comment = " ".join(words)
+        return out
+
+    if forwarded:
+        out.action = "note"
+        out.text = text
+        return out
+
+    out.unknown.append(text)
+    return out
+
+
+def _split_targets(tokens: list[str], out: Classified, allow_numeric: bool = True) -> list[str]:
+    """Sort tokens into tweet refs / URLs / profile URLs; return the leftover words."""
+    words: list[str] = []
     for tok in tokens:
         if is_http_url(tok):
             if is_twitter_profile_url(tok):
@@ -49,27 +129,11 @@ def classify_message(text: str, forwarded: bool = False) -> Classified:
                 out.tweet_refs.append(tok)
             else:
                 out.urls.append(tok)
-
-    if out.tweet_refs or out.urls or out.usernames:
-        # Leftover plain words alongside a URL are a comment, not a command
-        return out
-
-    if all(tok.isdigit() for tok in tokens):
-        out.tweet_refs.extend(tokens)
-        return out
-
-    if all(USERNAME_RE.match(tok) for tok in tokens) and (
-        len(tokens) == 1 or all(tok.startswith("@") for tok in tokens)
-    ):
-        out.usernames.extend(tokens)
-        return out
-
-    if forwarded or len(text) >= MIN_TEXT_CAPTURE:
-        out.text = text
-        return out
-
-    out.unknown.append(text)
-    return out
+        elif allow_numeric and tok.isdigit() and len(tok) >= 10:
+            out.tweet_refs.append(tok)
+        else:
+            words.append(tok)
+    return words
 
 
 def text_item(text: str, origin: Optional[dict] = None) -> dict:

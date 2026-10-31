@@ -92,11 +92,40 @@ scoring prompt. An MCP server exposes the store to other agents.
   verify on the real bot after deploy.
 - Exploration items set `filtered=True` in `items`; the `exploration`
   column disambiguates. `get_author_stats` does not weight 🔥 differently.
-- No email ingestion for newsletters; all three of the user's newsletters
-  turned out to have feeds.
+- Newsletter emails: `src/email_ingest.py` (IMAP, stdlib) feeds
+  `src/newsletter.py`, which is also what `/newsletter <url>` uses now.
 - The internal item key was renamed `tweet_id` → `item_id` by sed across
   src/, scripts/, tests/ (not `scripts/setup_database.py` or migrations).
   Look for stragglers in strings/log messages.
+
+## Changes since the first review (2026-10-31)
+
+All six findings from the first Codex pass are addressed; each has a test:
+
+1. Twitter-archive import: `vote_signal()` always sets `created_at`; re-runs
+   add votes to items that exist but have none (`db.get_voted_ids`).
+2. Reason proposals run as tracked background tasks (`_background`); a late
+   proposal is dropped if the vote was undone or changed meanwhile.
+3. Feeds are polled in step 1b, before the empty-batch return, dedup and the
+   keyword blocklist.
+4. `_handle_reaction` falls back to `old_reaction` for the previous vote.
+5. `get_signals_for_profile` paginates with `range`.
+6. `_send_liked_item` and newsletter/inbox sends persist the message id via
+   `mark_sent_callback` → `mark_item_sent`.
+
+Also new in this round, worth a look:
+
+- `src/capture.py` grammar rewrite (`:like/:dislike/:star/:note`, URL + words
+  = like + reason). `/like` args go through the same parser.
+- `src/newsletter.py` (`NewsletterProcessor`), `src/email_ingest.py`
+  (`MailboxFetcher`, `parse_email`), `DailyCurator.process_inbox`, `/inbox`.
+  Check: IMAP connection per call (no pooling, by design), `BODY.PEEK` so
+  nothing is marked seen before processing, `resolve_url` on every email
+  link, `clean_url` stripping tracking params before item ids are derived.
+- `run_daily_curation` is now a wrapper around `_curate_twitter` so the
+  inbox step runs even when Twitter yields nothing.
+- `_call_tool` retries once when the model answers without the tool call.
+- Defaults: `claude-sonnet-5-5`, `FILTER_THRESHOLD=50`.
 
 ## Questions a reviewer could answer
 

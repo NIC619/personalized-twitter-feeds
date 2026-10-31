@@ -91,11 +91,7 @@ class FeedsMixin:
             f"Found {result['entries']} links; {len(items)} worth your time."
             + ("" if items else " Nothing passed the threshold.")
         )
-        for i, item in enumerate(items, 1):
-            self._tweet_authors[item["item_id"]] = item.get("author_username")
-            msg_id = await self._send_item(item, position=(i, len(items)))
-            if msg_id and i < len(items):
-                await asyncio.sleep(0.5)
+        await self._send_scored_items(items)
 
     async def _send_item(self, item: dict, position: Optional[tuple[int, int]] = None) -> Optional[int]:
         """Send any scored item with the vote keyboard (articles use the article layout)."""
@@ -115,6 +111,59 @@ class FeedsMixin:
             return None
         self._message_items[sent.message_id] = item["item_id"]
         return sent.message_id
+
+    async def _send_scored_items(self, items: list[dict]) -> list[tuple[dict, int]]:
+        """Send on-demand scored items (newsletter, inbox); persist message ids."""
+        sent: list[tuple[dict, int]] = []
+        for i, item in enumerate(items, 1):
+            self._tweet_authors[item["item_id"]] = item.get("author_username")
+            msg_id = await self._send_item(item, position=(i, len(items)))
+            if msg_id:
+                sent.append((item, msg_id))
+                await self._remember_sent(item["item_id"], msg_id)
+            if msg_id and i < len(items):
+                await asyncio.sleep(0.5)
+        return sent
+
+    async def send_issue_digest(
+        self, title: str, items: list[dict], total: int,
+    ) -> list[tuple[dict, int]]:
+        """One newsletter issue: a header line, then its items above threshold."""
+        if not self.application:
+            return []
+        header = f"📧 <b>{self._escape_html(title)}</b>\n{len(items)} of {total} links worth your time."
+        try:
+            await self.application.bot.send_message(
+                chat_id=self.chat_id, text=header, parse_mode="HTML",
+                disable_web_page_preview=True,
+            )
+        except Exception as e:
+            logger.error(f"Error sending issue header: {e}")
+        return await self._send_scored_items(items)
+
+    async def _handle_inbox(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """/inbox: process newsletter emails now instead of waiting for the daily run."""
+        if not self.inbox_callback:
+            await update.message.reply_text(
+                "Email ingestion is not configured (set EMAIL_IMAP_HOST / USER / PASSWORD)."
+            )
+            return
+        await update.message.reply_text("Checking the mailbox…")
+        try:
+            summary = await self.inbox_callback()
+        except Exception as e:
+            logger.error(f"Inbox check failed: {e}", exc_info=True)
+            await update.message.reply_text(f"Inbox check failed: {e}")
+            return
+        if not summary.get("emails"):
+            await update.message.reply_text("No new newsletter emails.")
+            return
+        await update.message.reply_text(
+            f"Processed {summary['emails']} issue(s): {summary['entries']} links, "
+            f"{summary['sent']} sent."
+        )
 
     async def _handle_feed(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE

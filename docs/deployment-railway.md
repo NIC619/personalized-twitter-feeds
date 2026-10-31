@@ -42,6 +42,7 @@ This project deploys as a single always-on **Web** service on Railway. One proce
 - `RAG_ENABLED`, `EMBEDDING_MODEL`, `RAG_SIMILARITY_LIMIT` (neighbours per item)
 - `EXPLORATION_PER_RUN`, `CLAUDE_MODEL`
 - `FEED_MAX_ENTRIES_PER_RUN` (default `10`)
+- `EMAIL_IMAP_HOST`, `EMAIL_IMAP_USER`, `EMAIL_IMAP_PASSWORD` (all three enable newsletter email ingestion), `EMAIL_IMAP_FOLDER` (default `INBOX`), `EMAIL_MAX_PER_RUN` (default `10`)
 - `PROFILE_SOURCE` (default `compiled`), `PROFILE_COMPILE_WEEKDAY` (default `sunday`, runs at `SCHEDULE_HOUR`:30)
 - `REDIRECT_BASE_URL` (defaults to `WEBHOOK_URL`) — base for `/r/<item_id>` click-tracking links served by the bot's own HTTP server, which also serves the Telegram webhook at `/<token>` and `/health`
 - Removed (ignored if still set): `CONTROL_PROMPT`, `AB_TEST_ENABLED`, `AB_TEST_EXPERIMENT_ID`, `AB_TEST_CHALLENGER_PROMPT`

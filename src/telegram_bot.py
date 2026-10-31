@@ -60,6 +60,7 @@ class TelegramCurator(
         feed_add_callback: Optional[Callable] = None,
         feed_list_callback: Optional[Callable] = None,
         feed_remove_callback: Optional[Callable] = None,
+        inbox_callback: Optional[Callable] = None,
         add_blocked_keyword_callback: Optional[Callable] = None,
         list_blocked_keywords_callback: Optional[Callable] = None,
         remove_blocked_keyword_callback: Optional[Callable] = None,
@@ -71,6 +72,7 @@ class TelegramCurator(
         note_callback: Optional[Callable] = None,
         open_callback: Optional[Callable] = None,
         lookup_message_callback: Optional[Callable] = None,
+        mark_sent_callback: Optional[Callable] = None,
         redirect_base_url: Optional[str] = None,
     ):
         """Initialize Telegram bot.
@@ -90,6 +92,8 @@ class TelegramCurator(
             feed_add_callback: Async function(url) → feed dict (discovered + saved) or None
             feed_list_callback: Async function() → list of feed dicts
             feed_remove_callback: Async function(url) → None
+            inbox_callback: Async function() → {"emails", "entries", "sent"}; processes
+                newsletter emails now (None when email ingestion is not configured)
             add_blocked_keyword_callback: Async callback function(keyword) → saved keyword
             list_blocked_keywords_callback: Async callback function() → list of keywords
             remove_blocked_keyword_callback: Async callback function(keyword) → None
@@ -101,6 +105,8 @@ class TelegramCurator(
             note_callback: Async function(item_id, text, telegram_message_id) → None
             open_callback: Async function(item_id) → destination URL or None; records the open
             lookup_message_callback: Async function(telegram_message_id) → item dict or None
+            mark_sent_callback: Async function(item_id, telegram_message_id) → None; persists
+                the message id for items sent outside the daily digest
             redirect_base_url: Public base URL for /r/<item_id> tracking links (None = direct links)
         """
         self.bot_token = bot_token
@@ -117,6 +123,7 @@ class TelegramCurator(
         self.feed_add_callback = feed_add_callback
         self.feed_list_callback = feed_list_callback
         self.feed_remove_callback = feed_remove_callback
+        self.inbox_callback = inbox_callback
         self.add_blocked_keyword_callback = add_blocked_keyword_callback
         self.list_blocked_keywords_callback = list_blocked_keywords_callback
         self.remove_blocked_keyword_callback = remove_blocked_keyword_callback
@@ -128,6 +135,7 @@ class TelegramCurator(
         self.note_callback = note_callback
         self.open_callback = open_callback
         self.lookup_message_callback = lookup_message_callback
+        self.mark_sent_callback = mark_sent_callback
         self.redirect_base_url = redirect_base_url
         self.application: Optional[Application] = None
         self._pending_feedback: dict[str, dict] = {}  # item_id → pending save info
@@ -140,6 +148,7 @@ class TelegramCurator(
         self._awaiting_reason: dict[str, str] = {}  # chat_id → item_id waiting for typed reason
         self._feed_list: dict[str, list[dict]] = {}  # chat_id → feeds shown by /feed list
         self._blockword_list: dict[str, list[str]] = {}  # chat_id → keyword list shown
+        self._tasks: set[asyncio.Task] = set()  # background tasks (reason proposals)
         logger.info("Telegram bot initialized")
 
     async def initialize(self) -> None:
@@ -164,6 +173,7 @@ class TelegramCurator(
             BotCommand("like", "Upvote a tweet or blog post — /like url"),
             BotCommand("newsletter", "Extract and score a newsletter issue — /newsletter url"),
             BotCommand("feed", "RSS subscriptions — /feed add url | list | remove n"),
+            BotCommand("inbox", "Process newsletter emails now"),
             BotCommand("thread", "Fetch and display a thread — /thread tweet_url"),
             BotCommand("starred", "List all starred authors"),
             BotCommand("blockword", "Block keyword(s) from pipeline — paste one per line or comma-separated"),
@@ -252,6 +262,9 @@ class TelegramCurator(
             CommandHandler("feed", self._handle_feed)
         )
         self.application.add_handler(
+            CommandHandler("inbox", self._handle_inbox)
+        )
+        self.application.add_handler(
             ConversationHandler(
                 entry_points=[CommandHandler("blockword", self._handle_blockword)],
                 states={
@@ -312,6 +325,7 @@ class TelegramCurator(
             "/like URL or tweet ID — upvote a tweet or blog post with a reason\n"
             "/newsletter URL — extract the links in a newsletter issue, score them, send the good ones\n"
             "/feed add URL | list | remove N — RSS/Atom subscriptions polled in the daily run\n"
+            "/inbox — process forwarded newsletter emails now (also runs after each daily digest)\n"
             "/thread tweet URL or ID — fetch and display a full thread\n"
             "/starred — list all starred authors\n"
             "/blockword — block keyword(s) from the pipeline (one per line or comma-separated)\n"
@@ -324,11 +338,13 @@ class TelegramCurator(
             "message with an emoji; remove the reaction to retract\n"
             "- After a vote I guess why; tap ✅, or ✏️ and reply with your own words\n"
             "- Reply to any item to attach a note\n"
-            "- Use the buttons to tell me what you like\n"
-            "- Your feedback helps improve future curation\n"
-            "- /like accepts both tweet URLs and blog post URLs\n"
-            "- Shortcut: send a tweet/blog URL directly to /like it, "
-            "or a profile URL / @username to /star it\n"
+            "\nSending me things (no command needed):\n"
+            "- a URL (tweet, article, anything) → saved and upvoted; "
+            "words around it are saved as your reason, e.g. "
+            "'great read https://… the section on preconfs'\n"
+            "- :like URL [why] · :dislike URL [why] · :star @handle · :note your thought\n"
+            "- a forwarded post → saved and upvoted\n"
+            "- a reply to any item → note on it\n"
             "- Blocked keywords are matched whole-word, case-insensitive, before LLM scoring\n"
             "  (content from starred authors is exempt from the blocklist)"
         )

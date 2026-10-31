@@ -161,34 +161,37 @@ def run(args) -> int:
     settings = get_settings()
     db = DatabaseClient(url=settings.supabase_url, key=settings.supabase_key)
 
-    # Skip items already present (keeps re-runs idempotent for votes too)
-    existing = set(db.get_items([i["item_id"] for i in items]).keys())
+    # Idempotent re-runs: items already in the store are not rewritten, but
+    # any of them still missing a vote (an earlier run that failed between
+    # save_items and save_signals) gets its vote now.
+    all_ids = [i["item_id"] for i in items]
+    existing = set(db.get_items(all_ids).keys())
+    voted = db.get_voted_ids(list(existing)) if existing else set()
     new_items = [i for i in items if i["item_id"] not in existing]
-    logger.info(f"{len(existing)} already in store, importing {len(new_items)}")
-    if not new_items:
+    unvoted = [i for i in items if i["item_id"] in existing and i["item_id"] not in voted]
+    logger.info(
+        f"{len(existing)} already in store ({len(unvoted)} without a vote), importing {len(new_items)}"
+    )
+    if not new_items and not unvoted:
         return 0
 
-    if args.tag_domains and settings.anthropic_api_key:
+    if new_items and args.tag_domains and settings.anthropic_api_key:
         from src.claude_filter import ClaudeFilter
         claude = ClaudeFilter(api_key=settings.anthropic_api_key, model=settings.claude_model)
         claude.filter_tweets(new_items, threshold=0)
 
+    imported_at = datetime.now(timezone.utc).isoformat()
     for i in range(0, len(new_items), 200):
         batch = new_items[i : i + 200]
         db.save_items([{k: v for k, v in it.items() if not k.startswith("_")} for it in batch])
-        db.save_signals([
-            {
-                "item_id": it["item_id"],
-                "kind": "vote",
-                "value": "up",
-                "strength": 1,
-                "reason": it.get("_note"),
-                "source": it["source"],
-                "created_at": it.get("created_at"),
-            }
-            for it in batch
-        ])
+        db.save_signals([vote_signal(it, imported_at) for it in batch])
         logger.info(f"Wrote {min(i + 200, len(new_items))}/{len(new_items)}")
+    for i in range(0, len(unvoted), 200):
+        db.save_signals([vote_signal(it, imported_at) for it in unvoted[i : i + 200]])
+    if unvoted:
+        logger.info(f"Added missing votes for {len(unvoted)} existing items")
+    if not new_items:
+        return 0
 
     emb = EmbeddingManager(api_key=settings.openai_api_key, model=settings.embedding_model, db_client=db)
     if emb.enabled:
@@ -199,6 +202,19 @@ def run(args) -> int:
     else:
         logger.warning("OPENAI_API_KEY unset: run scripts/backfill_embeddings.py later")
     return 0
+
+
+def vote_signal(item: dict, fallback_time: str) -> dict:
+    """The upvote recorded for an imported item (``created_at`` is NOT NULL)."""
+    return {
+        "item_id": item["item_id"],
+        "kind": "vote",
+        "value": "up",
+        "strength": 1,
+        "reason": item.get("_note"),
+        "source": item["source"],
+        "created_at": item.get("created_at") or fallback_time,
+    }
 
 
 def main() -> int:

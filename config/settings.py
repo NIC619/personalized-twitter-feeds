@@ -29,7 +29,7 @@ class Settings(BaseSettings):
     # Configuration
     fetch_hours: int = Field(default=24, description="Hours to look back for tweets")
     max_tweets: int = Field(default=100, description="Maximum tweets to fetch")
-    filter_threshold: int = Field(default=70, description="Default threshold for tweet filtering")
+    filter_threshold: int = Field(default=50, description="Default threshold: items scoring at or above this are sent (calibrated per model with scripts/eval_prompt.py)")
     favorite_threshold_offset: int = Field(default=20, description="How much lower the threshold is for starred authors")
     muted_threshold_offset: int = Field(default=15, description="How much higher the threshold is for muted authors")
     starred_author_max_tweets: int = Field(default=10, description="Max tweets to fetch per starred author's timeline")
@@ -52,6 +52,14 @@ class Settings(BaseSettings):
     feed_max_entries_per_run: int = Field(
         default=10, description="Newest entries fetched per feed per run"
     )
+
+    # Newsletters by email: unseen messages in this IMAP folder are read in
+    # the daily run (and on /inbox), their links extracted and scored.
+    email_imap_host: Optional[str] = Field(default=None, description="IMAP host, e.g. imap.gmail.com (unset disables)")
+    email_imap_user: Optional[str] = Field(default=None, description="Mailbox login")
+    email_imap_password: Optional[str] = Field(default=None, description="Mailbox password / app password")
+    email_imap_folder: str = Field(default="INBOX", description="Folder (Gmail label) to read")
+    email_max_per_run: int = Field(default=10, description="Max emails processed per run")
 
     # Preference profiles compiled from signals
     profile_compile_weekday: str = Field(
@@ -90,7 +98,7 @@ class Settings(BaseSettings):
     openai_api_key: Optional[str] = Field(default=None, description="OpenAI API key for embeddings")
     embedding_model: str = Field(default="text-embedding-3-small", description="OpenAI embedding model")
     rag_similarity_limit: int = Field(default=3, description="Nearest voted neighbours attached to each item for scoring")
-    claude_model: str = Field(default="claude-sonnet-4-6", description="Claude model used for scoring")
+    claude_model: str = Field(default="claude-sonnet-5-5", description="Claude model used for scoring")
     claude_effort: str = Field(default="medium", description="output_config.effort for scoring calls (low/medium/high)")
 
     model_config = {

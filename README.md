@@ -9,7 +9,8 @@ preference profile that drives the filter, and that any agent can read over MCP.
 
 - **Smart filtering**: Claude scores tweets 0-100 against your compiled preference profile, seeing each item's nearest past votes. Strict tool-use output, no JSON parsing.
 - **Telegram delivery** with 🔥/👍/👎 buttons, emoji reactions as votes, model-proposed reasons you confirm in one tap, reply-to-note, and click tracking.
-- **Capture anything**: send the bot a URL, a forwarded post, or a paragraph of text and it is stored as a liked item in the same store.
+- **Capture anything**: send the bot a URL (with your reason in the same message), a forwarded post, or `:note …` and it is stored as a voted item in the same store.
+- **Newsletters by email**: forward issues to a mailbox the bot reads; every linked article is extracted, scored and delivered as its own small digest.
 - **Imports**: Raindrop, Readwise, generic CSV, or your Twitter archive's likes.
 - **Compiled profiles**: a weekly job turns votes, reasons and notes into per-domain Markdown profiles (`PREFERENCES.md`), versioned in the database.
 - **Agent access**: an MCP server exposes `get_profile`, `search_liked`, `score_items`, `record_signal`.
@@ -107,7 +108,7 @@ SUPABASE_KEY=your_anon_key
 # Configuration (optional - defaults shown)
 FETCH_HOURS=24
 MAX_TWEETS=100
-FILTER_THRESHOLD=70
+FILTER_THRESHOLD=50
 SCHEDULE_HOUR=9
 SCHEDULE_TIMEZONE=Asia/Taipei
 SCHEDULE_SKIP_WEEKDAYS=          # e.g. "sunday" or "saturday,sunday"
@@ -168,7 +169,8 @@ python main.py --bot-only
 | --- | --- |
 | `/star username` | Toggle starred status for an author. Accepts username, @mention, or profile/tweet URL. |
 | `/like url` | Upvote a tweet, article or any URL. Accepts tweet URLs, other URLs, or numeric tweet IDs. |
-| `/newsletter url` | Read a newsletter issue, let Claude extract every linked item, score them, send the ones above the threshold. |
+| `/newsletter url` | Read a newsletter issue published on the web, let Claude extract every linked item, score them, send the ones above the threshold. |
+| `/inbox` | Process forwarded newsletter emails now (also runs after each daily digest). |
 | `/feed add url` | Subscribe to a site or feed (RSS/Atom discovered automatically). `/feed list`, `/feed remove N`. |
 | `/thread tweet_url` | Fetch a full thread and display it as a single compiled message. |
 | `/starred` | List all currently starred authors. |
@@ -177,18 +179,24 @@ python main.py --bot-only
 | `/stats` | Show author performance stats (paginated). |
 | `/help` | Show help message with available commands. |
 
-**You rarely need commands.** Anything you send is captured:
+**You rarely need commands.** Plain messages follow a small, explicit grammar
+(no guessing from word counts):
 
 | You send | What happens |
 | --- | --- |
-| A tweet URL or numeric id | Fetched, scored, stored, upvoted |
-| Any other URL | Page fetched, scored, stored, upvoted (falls back to a bare-URL item if the page can't be fetched) |
+| A message containing a URL, e.g. `great read https://… the preconf section` | Every URL (tweet, article, anything) is fetched, scored, stored and upvoted; the other words are saved as your reason, so no reason prompt follows |
+| `:like URL [why]` / `:dislike URL [why]` (`:down` works too) | Same, with the vote stated explicitly |
+| A profile URL | Author starred |
+| `:star @handle …` (or profile URLs; several allowed) | Authors starred (toggle) |
+| `:note your thought` | Stored as a note item, upvoted |
 | A forwarded post (channel, user) | Stored as an item with the origin, upvoted |
-| A paragraph of text (20+ chars) | Stored as a note item, upvoted |
-| `@handle` or a profile URL | Author starred |
 | A reply to a delivered item | Saved as a note on that item |
+| Anything else | Not stored; the bot replies with this grammar |
 
-After every upvote the bot proposes a reason and you confirm or edit it.
+A bare `@handle`, a bare tweet id or a paragraph without a verb is deliberately
+*not* interpreted. If the words around a URL are only a comment, they still become
+the reason; that is the point. After a vote with no reason the bot proposes one and
+you confirm or edit it.
 
 ### Newsletters and feeds
 
@@ -199,9 +207,16 @@ title-plus-blurb. It is gone. Now:
   in full text during the daily run and scored exactly like tweets (threshold, exploration,
   neighbours, votes all apply). Most newsletters are digests of a handful of blogs; follow
   those directly and you get the articles a day earlier, with full text.
-- **`/newsletter <issue URL>`** for digests you can't follow by feed. One model call extracts
-  every linked item from the page text (title, destination URL, blurb, section); each becomes
-  an item, is scored, and the ones above the threshold are sent with vote buttons.
+- **Email forwarding** for digests you receive by mail (ETH Daily, Substacks, MailerLite
+  letters). Point the bot at a mailbox over IMAP (`EMAIL_IMAP_HOST/USER/PASSWORD`, optional
+  `EMAIL_IMAP_FOLDER`), then either forward issues there or set a mail filter that files them
+  into that folder. After each daily digest (and on `/inbox`) every unseen message is read,
+  one model call extracts the linked items (click-tracking links are resolved to their
+  destinations first), each is scored, and the ones above the threshold arrive as a small
+  digest headed by the issue's subject. Messages are marked read only once processed, so a
+  failed run retries them. Gmail: enable IMAP, create an app password, and use the label
+  name as the folder.
+- **`/newsletter <issue URL>`** does the same for an issue published on the web.
 
 ```bash
 # Feeds table (existing deployments)
@@ -322,6 +337,8 @@ personalized-twitter-feeds/
 │   ├── feedback_flow.py           # Reactions → votes, vote/reason keyboards (pure helpers)
 │   ├── webhook_server.py          # Telegram webhook + /r/<item_id> click tracking + /health
 │   ├── feeds.py                   # RSS/Atom discovery, parsing, entries → items
+│   ├── newsletter.py              # Issue text → LLM extraction → deduped, scored items (web or email)
+│   ├── email_ingest.py            # IMAP mailbox reader, email → page text with inline links
 │   ├── blog_fetcher.py            # Article fetching, page text for LLM extraction
 │   ├── twitter_client.py          # X API client (xdk)
 │   ├── keyword_filter.py          # Pre-LLM keyword blocklist
@@ -364,13 +381,17 @@ personalized-twitter-feeds/
 7. **Learn**: Signals feed neighbours immediately and the compiled profile weekly; the eval script measures the effect
 
 ### Captured content
-`/like`, plain URLs, forwarded posts and free text go through the same scorer (threshold 0, so
-they always get a score and a domain), are saved as items, and receive an upvote with an undo
-window and a model-proposed reason.
+`/like`, URLs, `:note` text and forwarded posts go through the same scorer (threshold 0, so
+they always get a score and a domain), are saved as items, and receive the stated vote with an
+undo window. A reason typed in the same message is saved with the vote; otherwise the model
+proposes one.
 
 ### Feeds and newsletters
-Subscribed feeds are polled in step 1 of the daily run; unscored entries are fetched in full and
-join the tweet batch. `/newsletter` runs on demand: page text → LLM extraction → scoring → send.
+Subscribed feeds are polled at the start of the daily run, before dedup and the keyword
+blocklist, so their entries are treated exactly like tweets. Newsletter emails are processed
+after the digest (step 5) and on `/inbox`: email HTML → text with inline links → LLM
+extraction → tracking links resolved → dedup against the store → scoring → one digest per
+issue. `/newsletter <url>` runs the same pipeline on a web page.
 
 ## Filtering Criteria
 
@@ -402,7 +423,7 @@ The choices below reflect how I personally want this tool to behave. They are no
 ### Author tiers & filtering
 
 - **Retweets from non-favorite authors are dropped entirely** (`src/scheduler.py`). Favorites' retweets are treated as curation signal worth reading; everyone else's are treated as noise.
-- **Three author tiers with different score thresholds**: favorites pass at 50, defaults at 70, muted at 85 (`FILTER_THRESHOLD` ± offsets). Claude scores everything against the lowest floor so feedback signal isn't lost for muted authors.
+- **Three author tiers with different score thresholds**: favorites pass at 30, defaults at 50, muted at 65 (`FILTER_THRESHOLD` ± offsets; defaults calibrated for Sonnet 5.5). Claude scores everything against the lowest floor so feedback signal isn't lost for muted authors.
 - **Starred authors have a dedicated fetch path** alongside the home timeline, capped per author. Favorites are treated as a distinct content source, not just surfaced by timeline algorithms.
 - **Keyword blocklist runs before Claude scoring; favorites are exempt.** Saves API cost on obvious noise, but trusts favorites' judgment even when they post about blocked topics.
 
@@ -437,7 +458,7 @@ The choices below reflect how I personally want this tool to behave. They are no
 | ------------------- | ----------- | --------------------------------------- |
 | `FETCH_HOURS`       | 24          | Hours to look back for tweets           |
 | `MAX_TWEETS`        | 100         | Maximum tweets to fetch per run         |
-| `FILTER_THRESHOLD`  | 70          | Minimum score to send to Telegram       |
+| `FILTER_THRESHOLD`  | 50          | Minimum score to send to Telegram (50 for Sonnet 5.5, 60 for Sonnet 4.6) |
 | `SCHEDULE_HOUR`     | 9           | Hour to run daily curation (24h format) |
 | `SCHEDULE_TIMEZONE` | Asia/Taipei | Timezone for scheduling                 |
 | `SCHEDULE_SKIP_WEEKDAYS` | (empty) | Comma-separated weekday names to skip in scheduled mode (e.g. `sunday`). Evaluated in `SCHEDULE_TIMEZONE`. |
@@ -445,7 +466,10 @@ The choices below reflect how I personally want this tool to behave. They are no
 | `RAG_SIMILARITY_LIMIT` | 3        | Neighbours per item                     |
 | `EXPLORATION_PER_RUN` | 2         | Random below-threshold items sent per run (🎲) |
 | `FEED_MAX_ENTRIES_PER_RUN` | 10   | Newest entries fetched per feed per run |
-| `CLAUDE_MODEL`      | claude-sonnet-4-6 | Scoring model                     |
+| `CLAUDE_MODEL`      | claude-sonnet-5-5 | Scoring model                     |
+| `EMAIL_IMAP_HOST` / `EMAIL_IMAP_USER` / `EMAIL_IMAP_PASSWORD` | (unset) | Mailbox for forwarded newsletters; all three enable email ingestion |
+| `EMAIL_IMAP_FOLDER` | INBOX       | Folder / Gmail label to read            |
+| `EMAIL_MAX_PER_RUN` | 10          | Max newsletter emails processed per run |
 | `REDIRECT_BASE_URL` | `WEBHOOK_URL` | Base URL for click-tracking links; unset in dev = direct links |
 
 

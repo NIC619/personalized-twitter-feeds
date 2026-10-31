@@ -98,6 +98,9 @@
 - [x] `feeds` table, `/feed add|list|remove`, RSS/Atom discovery from a site URL
 - [x] Daily run polls feeds; new entries fetched in full and scored like tweets
 - [x] `/newsletter` = LLM extraction of linked items from page text (HTML section heuristics and `/newsletter_prefs` removed)
+- [x] Newsletters by email: forward to a mailbox, bot reads it over IMAP, same extraction pipeline, one digest per issue
+- [x] Explicit capture grammar (`:like` / `:dislike` / `:star` / `:note`, URL + words = like + reason)
+- [x] Default model `claude-sonnet-5-5`, `FILTER_THRESHOLD` 50 (eval-calibrated; 60 for Sonnet 4.6)
 
 ## Future Ideas
 
@@ -109,5 +112,5 @@
 - [x] A/B test different prompts
 - [ ] Auto-adjust threshold based on feedback ratio
 - [ ] Support for Twitter lists (not just home timeline)
-- [ ] Email ingestion for newsletters without feeds (IMAP or forward-to-address)
+- [x] Email ingestion for newsletters: IMAP mailbox read after the digest and on `/inbox` (2026-10-31)
 - [ ] Keyword alerts (always show tweets mentioning X)

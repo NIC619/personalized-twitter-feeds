@@ -31,6 +31,7 @@ from src.feedback_flow import (
     reason_prompt_buttons,
     reason_prompt_text,
     vote_buttons,
+    vote_from_reaction_set,
     vote_from_reactions,
     vote_label,
     voted_buttons,
@@ -111,6 +112,7 @@ class FeedbackMixin:
                 logger.info(f"Undo too late: item={item_id}, already saved")
                 return
             await self._cancel_vote(item_id, restore_keyboard=False)
+            self._item_votes.pop(item_id, None)
             username = self._tweet_authors.get(item_id)
             await query.edit_message_reply_markup(
                 reply_markup=self._make_tweet_buttons(item_id, username)
@@ -174,9 +176,15 @@ class FeedbackMixin:
             return item["item_id"]
         return None
 
-    async def _send_liked_item(self, item_id: str, message: str) -> bool:
-        """Send a /like'd item and record an immediate upvote (with undo)."""
-        vote = Vote("up", 1)
+    async def _send_liked_item(
+        self,
+        item_id: str,
+        message: str,
+        vote: Optional[Vote] = None,
+        reason: Optional[str] = None,
+    ) -> bool:
+        """Send a captured item and record an immediate vote (with undo)."""
+        vote = vote or Vote("up", 1)
         try:
             sent = await self.application.bot.send_message(
                 chat_id=self.chat_id,
@@ -188,9 +196,21 @@ class FeedbackMixin:
         except Exception as e:
             logger.error(f"Error sending liked item {item_id}: {e}")
             return False
-        self._message_items[sent.message_id] = item_id
-        await self._record_vote(item_id, vote, sent.message_id, source="like_cmd", grace=True)
+        await self._remember_sent(item_id, sent.message_id)
+        await self._record_vote(
+            item_id, vote, sent.message_id, source="like_cmd", grace=True, reason=reason,
+        )
         return True
+
+    async def _remember_sent(self, item_id: str, message_id: int) -> None:
+        """Map a sent message to its item, in memory and (if wired) in the DB
+        so reactions and reply-notes still resolve after a restart."""
+        self._message_items[message_id] = item_id
+        if self.mark_sent_callback:
+            try:
+                await self.mark_sent_callback(item_id, message_id)
+            except Exception as e:
+                logger.warning(f"Could not persist message id for {item_id}: {e}")
 
     async def _record_vote(
         self,
@@ -200,9 +220,11 @@ class FeedbackMixin:
         source: str,
         grace: bool,
         query=None,
+        reason: Optional[str] = None,
     ) -> None:
         """Register a vote: show it, save it (after an undo grace period for
-        buttons), then ask the model to propose a reason."""
+        buttons), then ask the model to propose a reason unless ``reason``
+        was given by the user."""
         await self._cancel_vote(item_id, restore_keyboard=False)
         self._item_votes[item_id] = vote
         self._message_items[message_id] = item_id
@@ -210,6 +232,9 @@ class FeedbackMixin:
         await self._set_keyboard(
             message_id, voted_buttons(item_id, vote, undo=grace), query=query
         )
+        if reason:
+            # The user already said why: the save carries it, no proposal.
+            self._pending_reasons[item_id] = reason
 
         async def _save(delay: float):
             if delay:
@@ -241,7 +266,18 @@ class FeedbackMixin:
         else:
             await _save(0)
 
-        await self._propose_reason(item_id, vote, message_id)
+        if reason:
+            return
+        # Proposals call the model (seconds). Run them off the update
+        # handler so an Undo tapped meanwhile is processed in time.
+        self._background(self._propose_reason(item_id, vote, message_id))
+
+    def _background(self, coro) -> asyncio.Task:
+        """Run ``coro`` as a tracked background task."""
+        task = asyncio.create_task(coro)
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+        return task
 
     async def _cancel_vote(self, item_id: str, restore_keyboard: bool = True) -> None:
         """Cancel a pending (unsaved) vote and clean up its reason prompt."""
@@ -276,8 +312,8 @@ class FeedbackMixin:
         except Exception as e:
             logger.warning(f"Reason proposal failed for {item_id}: {e}")
             return
-        if not proposal:
-            return
+        if not proposal or self._item_votes.get(item_id) != vote:
+            return  # nothing proposed, or the vote changed/was undone meanwhile
         try:
             sent = await self.application.bot.send_message(
                 chat_id=self.chat_id,
@@ -340,7 +376,9 @@ class FeedbackMixin:
         if not item_id:
             return
         vote, retracted = vote_from_reactions(mr.new_reaction, mr.old_reaction)
-        previous = self._item_votes.get(item_id)
+        # After a restart the in-memory vote is gone; Telegram's old_reaction
+        # still tells us what the previous reaction-vote was.
+        previous = self._item_votes.get(item_id) or vote_from_reaction_set(mr.old_reaction)
 
         if retracted or (vote and previous and previous != vote):
             await self._cancel_vote(item_id, restore_keyboard=False)

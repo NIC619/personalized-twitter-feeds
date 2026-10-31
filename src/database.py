@@ -350,21 +350,54 @@ class DatabaseClient:
             by_id[labeled["item_id"]] = labeled
         return list(by_id.values())
 
-    def get_signals_for_profile(self, limit: int = 4000) -> list[dict]:
-        """Votes and notes with item text/domain, newest first, for profile compilation."""
+    def get_signals_for_profile(self, limit: int = 4000, page_size: int = 1000) -> list[dict]:
+        """Votes and notes with item text/domain, newest first, for profile compilation.
+
+        Paginated: PostgREST caps a single response at 1000 rows regardless
+        of ``limit``.
+        """
+        rows: list[dict] = []
+        offset = 0
         try:
-            result = (
-                self.client.table("signals")
-                .select("item_id,kind,value,strength,reason,created_at,items(text,title,author_username,domain,url,content_type)")
-                .in_("kind", ["vote", "note"])
-                .order("created_at", desc=True)
-                .limit(limit)
-                .execute()
-            )
-            return result.data or []
+            while len(rows) < limit:
+                size = min(page_size, limit - len(rows))
+                result = (
+                    self.client.table("signals")
+                    .select("item_id,kind,value,strength,reason,created_at,items(text,title,author_username,domain,url,content_type)")
+                    .in_("kind", ["vote", "note"])
+                    .order("created_at", desc=True)
+                    .range(offset, offset + size - 1)
+                    .execute()
+                )
+                page = result.data or []
+                rows.extend(page)
+                if len(page) < size:
+                    break
+                offset += size
+            return rows
         except Exception as e:
             logger.error(f"Error loading signals for profile: {e}")
             raise
+
+    def get_voted_ids(self, item_ids: list[str], chunk_size: int = 200) -> set[str]:
+        """Subset of ``item_ids`` that already carry at least one vote signal."""
+        voted: set[str] = set()
+        ids = list(dict.fromkeys(item_ids))
+        for i in range(0, len(ids), chunk_size):
+            chunk = ids[i : i + chunk_size]
+            try:
+                result = (
+                    self.client.table("signals")
+                    .select("item_id")
+                    .eq("kind", "vote")
+                    .in_("item_id", chunk)
+                    .execute()
+                )
+            except Exception as e:
+                logger.error(f"Error checking voted ids: {e}")
+                raise
+            voted.update(row["item_id"] for row in result.data or [])
+        return voted
 
     def get_author_stats(self) -> list[dict]:
         """Aggregate author performance from votes.

@@ -45,23 +45,25 @@ def vote_from_reactions(new_reaction, old_reaction) -> tuple[Optional[Vote], boo
         reaction set (strongest wins), or None. ``retracted`` is True when
         the old set expressed a vote and the new set expresses none.
     """
-    def _best(reactions) -> Optional[Vote]:
-        best: Optional[Vote] = None
-        for r in reactions or []:
-            emoji = getattr(r, "emoji", None)
-            if emoji is None:
-                continue
-            mapped = REACTION_VOTES.get(emoji)
-            if not mapped:
-                continue
-            candidate = Vote(*mapped)
-            if best is None or candidate.strength > best.strength:
-                best = candidate
-        return best
-
-    new = _best(new_reaction)
-    old = _best(old_reaction)
+    new = vote_from_reaction_set(new_reaction)
+    old = vote_from_reaction_set(old_reaction)
     return new, (old is not None and new is None)
+
+
+def vote_from_reaction_set(reactions) -> Optional[Vote]:
+    """Strongest vote expressed by a set of reactions, or None."""
+    best: Optional[Vote] = None
+    for r in reactions or []:
+        emoji = getattr(r, "emoji", None)
+        if emoji is None:
+            continue
+        mapped = REACTION_VOTES.get(emoji)
+        if not mapped:
+            continue
+        candidate = Vote(*mapped)
+        if best is None or candidate.strength > best.strength:
+            best = candidate
+    return best
 
 
 def vote_label(vote: Vote) -> str:

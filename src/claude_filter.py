@@ -18,7 +18,7 @@ import httpx
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_MODEL = "claude-sonnet-4-6"
+DEFAULT_MODEL = "claude-sonnet-5-5"
 
 # Baseline preference profile. This is the interest list that won exp_003
 # (V4). Phase 3 replaces it with a profile compiled from recorded signals.
@@ -229,7 +229,25 @@ class ClaudeFilter:
         )
         if self.effort:
             kwargs["output_config"] = {"effort": self.effort}
+        response = self.client.messages.create(**kwargs)
+        if self._has_tool_call(response, tool["name"]):
+            return response
+        # With tool_choice=auto the model occasionally answers in prose
+        # instead of calling the tool (seen in ~2% of Sonnet 5.5 batches).
+        # One retry with an explicit nudge recovers nearly all of them.
+        logger.warning(f"No {tool['name']} call in response; retrying once")
+        kwargs["messages"] = [{
+            "role": "user",
+            "content": prompt + f"\n\nRespond only by calling the {tool['name']} tool.",
+        }]
         return self.client.messages.create(**kwargs)
+
+    @staticmethod
+    def _has_tool_call(response, name: str) -> bool:
+        for block in getattr(response, "content", []) or []:
+            if getattr(block, "type", None) == "tool_use" and getattr(block, "name", None) == name:
+                return True
+        return False
 
     # ------------------------------------------------------------------ public
 

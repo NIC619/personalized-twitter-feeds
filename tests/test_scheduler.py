@@ -467,3 +467,107 @@ class TestFeedItems:
         assert stats["feed_items"] == 1
         saved_ids = {i["item_id"] for i in db.save_items.call_args[0][0]}
         assert saved_ids == {"1", "blog_1"}
+
+    @pytest.mark.asyncio
+    async def test_feeds_processed_when_twitter_is_empty(self, components):
+        twitter, claude, telegram, db = components
+        twitter.fetch_timeline.return_value = []
+        db.get_favorite_authors.return_value = []
+        db.get_muted_authors.return_value = []
+        db.get_blocked_keywords.return_value = []
+        curator = self._curator(components, MagicMock())
+        curator._fetch_feed_items = MagicMock(return_value=[
+            {"item_id": "blog_1", "author_username": "x.example", "text": "post", "is_retweet": False},
+        ])
+        claude.filter_tweets.return_value = []
+
+        stats = await curator.run_daily_curation()
+
+        assert stats["feed_items"] == 1
+        assert [i["item_id"] for i in claude.filter_tweets.call_args[0][0]] == ["blog_1"]
+
+    @pytest.mark.asyncio
+    async def test_feed_items_respect_keyword_blocklist(self, components):
+        twitter, claude, telegram, db = components
+        twitter.fetch_timeline.return_value = []
+        db.get_favorite_authors.return_value = []
+        db.get_muted_authors.return_value = []
+        db.get_blocked_keywords.return_value = ["airdrop"]
+        curator = self._curator(components, MagicMock())
+        curator._fetch_feed_items = MagicMock(return_value=[
+            {"item_id": "blog_1", "author_username": "x.example", "text": "Huge airdrop guide", "is_retweet": False},
+            {"item_id": "blog_2", "author_username": "x.example", "text": "Consensus deep dive", "is_retweet": False},
+        ])
+        claude.filter_tweets.return_value = []
+
+        stats = await curator.run_daily_curation()
+
+        assert stats["skipped_blocked_keywords"] == 1
+        assert [i["item_id"] for i in claude.filter_tweets.call_args[0][0]] == ["blog_2"]
+
+
+# --- newsletters by email ---
+
+class TestInbox:
+    def _curator(self, components, mailbox, newsletter):
+        twitter, claude, telegram, db = components
+        return DailyCurator(
+            twitter=twitter, claude=claude, telegram=telegram, db=db,
+            filter_threshold=50, favorite_threshold_offset=20, muted_threshold_offset=15,
+            newsletter=newsletter, mailbox=mailbox, email_max_per_run=5, exploration_per_run=0,
+        )
+
+    @pytest.mark.asyncio
+    async def test_not_configured(self, components):
+        curator = self._curator(components, None, None)
+        assert await curator.process_inbox() == {"emails": 0, "entries": 0, "sent": 0}
+
+    @pytest.mark.asyncio
+    async def test_each_issue_sent_and_marked_seen(self, components):
+        twitter, claude, telegram, db = components
+        mailbox = MagicMock()
+        mailbox.fetch_unseen.return_value = [
+            {"uid": "7", "subject": "ETH Daily #7", "sender": "a@b", "text": "..."},
+            {"uid": "8", "subject": "Broken", "sender": "a@b", "text": "..."},
+        ]
+        newsletter = MagicMock()
+        good = {"item_id": "n1", "filter_score": 80, "author_username": "x.io"}
+        bad = {"item_id": "n2", "filter_score": 20, "author_username": "x.io"}
+
+        def from_email(mail):
+            if mail["uid"] == "8":
+                raise RuntimeError("extraction failed")
+            return {"title": mail["subject"], "entries": 2, "items": [good, bad]}
+        newsletter.from_email.side_effect = from_email
+        telegram.send_issue_digest = AsyncMock(return_value=[(good, 501)])
+        curator = self._curator(components, mailbox, newsletter)
+
+        summary = await curator.process_inbox()
+
+        assert summary == {"emails": 1, "entries": 2, "sent": 1}
+        telegram.send_issue_digest.assert_awaited_once_with("ETH Daily #7", [good], total=2)
+        mailbox.fetch_unseen.assert_called_once_with(5)
+        mailbox.mark_seen.assert_called_once_with("7")  # the failed one stays unseen
+
+    @pytest.mark.asyncio
+    async def test_daily_run_processes_inbox_after_digest(self, components):
+        twitter, claude, telegram, db = components
+        twitter.fetch_timeline.return_value = []
+        db.get_favorite_authors.return_value = []
+        mailbox = MagicMock()
+        mailbox.fetch_unseen.return_value = []
+        curator = self._curator(components, mailbox, MagicMock())
+
+        stats = await curator.run_daily_curation()
+
+        assert stats["inbox"] == {"emails": 0, "entries": 0, "sent": 0}
+
+    def test_score_items_uses_profile_and_saves(self, components, mock_embedding_manager):
+        twitter, claude, telegram, db = components
+        curator = self._curator(components, None, None)
+        curator.embedding_manager = mock_embedding_manager
+        items = [{"item_id": "n1", "text": "t"}]
+        curator.score_items(items)
+        claude.filter_tweets.assert_called_once()
+        assert claude.filter_tweets.call_args[1]["threshold"] == 0
+        db.save_items.assert_called_once_with(items)

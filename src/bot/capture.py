@@ -22,7 +22,7 @@ from src.bot.constants import (
     THREAD_AWAITING_INPUT,
     VOTE_GRACE_SECONDS,
 )
-from src.capture import classify_message, forward_origin
+from src.capture import USAGE, classify_message, forward_origin
 from src.content import is_blog_content, is_http_url, is_tweet_url, is_twitter_profile_url
 from src.feedback_flow import (
     Vote,
@@ -109,36 +109,33 @@ class CaptureMixin:
     async def _route_plain_message(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
-        """Default handler for plain messages: everything you send is captured.
-
-        - Tweet URLs / numeric ids → like that tweet
-        - Profile URLs / @handles → star the author
-        - Any other URL → fetch, score, store as an item with an implied like
-        - Forwarded posts and free text (20+ chars) → stored as an item with an implied like
-        """
+        """Default handler for plain messages (grammar in ``src.capture``)."""
         message = update.message
         if not message or not message.text:
             return
 
         origin = forward_origin(message)
         classified = classify_message(message.text, forwarded=origin is not None)
+        await self._act_on(update, classified, origin)
 
-        if classified.tweet_refs and self.like_tweet_callback:
-            await self._like_tweets(update, classified.tweet_refs)
+    async def _act_on(self, update: Update, classified, origin: Optional[dict] = None) -> None:
+        """Carry out a parsed instruction."""
+        vote = Vote(classified.vote, 1) if classified.vote else None
+        if classified.tweet_refs:
+            await self._like_tweets(update, classified.tweet_refs, vote=vote, reason=classified.comment)
         for url in classified.urls:
-            await self._capture_url(update, url)
+            await self._capture_url(update, url, vote=vote, reason=classified.comment)
         if classified.usernames and self.favorite_author_callback:
             await self._star_authors(update, classified.usernames)
         if classified.text:
             await self._capture_text(update, classified.text, origin)
         if classified.unknown:
-            await message.reply_text(
-                "Could not interpret: " + " ".join(classified.unknown)
-                + "\n(Send a URL, a @handle, or a longer note to save it.)"
-            )
+            await update.message.reply_text(USAGE)
 
-    async def _capture_url(self, update: Update, url: str) -> None:
-        """Store a non-tweet URL as a liked item."""
+    async def _capture_url(
+        self, update: Update, url: str, vote: Optional[Vote] = None, reason: Optional[str] = None,
+    ) -> None:
+        """Store a non-tweet URL as a voted item (upvote by default)."""
         if not self.capture_url_callback:
             await self._like_blog_post(update, url)
             return
@@ -153,7 +150,9 @@ class CaptureMixin:
             await update.message.reply_text("Could not save that link.")
             return
         self._tweet_authors[item["item_id"]] = item.get("author_username")
-        if not await self._send_liked_item(item["item_id"], self._format_item_message(item)):
+        if not await self._send_liked_item(
+            item["item_id"], self._format_item_message(item), vote=vote, reason=reason,
+        ):
             await update.message.reply_text("Error sending item.")
 
     async def _capture_text(self, update: Update, text: str, origin: Optional[dict]) -> None:
@@ -204,24 +203,24 @@ class CaptureMixin:
         if not context.args:
             await update.message.reply_text(
                 "Send me a tweet URL, blog post URL, or tweet ID to like.\n"
-                "You can send multiple separated by spaces.\n\n"
+                "Words after the URL are saved as your reason.\n\n"
                 "/cancel to abort."
             )
             return LIKE_AWAITING_INPUT
 
-        await self._like_tweets(update, context.args)
+        await self._act_on(update, classify_message(":like " + " ".join(context.args)))
         return ConversationHandler.END
 
     async def _handle_like_input(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> int:
         """Handle follow-up message with tweet URLs/IDs after /like prompt."""
-        args = update.message.text.strip().split()
-        if not args:
+        text = update.message.text.strip()
+        if not text:
             await update.message.reply_text("No input received. Try again or /cancel.")
             return LIKE_AWAITING_INPUT
 
-        await self._like_tweets(update, args)
+        await self._act_on(update, classify_message(":like " + text))
         return ConversationHandler.END
 
     async def _handle_like_cancel(
@@ -231,12 +230,21 @@ class CaptureMixin:
         await update.message.reply_text("Cancelled.")
         return ConversationHandler.END
 
-    async def _like_tweets(self, update: Update, args: list[str]) -> None:
-        """Process a list of tweet/blog URL/ID args and send each with reason buttons."""
+    async def _like_tweets(
+        self,
+        update: Update,
+        args: list[str],
+        vote: Optional[Vote] = None,
+        reason: Optional[str] = None,
+    ) -> None:
+        """Fetch each tweet (URL or id), send it and record the vote (upvote by default)."""
+        if not self.like_tweet_callback:
+            await update.message.reply_text("Tweet lookup not available.")
+            return
         for arg in args:
             # Check if this is a blog post URL (not a tweet URL)
             if is_http_url(arg) and not is_tweet_url(arg):
-                await self._capture_url(update, arg)
+                await self._capture_url(update, arg, vote=vote, reason=reason)
                 continue
 
             item_id = self._extract_item_id(arg)
@@ -261,7 +269,7 @@ class CaptureMixin:
             # Store author mapping for undo functionality
             self._tweet_authors[item_id] = tweet["author_username"]
 
-            if not await self._send_liked_item(item_id, message):
+            if not await self._send_liked_item(item_id, message, vote=vote, reason=reason):
                 await update.message.reply_text(f"Error sending tweet {item_id}.")
 
     async def _like_blog_post(self, update: Update, url: str) -> None:

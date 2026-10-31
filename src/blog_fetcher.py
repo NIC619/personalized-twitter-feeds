@@ -32,6 +32,31 @@ def domain_of(url: str) -> str:
     return urlparse(url).netloc.removeprefix("www.")
 
 
+def html_to_page_text(html, max_chars: int = MAX_PAGE_TEXT) -> str:
+    """Visible text of an HTML document with links kept inline as ``anchor <href>``.
+
+    Used for LLM entry extraction (newsletter pages and emails), so the model
+    can return real destination URLs. ``html`` may be a string or a soup.
+    """
+    soup = html if isinstance(html, BeautifulSoup) else BeautifulSoup(html or "", "html.parser")
+    for tag in soup(["script", "style", "noscript", "svg", "nav", "footer", "header", "form", "head"]):
+        tag.decompose()
+    root = (
+        soup.find("article")
+        or soup.find(attrs={"role": "main"})
+        or soup.find("main")
+        or soup.body
+        or soup
+    )
+    for a in root.find_all("a", href=True):
+        href = a["href"].strip()
+        anchor = a.get_text(" ", strip=True)
+        if href.startswith("http") and anchor:
+            a.replace_with(f"{anchor} <{href}>")
+    text = root.get_text("\n", strip=True)
+    return text[:max_chars]
+
+
 class BlogFetcher:
     """Fetches and normalises articles and pages."""
 
@@ -150,26 +175,11 @@ class BlogFetcher:
             logger.error(f"Error fetching page {url}: {e}")
             return None
         soup = BeautifulSoup(response.text, "html.parser")
-        for tag in soup(["script", "style", "noscript", "svg", "nav", "footer", "header", "form"]):
-            tag.decompose()
         title = self._extract_title(soup) or str(response.url)
-        root = (
-            soup.find("article")
-            or soup.find(attrs={"role": "main"})
-            or soup.find("main")
-            or soup.body
-            or soup
-        )
-        for a in root.find_all("a", href=True):
-            href = a["href"]
-            anchor = a.get_text(strip=True)
-            if href.startswith("http") and anchor:
-                a.replace_with(f"{anchor} <{href}>")
-        text = root.get_text("\n", strip=True)
         return {
             "url": str(response.url),
             "title": title,
-            "text": text[:MAX_PAGE_TEXT],
+            "text": html_to_page_text(soup),
         }
 
     def resolve_url(self, url: str) -> str | None:

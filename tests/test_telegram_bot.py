@@ -344,12 +344,21 @@ def vote_bot():
     return bot
 
 
+async def _settle(bot):
+    """Let the bot's background tasks (reason proposals) finish."""
+    import asyncio
+    if bot._tasks:
+        await asyncio.gather(*list(bot._tasks), return_exceptions=True)
+
+
 class TestVoteButtons:
     @pytest.mark.asyncio
     async def test_vote_shows_undo_schedules_save_and_proposes_reason(self, vote_bot):
         update, query = _query("vote:42:up:2")
 
         await vote_bot._handle_feedback(update, MagicMock())
+        vote_bot.reason_callback.assert_not_awaited()  # proposal runs in the background
+        await _settle(vote_bot)
 
         vote_bot.feedback_callback.assert_not_awaited()  # grace period
         row = query.edit_message_reply_markup.call_args[1]["reply_markup"].inline_keyboard[0]
@@ -366,9 +375,51 @@ class TestVoteButtons:
         vote_bot._pending_feedback["42"]["task"].cancel()
 
     @pytest.mark.asyncio
+    async def test_undo_during_slow_proposal_is_not_blocked(self, vote_bot):
+        import asyncio
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def slow_reason(*_):
+            started.set()
+            await release.wait()
+            return "late guess"
+        vote_bot.reason_callback = AsyncMock(side_effect=slow_reason)
+
+        update, _ = _query("vote:42:up:1")
+        await vote_bot._handle_feedback(update, MagicMock())
+        await started.wait()
+        update2, _ = _query("undo:42")
+        await vote_bot._handle_feedback(update2, MagicMock())  # returns while proposal still runs
+        assert "42" not in vote_bot._pending_feedback
+        release.set()
+        await _settle(vote_bot)
+        # The late proposal is dropped: no prompt for an undone vote
+        vote_bot.application.bot.send_message.assert_not_awaited()
+        vote_bot.feedback_callback.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_liked_item_message_id_is_persisted(self, vote_bot):
+        vote_bot.mark_sent_callback = AsyncMock()
+        assert await vote_bot._send_liked_item("42", "hello")
+        vote_bot.mark_sent_callback.assert_awaited_once_with("42", 555)
+        assert vote_bot._message_items[555] == "42"
+        vote_bot._pending_feedback["42"]["task"].cancel()
+        await _settle(vote_bot)
+
+    @pytest.mark.asyncio
+    async def test_liked_item_with_reason_skips_proposal(self, vote_bot):
+        assert await vote_bot._send_liked_item("42", "hello", reason="great read")
+        await _settle(vote_bot)
+        vote_bot.reason_callback.assert_not_awaited()
+        assert vote_bot._pending_reasons["42"] == "great read"
+        vote_bot._pending_feedback["42"]["task"].cancel()
+
+    @pytest.mark.asyncio
     async def test_undo_cancels_vote_and_deletes_prompt(self, vote_bot):
         update, _ = _query("vote:42:down:1")
         await vote_bot._handle_feedback(update, MagicMock())
+        await _settle(vote_bot)
 
         update2, query2 = _query("undo:42")
         await vote_bot._handle_feedback(update2, MagicMock())
@@ -384,6 +435,7 @@ class TestVoteButtons:
     async def test_reason_ok_before_save_is_carried_into_save(self, vote_bot):
         update, _ = _query("vote:42:up:1")
         await vote_bot._handle_feedback(update, MagicMock())
+        await _settle(vote_bot)
 
         ok_update, _ = _query("rsn_ok:42", message_id=555)
         await vote_bot._handle_feedback(ok_update, MagicMock())
@@ -469,6 +521,7 @@ class TestReactions:
         vote_bot._message_items[100] = "42"
 
         await vote_bot._handle_reaction(self._reaction_update(100, ["🔥"], []), MagicMock())
+        await _settle(vote_bot)
 
         vote_bot.feedback_callback.assert_awaited_once()
         kwargs = vote_bot.feedback_callback.call_args[1]
@@ -498,6 +551,17 @@ class TestReactions:
         assert vote_bot.feedback_callback.call_args[1]["vote"] == "down"
 
     @pytest.mark.asyncio
+    async def test_change_after_restart_uses_old_reaction(self, vote_bot):
+        """Persisted 👍, bot restarted (no in-memory vote), user switches to 👎."""
+        vote_bot._message_items[100] = "42"
+        assert "42" not in vote_bot._item_votes
+
+        await vote_bot._handle_reaction(self._reaction_update(100, ["👎"], ["👍"]), MagicMock())
+
+        vote_bot.retract_vote_callback.assert_awaited_once_with("42")
+        assert vote_bot.feedback_callback.call_args[1]["vote"] == "down"
+
+    @pytest.mark.asyncio
     async def test_unknown_message_falls_back_to_lookup(self, vote_bot):
         vote_bot.lookup_message_callback = AsyncMock(
             return_value={"item_id": "77", "author_username": "bob"}
@@ -513,6 +577,70 @@ class TestReactions:
             self._reaction_update(100, ["👍"], [], chat_id=999), MagicMock()
         )
         vote_bot.feedback_callback.assert_not_awaited()
+
+
+class TestPlainMessages:
+    def _update(self, text, forward=None):
+        msg = MagicMock()
+        msg.text = text
+        msg.chat_id = 12345
+        msg.reply_to_message = None
+        msg.forward_origin = forward
+        msg.reply_text = AsyncMock()
+        update = MagicMock(); update.message = msg
+        return update
+
+    @pytest.mark.asyncio
+    async def test_url_with_words_is_liked_with_reason(self, vote_bot):
+        vote_bot.capture_url_callback = AsyncMock(return_value={
+            "item_id": "blog_1", "author_username": "example.com", "text": "Post", "url": "https://example.com/p",
+            "content_type": "blog_post",
+        })
+        update = self._update("great read https://example.com/p the preconf section")
+        await vote_bot._handle_default_message(update, MagicMock())
+        await _settle(vote_bot)
+
+        vote_bot.capture_url_callback.assert_awaited_once_with("https://example.com/p")
+        assert vote_bot._pending_reasons["blog_1"] == "great read the preconf section"
+        vote_bot.reason_callback.assert_not_awaited()
+        vote_bot._pending_feedback["blog_1"]["task"].cancel()
+
+    @pytest.mark.asyncio
+    async def test_dislike_verb_records_downvote(self, vote_bot):
+        vote_bot.capture_url_callback = AsyncMock(return_value={
+            "item_id": "blog_2", "author_username": "example.com", "text": "Post", "url": "https://example.com/q",
+            "content_type": "blog_post",
+        })
+        await vote_bot._handle_default_message(self._update(":dislike https://example.com/q shallow"), MagicMock())
+        await _settle(vote_bot)
+        assert vote_bot._item_votes["blog_2"] == Vote("down", 1)
+        assert vote_bot._pending_reasons["blog_2"] == "shallow"
+        vote_bot._pending_feedback["blog_2"]["task"].cancel()
+
+    @pytest.mark.asyncio
+    async def test_star_verb(self, vote_bot):
+        vote_bot.favorite_author_callback = AsyncMock(return_value="favorited")
+        update = self._update(":star @dankrad")
+        await vote_bot._handle_default_message(update, MagicMock())
+        vote_bot.favorite_author_callback.assert_awaited_once_with(username="dankrad")
+
+    @pytest.mark.asyncio
+    async def test_plain_text_gets_usage_not_capture(self, vote_bot):
+        vote_bot.capture_text_callback = AsyncMock()
+        update = self._update("Based rollups only make sense if L1 inclusion is cheap and fast.")
+        await vote_bot._handle_default_message(update, MagicMock())
+        vote_bot.capture_text_callback.assert_not_awaited()
+        assert ":note" in update.message.reply_text.call_args[0][0]
+
+    @pytest.mark.asyncio
+    async def test_note_verb_captures_text(self, vote_bot):
+        vote_bot.capture_text_callback = AsyncMock(return_value={
+            "item_id": "note_1", "author_username": "me", "text": "A thought", "content_type": "note",
+        })
+        await vote_bot._handle_default_message(self._update(":note A thought"), MagicMock())
+        await _settle(vote_bot)
+        vote_bot.capture_text_callback.assert_awaited_once_with("A thought", None)
+        vote_bot._pending_feedback["note_1"]["task"].cancel()
 
 
 class TestTrackingLinks:
