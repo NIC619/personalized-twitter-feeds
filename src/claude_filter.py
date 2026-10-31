@@ -96,7 +96,7 @@ SCORE_TOOL = {
                     "type": "object",
                     "properties": {
                         "item_id": {"type": "string"},
-                        "score": {"type": "integer", "minimum": 0, "maximum": 100},
+                        "score": {"type": "integer"},
                         "reason": {"type": "string"},
                         "domain": {"type": "string", "enum": DOMAINS},
                     },

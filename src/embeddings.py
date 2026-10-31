@@ -75,7 +75,7 @@ class EmbeddingManager:
         tweets: list[dict],
         k: int = 3,
         exclude_self: bool = True,
-        workers: int = 8,
+        workers: int = 4,
         embeddings: Optional[dict[str, list[float]]] = None,
     ) -> dict[str, list[dict]]:
         """Find the k most similar voted items for *each* input item.
