@@ -16,6 +16,10 @@ counts). A message is one of:
 * A forwarded post → saved as an item with its origin (upvoted).
 * A reply to a delivered item → a note on it (handled before this module).
 
+Several items in one message go one per line: each line with a URL (or a
+verb) is its own instruction with its own reason; a line without one belongs
+to the URL line above it, or to the first URL line below when it comes first.
+
 Anything else is not captured; the bot answers with the grammar.
 """
 
@@ -43,7 +47,8 @@ USAGE = (
     "• :star @handle (or a profile URL)\n"
     "• :note your thought\n"
     "• a forwarded post → saved\n"
-    "• a reply to any item → note on it"
+    "• a reply to any item → note on it\n"
+    "Several items: one per line, each with its own reason."
 )
 
 
@@ -60,6 +65,35 @@ class Classified:
     @property
     def vote(self) -> Optional[str]:
         return {"like": "up", "dislike": "down"}.get(self.action or "")
+
+
+def classify_lines(text: str, forwarded: bool = False) -> list[Classified]:
+    """Split a multi-line message into per-item instructions (see module docstring)."""
+    text = (text or "").strip()
+    if not text:
+        return []
+    first = text.split()[0].lower()
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    if first == ":note" or len(lines) <= 1:
+        return [classify_message(text, forwarded)]
+
+    def _starts_group(line: str) -> bool:
+        toks = line.split()
+        return toks[0].lower() in VERBS or any(is_http_url(t) for t in toks)
+
+    groups: list[list[str]] = []
+    leading: list[str] = []
+    for line in lines:
+        if _starts_group(line):
+            groups.append(leading + [line])
+            leading = []
+        elif groups:
+            groups[-1].append(line)
+        else:
+            leading.append(line)
+    if not groups:
+        return [classify_message(text, forwarded)]
+    return [classify_message(" ".join(g), forwarded) for g in groups]
 
 
 def classify_message(text: str, forwarded: bool = False) -> Classified:

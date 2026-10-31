@@ -193,6 +193,10 @@ python main.py --bot-only
 | A reply to a delivered item | Saved as a note on that item |
 | Anything else | Not stored; the bot replies with this grammar |
 
+Several items go one per line: each line with a URL (or a verb) is its own item with
+its own reason; a line without a URL belongs to the URL line above it (or to the first
+one below, so "I like" on its own first line works).
+
 A bare `@handle`, a bare tweet id or a paragraph without a verb is deliberately
 *not* interpreted. If the words around a URL are only a comment, they still become
 the reason; that is the point. After a vote with no reason the bot proposes one and

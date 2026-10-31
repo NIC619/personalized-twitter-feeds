@@ -2,7 +2,51 @@
 
 from types import SimpleNamespace
 
-from src.capture import classify_message, forward_origin, minimal_url_item, text_item
+from src.capture import classify_lines, classify_message, forward_origin, minimal_url_item, text_item
+
+
+class TestClassifyLines:
+    def test_one_item_per_line_with_own_reason(self):
+        groups = classify_lines(
+            "https://x.com/a/status/1 great read about wallet privacy\n"
+            "https://x.com/b/status/2 formal verification"
+        )
+        assert [(g.tweet_refs, g.comment) for g in groups] == [
+            (["https://x.com/a/status/1"], "great read about wallet privacy"),
+            (["https://x.com/b/status/2"], "formal verification"),
+        ]
+
+    def test_reason_on_following_line(self):
+        groups = classify_lines("https://a.io/p\nwhy I liked it\nhttps://b.io/q")
+        assert [(g.urls, g.comment) for g in groups] == [
+            (["https://a.io/p"], "why I liked it"), (["https://b.io/q"], None),
+        ]
+
+    def test_leading_text_belongs_to_first_url(self):
+        groups = classify_lines("I like\nhttps://a.io/p\nhttps://b.io/q boring")
+        assert [(g.urls, g.comment) for g in groups] == [
+            (["https://a.io/p"], "I like"), (["https://b.io/q"], "boring"),
+        ]
+
+    def test_verb_lines_are_their_own_groups(self):
+        groups = classify_lines(":like https://a.io/p\n:dislike https://b.io/q shallow\n:star @x")
+        assert [g.action for g in groups] == ["like", "dislike", "star"]
+        assert groups[1].comment == "shallow"
+
+    def test_multiline_note_stays_one_note(self):
+        groups = classify_lines(":note first line\nsecond line https://a.io/p")
+        assert len(groups) == 1 and groups[0].action == "note"
+        assert groups[0].text == "first line\nsecond line https://a.io/p"
+
+    def test_single_line_and_plain_text_unchanged(self):
+        assert classify_lines("https://a.io/p ok")[0].comment == "ok"
+        plain = classify_lines("two lines\nno urls at all")
+        assert len(plain) == 1 and plain[0].unknown
+        assert classify_lines("") == []
+
+    def test_forwarded_multiline_without_url_is_one_note(self):
+        groups = classify_lines("line one\nline two", forwarded=True)
+        assert len(groups) == 1 and groups[0].action == "note"
 
 
 class TestClassifyMessage:

@@ -22,7 +22,7 @@ from src.bot.constants import (
     THREAD_AWAITING_INPUT,
     VOTE_GRACE_SECONDS,
 )
-from src.capture import USAGE, classify_message, forward_origin
+from src.capture import USAGE, classify_lines, classify_message, forward_origin
 from src.content import is_blog_content, is_http_url, is_tweet_url, is_twitter_profile_url
 from src.feedback_flow import (
     Vote,
@@ -115,8 +115,8 @@ class CaptureMixin:
             return
 
         origin = forward_origin(message)
-        classified = classify_message(message.text, forwarded=origin is not None)
-        await self._act_on(update, classified, origin)
+        for classified in classify_lines(message.text, forwarded=origin is not None):
+            await self._act_on(update, classified, origin)
 
     async def _act_on(self, update: Update, classified, origin: Optional[dict] = None) -> None:
         """Carry out a parsed instruction."""
@@ -228,7 +228,8 @@ class CaptureMixin:
             )
             return LIKE_AWAITING_INPUT
 
-        await self._act_on(update, classify_message(":like " + " ".join(context.args)))
+        for classified in classify_lines(":like " + " ".join(context.args)):
+            await self._act_on(update, classified)
         return ConversationHandler.END
 
     async def _handle_like_input(
@@ -240,7 +241,8 @@ class CaptureMixin:
             await update.message.reply_text("No input received. Try again or /cancel.")
             return LIKE_AWAITING_INPUT
 
-        await self._act_on(update, classify_message(":like " + text))
+        for classified in classify_lines(":like " + text):
+            await self._act_on(update, classified)
         return ConversationHandler.END
 
     async def _handle_like_cancel(

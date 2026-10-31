@@ -344,6 +344,7 @@ class TelegramCurator(
             "words around it are saved as your reason, e.g. "
             "'great read https://… the section on preconfs'\n"
             "- :like URL [why] · :dislike URL [why] · :star @handle · :note your thought\n"
+            "- several items: one per line, each line keeps its own reason\n"
             "- a forwarded post → saved and upvoted\n"
             "- a reply to any item → note on it\n"
             "- Blocked keywords are matched whole-word, case-insensitive, before LLM scoring\n"
