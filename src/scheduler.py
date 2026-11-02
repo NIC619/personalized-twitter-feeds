@@ -367,6 +367,21 @@ class DailyCurator:
         else:
             logger.info("No filtered tweets to send")
 
+    async def resend_unsent(self, hours: int = 48) -> int:
+        """Deliver items that passed the filter but never reached Telegram
+        (a run that failed mid-send). Returns the number sent."""
+        items = self.db.get_unsent_filtered(hours=hours)
+        if not items:
+            logger.info("No unsent filtered items")
+            return 0
+        logger.info(f"Resending {len(items)} unsent items from the last {hours}h")
+        groups = self._group_by_thread(items)
+        sent_pairs = await self.telegram.send_daily_digest(groups)
+        for item, msg_id in sent_pairs:
+            if msg_id:
+                self.db.mark_item_sent(item["item_id"], msg_id)
+        return sum(1 for _, m in sent_pairs if m)
+
     async def process_inbox(self) -> dict:
         """Read unseen newsletter emails, extract and score their links, send
         the ones above the default threshold (one digest per issue).

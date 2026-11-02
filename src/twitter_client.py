@@ -256,6 +256,7 @@ class TwitterClient:
 
         return {
             "item_id": str(tweet["id"]),
+            "content_type": "tweet",
             "author_username": author["username"],
             "author_name": author["name"],
             "text": full_text,
