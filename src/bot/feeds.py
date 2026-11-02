@@ -94,8 +94,12 @@ class FeedsMixin:
         await self._send_scored_items(items)
 
     async def _send_item(self, item: dict, position: Optional[tuple[int, int]] = None) -> Optional[int]:
-        """Send any scored item with the vote keyboard (articles use the article layout)."""
-        if item.get("content_type") == "tweet":
+        """Send any scored item with the vote keyboard (articles use the article layout).
+
+        Items without a ``content_type`` are tweets (rows written before the
+        column existed, and the X client's dicts before they carried it).
+        """
+        if (item.get("content_type") or "tweet") == "tweet":
             return await self.send_tweet(item, position=position)
         message = self._format_blog_scored_message(item, position=position)
         try:

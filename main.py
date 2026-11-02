@@ -99,6 +99,16 @@ def parse_args() -> argparse.Namespace:
         help="Write the latest compiled profiles as Markdown to PATH (e.g. PREFERENCES.md) and exit",
     )
     parser.add_argument(
+        "--resend-unsent",
+        type=int,
+        nargs="?",
+        const=48,
+        default=None,
+        metavar="HOURS",
+        help="Send items that passed the filter in the last HOURS (default 48) "
+             "but were never delivered (after a run failed mid-send), then exit",
+    )
+    parser.add_argument(
         "--error-report",
         type=str,
         default=None,
@@ -644,6 +654,20 @@ def main() -> int:
             with open(args.export_preferences, "w") as fh:
                 fh.write(render_preferences_md(profiles))
             logger.info(f"Wrote {args.export_preferences} ({len(profiles)} sections)")
+            return 0
+        elif args.resend_unsent is not None:
+            _, _, telegram, _, curator, blog_fetcher = init_components(settings)
+            try:
+                async def _resend():
+                    await telegram.initialize()
+                    try:
+                        return await curator.resend_unsent(hours=args.resend_unsent)
+                    finally:
+                        await telegram.shutdown()
+                sent = asyncio.run(_resend())
+                logger.info(f"Resent {sent} items")
+            finally:
+                blog_fetcher.close()
             return 0
         elif args.error_report:
             from scripts.error_report import run_error_report

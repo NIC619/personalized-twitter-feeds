@@ -506,6 +506,26 @@ class TestFeedItems:
         assert [i["item_id"] for i in claude.filter_tweets.call_args[0][0]] == ["blog_2"]
 
 
+# --- resend after a failed send ---
+
+class TestResendUnsent:
+    @pytest.mark.asyncio
+    async def test_resends_and_marks(self, curator):
+        items = [{"item_id": "1", "author_username": "a", "text": "t", "raw_data": {}},
+                 {"item_id": "2", "author_username": "b", "text": "u", "raw_data": {}}]
+        curator.db.get_unsent_filtered.return_value = items
+        curator.telegram.send_daily_digest = AsyncMock(return_value=[(items[0], 11), (items[1], None)])
+        assert await curator.resend_unsent(hours=24) == 1
+        curator.db.get_unsent_filtered.assert_called_once_with(hours=24)
+        curator.db.mark_item_sent.assert_called_once_with("1", 11)
+
+    @pytest.mark.asyncio
+    async def test_nothing_to_resend(self, curator):
+        curator.db.get_unsent_filtered.return_value = []
+        assert await curator.resend_unsent() == 0
+        curator.telegram.send_daily_digest.assert_not_awaited()
+
+
 # --- newsletters by email ---
 
 class TestInbox:

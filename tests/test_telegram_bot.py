@@ -610,6 +610,23 @@ class TestReactions:
         vote_bot.feedback_callback.assert_not_awaited()
 
 
+class TestSendItemRouting:
+    @pytest.mark.asyncio
+    async def test_tweet_without_content_type_uses_tweet_layout(self, vote_bot, sample_tweet):
+        tweet = {k: v for k, v in sample_tweet.items() if k != "content_type"}
+        tweet["article"] = None
+        msg_id = await vote_bot._send_item(tweet, position=(1, 1))
+        assert msg_id == 555
+        text = vote_bot.application.bot.send_message.call_args[1]["text"]
+        assert "View Tweet" in text
+
+    def test_article_formatter_tolerates_missing_article(self, vote_bot):
+        post = {"item_id": "blog_1", "author_username": "x.io", "author_name": "X", "text": "Body", "url": "https://x.io/p",
+                "article": None, "content_type": "blog_post"}
+        assert "Body" in vote_bot._format_blog_scored_message(post)
+        assert "Body" in vote_bot._format_blog_like_message(post)
+
+
 class TestPlainMessages:
     def _update(self, text, forward=None):
         msg = MagicMock()

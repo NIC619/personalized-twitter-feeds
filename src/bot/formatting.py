@@ -84,8 +84,8 @@ class FormattingMixin:
 
     def _format_blog_like_message(self, post: dict) -> str:
         """Format a blog post for like message (no score/reason header)."""
-        article = post.get("article", {})
-        title = self._escape_html(article.get("title", post["text"][:100]))
+        article = post.get("article") or {}
+        title = self._escape_html(article.get("title") or (post.get("text") or "")[:100])
         url = post["url"]
         source = post["author_username"]
         author_name = post.get("author_name", source)
@@ -111,8 +111,8 @@ class FormattingMixin:
         position: Optional[tuple[int, int]] = None,
     ) -> str:
         """Format a blog post with score for newsletter digest."""
-        article = post.get("article", {})
-        title = self._escape_html(article.get("title", post["text"][:100]))
+        article = post.get("article") or {}
+        title = self._escape_html(article.get("title") or post.get("title") or (post.get("text") or "")[:100])
         source = post["author_username"]
         author_name = post.get("author_name", source)
 

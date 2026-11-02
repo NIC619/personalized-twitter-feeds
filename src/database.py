@@ -2,7 +2,7 @@
 
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from supabase import create_client, Client
@@ -130,6 +130,26 @@ class DatabaseClient:
             for row in result.data or []:
                 out[row["item_id"]] = row
         return out
+
+    def get_unsent_filtered(self, hours: int = 48, limit: int = 200) -> list[dict]:
+        """Items that passed the filter but were never delivered (e.g. a run
+        that failed mid-send), newest first within the last ``hours``."""
+        since = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
+        try:
+            result = (
+                self.client.table("items")
+                .select("*")
+                .eq("filtered", True)
+                .is_("sent_to_telegram", "null")
+                .gte("fetched_at", since)
+                .order("fetched_at", desc=True)
+                .limit(limit)
+                .execute()
+            )
+        except Exception as e:
+            logger.error(f"Error loading unsent items: {e}")
+            raise
+        return result.data or []
 
     def get_scored_ids(self, item_ids: list[str], chunk_size: int = 200) -> set[str]:
         """Return the subset of ``item_ids`` that already have a filter score.
