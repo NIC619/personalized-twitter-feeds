@@ -496,12 +496,11 @@ class TestVoteButtons:
 
         edit_update, query = _query("rsn_edit:42", message_id=555)
         await vote_bot._handle_feedback(edit_update, MagicMock())
-        assert vote_bot._awaiting_reason["12345"] == "42"
 
         msg = MagicMock()
         msg.text = "because it quantifies L1 inclusion delay"
         msg.chat_id = 12345
-        msg.reply_to_message = None
+        msg.reply_to_message = SimpleNamespace(message_id=555)
         msg.reply_text = AsyncMock()
         update = MagicMock(); update.message = msg
 
@@ -511,7 +510,23 @@ class TestVoteButtons:
         vote_bot.reason_confirm_callback.assert_awaited_once_with(
             "42", "because it quantifies L1 inclusion delay"
         )
-        assert "12345" not in vote_bot._awaiting_reason
+
+    @pytest.mark.asyncio
+    async def test_message_after_edit_without_reply_is_not_a_reason(self, vote_bot):
+        vote_bot._item_prompts["42"] = (555, "guess")
+        vote_bot._reason_prompts[555] = "42"
+        edit_update, _ = _query("rsn_edit:42", message_id=555)
+        await vote_bot._handle_feedback(edit_update, MagicMock())
+
+        msg = MagicMock()
+        msg.text = "https://x.com/nikitabier/status/2116246313914479047"
+        msg.chat_id = 12345
+        msg.reply_to_message = None
+        update = MagicMock(); update.message = msg
+
+        assert not await vote_bot._handle_text_signals(update)
+        vote_bot.reason_confirm_callback.assert_not_awaited()
+        assert 555 in vote_bot._reason_prompts  # still answerable by reply
 
     @pytest.mark.asyncio
     async def test_reply_to_item_saves_note(self, vote_bot):

@@ -145,7 +145,6 @@ class TelegramCurator(
         self._reason_prompts: dict[int, str] = {}  # proposal message_id → item_id
         self._item_prompts: dict[str, tuple[int, str]] = {}  # item_id → (prompt msg id, proposal)
         self._pending_reasons: dict[str, str] = {}  # item_id → reason confirmed before save
-        self._awaiting_reason: dict[str, str] = {}  # chat_id → item_id waiting for typed reason
         self._feed_list: dict[str, list[dict]] = {}  # chat_id → feeds shown by /feed list
         self._blockword_list: dict[str, list[str]] = {}  # chat_id → keyword list shown
         self._tasks: set[asyncio.Task] = set()  # background tasks (reason proposals)
