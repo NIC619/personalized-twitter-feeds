@@ -67,21 +67,16 @@ class CaptureMixin:
         """Typed reasons and reply-notes. Returns True if the message was consumed."""
         message = update.message
         text = (message.text or "").strip()
-        chat_id = str(message.chat_id)
         if not text:
             return False
 
         replied = message.reply_to_message
         replied_id = replied.message_id if replied else None
 
-        # 1. Reply to a reason prompt, or a typed reason after ✏️
-        item_id = None
+        # 1. Reply to a reason prompt. Only an explicit reply counts: a plain
+        # message after tapping ✏️ is a new instruction, not the reason.
         if replied_id is not None and replied_id in self._reason_prompts:
             item_id = self._reason_prompts[replied_id]
-        elif chat_id in self._awaiting_reason:
-            item_id = self._awaiting_reason[chat_id]
-        if item_id:
-            self._awaiting_reason.pop(chat_id, None)
             await self._confirm_reason(item_id, text)
             await message.reply_text("✅ Reason saved.")
             return True

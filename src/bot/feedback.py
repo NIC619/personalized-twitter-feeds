@@ -87,7 +87,6 @@ class FeedbackMixin:
                 if prompt:
                     await self._confirm_reason(item_id, prompt[1])
             elif action == "rsn_edit":
-                self._awaiting_reason[str(query.message.chat_id)] = item_id
                 try:
                     await query.edit_message_text(
                         "✏️ Reply to this message with your reason.", parse_mode="HTML",
