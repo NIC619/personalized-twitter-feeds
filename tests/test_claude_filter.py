@@ -261,3 +261,19 @@ class TestExtractNewsletterEntries:
         with pytest.raises(NoToolCallError):
             claude_filter.extract_newsletter_entries("t", "x")
         assert claude_filter.client.messages.create.call_count == 2
+
+
+class TestBuildItemEntryLinks:
+    def test_links_with_title_included(self):
+        entry = ClaudeFilter.build_item_entry({
+            "item_id": "1", "author_username": "a", "text": "https://t.co/x",
+            "raw_data": {"entities": {"urls": [
+                {"url": "https://t.co/x", "expanded_url": "https://ex.com/p", "title": "Title", "description": "D" * 400},
+                {"url": "https://t.co/y", "expanded_url": "https://ex.com/no-title"},
+            ]}},
+        })
+        assert entry["links"] == [{"url": "https://ex.com/p", "title": "Title", "description": "D" * 300}]
+
+    def test_no_links_key_without_titles(self):
+        entry = ClaudeFilter.build_item_entry({"item_id": "1", "author_username": "a", "text": "hi"})
+        assert "links" not in entry

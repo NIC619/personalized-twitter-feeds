@@ -2,6 +2,7 @@
 
 import logging
 import re
+from src.content import link_previews
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +38,10 @@ def _item_text_blob(item: dict) -> str:
     quoted = item.get("quoted_tweet")
     if isinstance(quoted, dict):
         parts.append(quoted.get("text") or "")
+
+    for link in link_previews(item):
+        parts.append(link["title"] or "")
+        parts.append(link.get("description") or "")
 
     return "\n".join(parts)
 

@@ -60,3 +60,50 @@ def retweeter_username(item: dict) -> str:
     if isinstance(by, dict) and by.get("author_username"):
         return by["author_username"].lower()
     return (item.get("author_username") or "").lower()
+
+
+_X_HOSTS = ("twitter.com", "x.com", "www.twitter.com", "www.x.com", "mobile.twitter.com")
+
+
+def _host(url: str) -> str:
+    m = re.match(r"https?://([^/]+)", url or "")
+    return m.group(1).lower() if m else ""
+
+
+def tweet_links(item: dict) -> list[dict]:
+    """Links in a tweet, from the X API's ``entities.urls`` (stored in raw_data).
+
+    Each entry: ``tco`` (the t.co form as it appears in the text), ``url``
+    (unwound or expanded), ``display`` (X's short display form),
+    ``external`` (not an x.com/twitter.com link), ``media`` (a photo/video
+    link to a tweet), and X's own ``title``/``description`` for the page
+    when it supplied them. Nothing here fetches anything: X resolved the
+    page, we only render what it returned.
+    """
+    raw = item.get("raw_data") or {}
+    entities = raw.get("entities") or item.get("entities") or {}
+    out: list[dict] = []
+    seen: set[str] = set()
+    for u in entities.get("urls") or []:
+        tco = u.get("url") or ""
+        expanded = u.get("unwound_url") or u.get("expanded_url") or tco
+        if not tco or tco in seen:
+            continue
+        seen.add(tco)
+        host = _host(expanded)
+        is_x = host in _X_HOSTS
+        out.append({
+            "tco": tco,
+            "url": expanded,
+            "display": u.get("display_url") or expanded,
+            "external": not is_x,
+            "media": is_x and bool(re.search(r"/(photo|video)/\d+", expanded)),
+            "title": (u.get("title") or "").strip() or None,
+            "description": (u.get("description") or "").strip() or None,
+        })
+    return out
+
+
+def link_previews(item: dict, limit: int = 2) -> list[dict]:
+    """External links that X returned a page title for, most useful first."""
+    return [l for l in tweet_links(item) if l["external"] and l["title"]][:limit]

@@ -290,8 +290,14 @@ def init_components(settings, num_tweets=None, hours=None):
     # Create thread callback
     async def on_fetch_thread(item_id: str) -> list[dict] | None:
         tweets = await asyncio.to_thread(twitter.fetch_thread, item_id)
-        if tweets:
-            db.save_items(tweets)
+        if not tweets:
+            return tweets
+        # Only insert tweets we don't have yet: the upsert would wipe the
+        # score/reason/domain of any already-stored (scored) tweet.
+        known = db.get_items([t["item_id"] for t in tweets])
+        new = [t for t in tweets if t["item_id"] not in known]
+        if new:
+            db.save_items(new)
         return tweets
 
     # Initialize blog + feed fetchers

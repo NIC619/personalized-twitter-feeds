@@ -56,3 +56,24 @@ async def test_stored_tweet_returned_without_fetch():
     db.get_item.return_value = {"item_id": "42"}
     assert (await kwargs["like_tweet_callback"]("42"))["item_id"] == "42"
     twitter.fetch_tweet.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_thread_fetch_saves_only_unknown_tweets():
+    db, twitter, kwargs = _callbacks()
+    t1, t2 = {"item_id": "1", "text": "a"}, {"item_id": "2", "text": "b"}
+    twitter.fetch_thread.return_value = [t1, t2]
+    db.get_items.return_value = {"1": {"item_id": "1", "filter_score": 80}}
+
+    result = await kwargs["thread_callback"]("2")
+
+    assert result == [t1, t2]
+    db.save_items.assert_called_once_with([t2])
+
+
+@pytest.mark.asyncio
+async def test_thread_fetch_not_found():
+    db, twitter, kwargs = _callbacks()
+    twitter.fetch_thread.return_value = None
+    assert await kwargs["thread_callback"]("2") is None
+    db.save_items.assert_not_called()
