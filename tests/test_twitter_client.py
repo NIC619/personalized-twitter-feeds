@@ -157,17 +157,58 @@ class TestNormalizeTweet:
 
         result = twitter_client._normalize_tweet(tweet, author, ref_map, users)
 
-        # Retweets store the original's content as text (for scoring/embedding)
-        # and preserve the original author via retweeted_from. quoted_tweet is
-        # reserved for quote tweets only.
+        # A retweet is stored as the ORIGINAL tweet (id, author, text, url),
+        # with the retweeter kept in retweeted_by. quoted_tweet is reserved
+        # for quote tweets only.
         assert result["is_retweet"] is True
+        assert result["item_id"] == "999"
+        assert result["author_username"] == "bob"
+        assert result["author_name"] == "Bob"
+        assert result["url"] == "https://twitter.com/bob/status/999"
         assert result["text"] == "Original content"
         assert result["quoted_tweet"] is None
-        assert result["retweeted_from"] is not None
-        assert result["retweeted_from"]["author_username"] == "bob"
-        assert result["retweeted_from"]["author_name"] == "Bob"
-        assert result["retweeted_from"]["item_id"] == "999"
-        assert result["raw_data"]["retweeted_from"]["author_username"] == "bob"
+        assert result["retweeted_by"] == {
+            "author_username": "alice", "author_name": "Alice",
+            "item_id": "42", "created_at": tweet["created_at"],
+        }
+        assert result["raw_data"]["id"] == "999"
+        assert result["raw_data"]["retweeted_by"]["author_username"] == "alice"
+
+    def test_retweet_uses_original_metrics(self, twitter_client):
+        tweet = _make_tweet(item_id=42, author_id="100",
+                            referenced_tweets=[{"type": "retweeted", "id": "999"}])
+        tweet["public_metrics"] = {"like_count": 0, "retweet_count": 0, "reply_count": 0, "impression_count": 0}
+        ref_tweet = _make_tweet(item_id=999, author_id="200")
+        ref_tweet["public_metrics"] = {"like_count": 300, "retweet_count": 40, "reply_count": 7, "impression_count": 9000}
+        users = {"100": _make_user("100", "alice", "Alice"), "200": _make_user("200", "bob", "Bob")}
+
+        result = twitter_client._normalize_tweet(tweet, users["100"], {"999": ref_tweet}, users)
+        assert result["metrics"] == {"likes": 300, "retweets": 40, "replies": 7, "views": 9000}
+
+    def test_retweet_of_quote_tweet_attaches_quoted(self, twitter_client):
+        tweet = _make_tweet(item_id=42, author_id="100",
+                            referenced_tweets=[{"type": "retweeted", "id": "999"}])
+        original = _make_tweet(item_id=999, text="Look at this", author_id="200",
+                               referenced_tweets=[{"type": "quoted", "id": "555"}])
+        quoted = _make_tweet(item_id=555, text="Quoted content", author_id="300")
+        users = {"100": _make_user("100", "alice", "Alice"), "200": _make_user("200", "bob", "Bob"),
+                 "300": _make_user("300", "carol", "Carol")}
+
+        result = twitter_client._normalize_tweet(tweet, users["100"], {"999": original, "555": quoted}, users)
+        assert result["item_id"] == "999"
+        assert result["quoted_tweet"]["item_id"] == "555"
+        assert result["quoted_tweet"]["author_username"] == "carol"
+        assert result["raw_data"]["referenced_tweets"] == [{"type": "quoted", "id": "555"}]
+
+    def test_retweet_without_original_in_includes_falls_back(self, twitter_client):
+        tweet = _make_tweet(item_id=42, text="RT @bob: preview", author_id="100",
+                            referenced_tweets=[{"type": "retweeted", "id": "999"}])
+        author = _make_user("100", "alice", "Alice")
+        result = twitter_client._normalize_tweet(tweet, author, {}, {"100": author})
+        assert result["item_id"] == "42"
+        assert result["author_username"] == "alice"
+        assert result["is_retweet"] is True
+        assert result["retweeted_by"] is None
 
     def test_retweeted_tweet_uses_original_note_tweet(self, twitter_client):
         """Retweets of long posts should pull the original's note_tweet full text."""

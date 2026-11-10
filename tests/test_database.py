@@ -226,6 +226,29 @@ class TestGetAuthorStats:
         assert s["weighted_up"] == 0.5
         assert s["weighted_score"] == pytest.approx(1.0)
 
+    def test_retweet_credits_original_author_and_retweeter(self, db):
+        # New shape: the item IS the original; raw_data.retweeted_by names the sharer
+        rows = [{"id": 1, "value": "up", "items": {
+            "author_username": "bob", "is_retweet": True, "filter_score": 70,
+            "retweeted_by": {"author_username": "Alice"}, "retweeted_from": None,
+        }}]
+        self._setup(db, rows)
+        by_name = {s["author_username"]: s for s in db.get_author_stats()}
+        assert by_name["bob"]["weighted_up"] == 1.0
+        assert by_name["alice"]["weighted_up"] == 0.5
+        assert by_name["alice"]["up"] == 1
+
+    def test_legacy_retweet_row_credits_original_from_retweeted_from(self, db):
+        # Old shape: the item is the retweet (author = retweeter), original in retweeted_from
+        rows = [{"id": 1, "value": "down", "items": {
+            "author_username": "alice", "is_retweet": True, "filter_score": 20,
+            "retweeted_by": None, "retweeted_from": {"author_username": "bob"},
+        }}]
+        self._setup(db, rows)
+        by_name = {s["author_username"]: s for s in db.get_author_stats()}
+        assert by_name["bob"]["weighted_down"] == 1.0
+        assert by_name["alice"]["weighted_down"] == 0.5
+
     def test_favorite_and_muted_flags(self, db):
         rows = [
             {"id": 1, "value": "up", "items": {"author_username": "fav_user", "is_retweet": False, "filter_score": 90}},

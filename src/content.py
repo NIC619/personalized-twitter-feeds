@@ -43,3 +43,20 @@ def is_twitter_profile_url(url: str) -> bool:
 def is_http_url(text: str) -> bool:
     """Check if text looks like an HTTP(S) URL."""
     return bool(re.match(r"https?://\S+", text))
+
+
+def retweeter_username(item: dict) -> str:
+    """Lower-cased username of whoever retweeted ``item``, or "".
+
+    New rows keep the retweeter in ``retweeted_by`` (top level or in
+    ``raw_data``). Rows written before retweets were stored as the original
+    have the retweeter as ``author_username`` and the original in
+    ``raw_data.retweeted_from``.
+    """
+    if not item.get("is_retweet"):
+        return ""
+    raw = item.get("raw_data") or {}
+    by = item.get("retweeted_by") or raw.get("retweeted_by")
+    if isinstance(by, dict) and by.get("author_username"):
+        return by["author_username"].lower()
+    return (item.get("author_username") or "").lower()

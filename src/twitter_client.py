@@ -192,78 +192,79 @@ class TwitterClient:
         Returns:
             Normalized tweet dictionary
         """
-        metrics = tweet.get("public_metrics") or {}
         referenced_tweets_map = referenced_tweets_map or {}
         users = users or {}
 
-        # Detect retweets via referenced_tweets
         referenced = tweet.get("referenced_tweets") or []
         is_retweet = any(ref["type"] == "retweeted" for ref in referenced)
 
-        # Look up quoted/retweeted tweet from includes.
-        # For pure retweets we treat the original's content as the subject — text is
-        # replaced with the original below, quoted_tweet stays None, and retweeted_from
-        # preserves the original author for display/attribution.
+        # A retweet is recorded as the ORIGINAL tweet (its id, author, text,
+        # metrics), with the retweeter kept in ``retweeted_by``. Votes then
+        # land on the content that was actually judged, and the retweeter is
+        # credited separately. If the original is missing from includes we
+        # fall back to the retweet itself with its "RT @user: ..." preview.
+        retweeted_by = None
+        subject, subject_author = tweet, author
+        if is_retweet:
+            for ref in referenced:
+                if ref["type"] != "retweeted":
+                    continue
+                original = referenced_tweets_map.get(str(ref["id"]))
+                if original:
+                    orig_author = users.get(original.get("author_id"))
+                    subject = original
+                    subject_author = orig_author or {"username": "unknown", "name": "Unknown"}
+                    retweeted_by = {
+                        "author_username": author["username"],
+                        "author_name": author["name"],
+                        "item_id": str(tweet["id"]),
+                        "created_at": tweet.get("created_at"),
+                    }
+                break
+
+        subject_refs = subject.get("referenced_tweets") or []
         quoted_tweet = None
-        retweeted_from = None
-        ref_tweet_for_retweet = None
-        for ref in referenced:
-            if ref["type"] not in ("quoted", "retweeted"):
+        for ref in subject_refs:
+            if ref["type"] != "quoted":
                 continue
-            ref_id = str(ref["id"])
-            ref_tweet = referenced_tweets_map.get(ref_id)
+            ref_tweet = referenced_tweets_map.get(str(ref["id"]))
             if ref_tweet:
                 ref_author = users.get(ref_tweet.get("author_id"))
-                ref_username = ref_author["username"] if ref_author else "unknown"
-                ref_name = ref_author["name"] if ref_author else "Unknown"
-                if ref["type"] == "retweeted":
-                    retweeted_from = {
-                        "author_username": ref_username,
-                        "author_name": ref_name,
-                        "item_id": str(ref_tweet["id"]),
-                    }
-                    ref_tweet_for_retweet = ref_tweet
-                else:
-                    quoted_tweet = {
-                        "author_username": ref_username,
-                        "author_name": ref_name,
-                        "text": _full_tweet_text(ref_tweet),
-                        "item_id": str(ref_tweet["id"]),
-                    }
+                quoted_tweet = {
+                    "author_username": ref_author["username"] if ref_author else "unknown",
+                    "author_name": ref_author["name"] if ref_author else "Unknown",
+                    "text": _full_tweet_text(ref_tweet),
+                    "item_id": str(ref_tweet["id"]),
+                }
             break
 
-        # For retweets, the outer tweet's text is a truncated "RT @user: ..." preview.
-        # Use the original's full content so downstream scoring and embeddings see what
-        # the user is actually judging.
-        if is_retweet and ref_tweet_for_retweet is not None:
-            full_text = _full_tweet_text(ref_tweet_for_retweet)
-        else:
-            full_text = _full_tweet_text(tweet)
+        full_text = _full_tweet_text(subject)
+        metrics = subject.get("public_metrics") or {}
 
-        # Extract article info if present — check outer tweet first, then referenced tweet
-        article = self._extract_article(tweet)
+        # Extract article info if present — check the subject first, then what it references
+        article = self._extract_article(subject)
         if not article:
-            for ref in referenced:
+            for ref in subject_refs:
                 if ref["type"] in ("quoted", "retweeted"):
-                    ref_id = str(ref["id"])
-                    ref_tweet = referenced_tweets_map.get(ref_id)
+                    ref_tweet = referenced_tweets_map.get(str(ref["id"]))
                     if ref_tweet:
                         article = self._extract_article(ref_tweet)
                         if article:
                             break
 
-        created_at = tweet.get("created_at")
+        created_at = subject.get("created_at")
+        item_id = str(subject["id"])
 
         return {
-            "item_id": str(tweet["id"]),
+            "item_id": item_id,
             "content_type": "tweet",
-            "author_username": author["username"],
-            "author_name": author["name"],
+            "author_username": subject_author["username"],
+            "author_name": subject_author["name"],
             "text": full_text,
             "created_at": created_at,
             "is_retweet": is_retweet,
             "quoted_tweet": quoted_tweet,
-            "retweeted_from": retweeted_from,
+            "retweeted_by": retweeted_by,
             "article": article,
             "metrics": {
                 "likes": metrics.get("like_count", 0),
@@ -271,19 +272,19 @@ class TwitterClient:
                 "replies": metrics.get("reply_count", 0),
                 "views": metrics.get("impression_count", 0),
             },
-            "url": self.get_tweet_url(str(tweet["id"]), author["username"]),
+            "url": self.get_tweet_url(item_id, subject_author["username"]),
             "raw_data": {
-                "id": str(tweet["id"]),
+                "id": item_id,
                 "text": full_text,
-                "author_id": str(tweet.get("author_id", "")),
+                "author_id": str(subject.get("author_id", "")),
                 "created_at": created_at,
-                "entities": tweet.get("entities"),
-                "conversation_id": str(tweet["conversation_id"]) if tweet.get("conversation_id") else None,
+                "entities": subject.get("entities"),
+                "conversation_id": str(subject["conversation_id"]) if subject.get("conversation_id") else None,
                 "referenced_tweets": [
                     {"type": ref["type"], "id": str(ref["id"])}
-                    for ref in referenced
-                ] if referenced else None,
-                "retweeted_from": retweeted_from,
+                    for ref in subject_refs
+                ] if subject_refs else None,
+                "retweeted_by": retweeted_by,
             },
         }
 

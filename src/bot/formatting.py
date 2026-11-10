@@ -323,17 +323,20 @@ class FormattingMixin:
         return message
 
     def _retweet_header(self, tweet: dict) -> str:
-        """Render a "🔁 via @original_author" header for retweets, else empty.
+        """Render a "🔁 retweeted by @retweeter" header for retweets, else empty.
 
-        Falls back to raw_data.retweeted_from for DB-retrieved tweets where the
-        top-level field isn't reconstructed.
+        Falls back to raw_data for DB-retrieved tweets where the top-level
+        field isn't reconstructed.
         """
         if not tweet.get("is_retweet"):
             return ""
-        retweeted_from = tweet.get("retweeted_from")
-        if not retweeted_from:
-            raw = tweet.get("raw_data") or {}
-            retweeted_from = raw.get("retweeted_from")
+        raw = tweet.get("raw_data") or {}
+        retweeted_by = tweet.get("retweeted_by") or raw.get("retweeted_by")
+        if retweeted_by:
+            retweeter = self._escape_html(retweeted_by.get("author_username", ""))
+            return f"🔁 retweeted by <b>@{retweeter}</b>\n\n"
+        # Rows written before retweets were stored as the original
+        retweeted_from = tweet.get("retweeted_from") or raw.get("retweeted_from")
         if not retweeted_from:
             return "🔁 <i>retweet</i>\n\n"
         original_author = self._escape_html(retweeted_from.get("author_username", ""))

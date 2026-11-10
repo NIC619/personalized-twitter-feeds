@@ -433,6 +433,35 @@ class DatabaseClient:
                 offset += page_size
         return voted
 
+    RETWEETER_WEIGHT = 0.5  # curation credit for sharing a tweet you voted on
+
+    @classmethod
+    def _credited_authors(cls, item: dict) -> list[tuple[str, float]]:
+        """(username, weight) pairs a vote on ``item`` counts towards.
+
+        The original author gets full weight; whoever retweeted it gets
+        ``RETWEETER_WEIGHT``. Handles both storage shapes: new rows are the
+        original with ``raw_data.retweeted_by``; rows written before that are
+        the retweet itself with ``raw_data.retweeted_from``.
+        """
+        author = (item.get("author_username") or "").lower()
+        if not item.get("is_retweet"):
+            return [(author, 1.0)]
+        by = item.get("retweeted_by")
+        if isinstance(by, dict) and by.get("author_username"):
+            out = [(author, 1.0)]
+            retweeter = by["author_username"].lower()
+            if retweeter != author:
+                out.append((retweeter, cls.RETWEETER_WEIGHT))
+            return out
+        frm = item.get("retweeted_from")
+        out = [(author, cls.RETWEETER_WEIGHT)]
+        if isinstance(frm, dict) and frm.get("author_username"):
+            original = frm["author_username"].lower()
+            if original != author:
+                out.insert(0, (original, 1.0))
+        return out
+
     def get_author_stats(self) -> list[dict]:
         """Aggregate author performance from votes.
 
@@ -443,7 +472,11 @@ class DatabaseClient:
         """
         try:
             rows = self._vote_rows(
-                select="id,item_id,value,strength,items(author_username,is_retweet,filter_score)"
+                select=(
+                    "id,item_id,value,strength,"
+                    "items(author_username,is_retweet,filter_score,"
+                    "retweeted_by:raw_data->retweeted_by,retweeted_from:raw_data->retweeted_from)"
+                )
             )
         except Exception as e:
             logger.error(f"Error fetching votes for stats: {e}")
@@ -459,26 +492,25 @@ class DatabaseClient:
                 logger.warning(f"Orphaned vote (no item/author): signal id={row.get('id')}")
                 continue
 
-            username = item["author_username"].lower()
-            entry = authors.setdefault(username, {
-                "author_username": username,
-                "up": 0,
-                "down": 0,
-                "weighted_up": 0.0,
-                "weighted_down": 0.0,
-                "filter_score_sum": 0.0,
-                "filter_score_count": 0,
-            })
-            weight = 0.5 if item.get("is_retweet") else 1.0
-            if row["value"] == "up":
-                entry["up"] += 1
-                entry["weighted_up"] += weight
-            elif row["value"] == "down":
-                entry["down"] += 1
-                entry["weighted_down"] += weight
-            if item.get("filter_score") is not None:
-                entry["filter_score_sum"] += item["filter_score"]
-                entry["filter_score_count"] += 1
+            for username, weight in self._credited_authors(item):
+                entry = authors.setdefault(username, {
+                    "author_username": username,
+                    "up": 0,
+                    "down": 0,
+                    "weighted_up": 0.0,
+                    "weighted_down": 0.0,
+                    "filter_score_sum": 0.0,
+                    "filter_score_count": 0,
+                })
+                if row["value"] == "up":
+                    entry["up"] += 1
+                    entry["weighted_up"] += weight
+                elif row["value"] == "down":
+                    entry["down"] += 1
+                    entry["weighted_down"] += weight
+                if item.get("filter_score") is not None:
+                    entry["filter_score_sum"] += item["filter_score"]
+                    entry["filter_score_count"] += 1
 
         stats = []
         for entry in authors.values():

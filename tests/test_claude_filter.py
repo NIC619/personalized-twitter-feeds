@@ -205,6 +205,19 @@ class TestFilterTweets:
 
 # --- build_item_entry ---
 
+class TestBuildItemEntryRetweet:
+    def test_retweeter_shown_to_model(self):
+        entry = ClaudeFilter.build_item_entry({
+            "item_id": "1", "author_username": "orig", "text": "hi", "is_retweet": True,
+            "retweeted_by": {"author_username": "sharer"},
+        })
+        assert entry["author"] == "orig"
+        assert entry["retweeted_by"] == "sharer"
+
+    def test_no_retweeter_key_for_plain_tweet(self):
+        entry = ClaudeFilter.build_item_entry({"item_id": "1", "author_username": "a", "text": "hi"})
+        assert "retweeted_by" not in entry
+
 class TestBuildItemEntry:
     def test_minimal_entry(self):
         entry = ClaudeFilter.build_item_entry({"item_id": "1", "author_username": "a", "text": "hi"})

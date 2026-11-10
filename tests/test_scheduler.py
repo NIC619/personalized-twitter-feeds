@@ -56,6 +56,31 @@ class TestDeduplicateTweets:
         result = curator._deduplicate_tweets([{"item_id": "1", "text": "new"}])
         assert [t["item_id"] for t in result] == ["1"]
 
+    @pytest.mark.asyncio
+    async def test_starred_direct_copy_beats_home_timeline_retweet(self, curator):
+        via_rt = {"item_id": "1", "author_username": "fav", "text": "x", "is_retweet": True,
+                  "retweeted_by": {"author_username": "someone"}}
+        direct = {"item_id": "1", "author_username": "fav", "text": "x", "is_retweet": False}
+        curator.twitter.fetch_timeline.return_value = [via_rt]
+        curator.twitter.fetch_user_tweets.return_value = [direct]
+        curator.db.get_favorite_authors.return_value = ["fav"]
+        curator.db.get_muted_authors.return_value = []
+        curator.claude.filter_tweets.return_value = []
+
+        stats = await curator.run_daily_curation()
+
+        sent = curator.claude.filter_tweets.call_args[0][0]
+        assert len(sent) == 1 and sent[0] is direct
+        assert stats["starred_new"] == 0  # same id was already in the home timeline
+
+    def test_same_original_direct_and_via_retweet_keeps_direct(self, curator):
+        curator.db.get_scored_ids.return_value = set()
+        via_rt = {"item_id": "1", "text": "x", "is_retweet": True, "retweeted_by": {"author_username": "s"}}
+        direct = {"item_id": "1", "text": "x", "is_retweet": False}
+        for order in ([via_rt, direct], [direct, via_rt]):
+            result = curator._deduplicate_tweets(order)
+            assert len(result) == 1 and result[0] is direct
+
     def test_mixed_new_and_old_single_query(self, curator):
         curator.db.get_scored_ids.return_value = {"old"}
         tweets = [
@@ -118,10 +143,14 @@ class TestRunDailyCuration:
         assert stats["filtered"] == 1
 
     @pytest.mark.asyncio
-    async def test_retweet_skipping(self, curator):
+    async def test_retweets_are_scored_like_any_tweet(self, curator):
+        # Retweets are stored as the original tweet and are no longer filtered
+        # by who retweeted them; they all reach the scorer.
         tweets = [
-            {"item_id": "1", "author_username": "normal", "text": "RT something", "is_retweet": True},
-            {"item_id": "2", "author_username": "fav", "text": "RT something else", "is_retweet": True},
+            {"item_id": "1", "author_username": "orig_a", "text": "something", "is_retweet": True,
+             "retweeted_by": {"author_username": "normal"}},
+            {"item_id": "2", "author_username": "orig_b", "text": "something else", "is_retweet": True,
+             "retweeted_by": {"author_username": "Fav"}},
             {"item_id": "3", "author_username": "normal", "text": "original", "is_retweet": False},
         ]
         curator.twitter.fetch_timeline.return_value = tweets
@@ -130,7 +159,7 @@ class TestRunDailyCuration:
         curator.db.get_muted_authors.return_value = []
 
         scored = []
-        for t in [tweets[1], tweets[2]]:  # only non-skipped tweets
+        for t in tweets:
             t_copy = dict(t)
             t_copy["filter_score"] = 80
             t_copy["filter_reason"] = "good"
@@ -144,10 +173,10 @@ class TestRunDailyCuration:
 
         stats = await curator.run_daily_curation()
 
-        assert stats["skipped_retweets"] == 1
-        # Claude should only receive 2 tweets (fav retweet + normal original)
+        assert stats["retweets"] == 2
+        assert "skipped_retweets" not in stats
         call_args = curator.claude.filter_tweets.call_args
-        assert len(call_args[0][0]) == 2
+        assert len(call_args[0][0]) == 3
 
     @pytest.mark.asyncio
     async def test_all_duplicates(self, curator):
