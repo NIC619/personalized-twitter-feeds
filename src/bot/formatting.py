@@ -19,6 +19,7 @@ from src.bot.constants import (
     LIKE_AWAITING_INPUT,
     NEWSLETTER_AWAITING_INPUT,
     STAR_AWAITING_INPUT,
+    TELEGRAM_MESSAGE_LIMIT,
     THREAD_AWAITING_INPUT,
     VOTE_GRACE_SECONDS,
 )
@@ -171,9 +172,11 @@ class FormattingMixin:
                 f"{qt_block}"
             )
 
-        message += self._link_cards(tweet)
-        message += f"\n\n❤️ {likes_str}  🔁 {retweets_str}  💬 {replies_str}"
-        return message
+        tail = f"\n\n❤️ {likes_str}  🔁 {retweets_str}  💬 {replies_str}"
+        message += self._link_cards(
+            tweet, budget=TELEGRAM_MESSAGE_LIMIT - len(message) - len(tail)
+        )
+        return message + tail
 
     @staticmethod
     def _make_blockword_buttons(keywords: list[str]) -> InlineKeyboardMarkup:
@@ -322,9 +325,11 @@ class FormattingMixin:
                 f"{qt_block}"
             )
 
-        message += self._link_cards(tweet)
-        message += f"\n\n❤️ {likes_str}  🔁 {retweets_str}  💬 {replies_str}"
-        return message
+        tail = f"\n\n❤️ {likes_str}  🔁 {retweets_str}  💬 {replies_str}"
+        message += self._link_cards(
+            tweet, budget=TELEGRAM_MESSAGE_LIMIT - len(message) - len(tail)
+        )
+        return message + tail
 
     def _render_text(self, tweet: dict) -> str:
         """Escaped tweet text with t.co links replaced by readable anchors.
@@ -339,27 +344,44 @@ class FormattingMixin:
                 replacement = ""
             else:
                 replacement = (
-                    f'<a href="{self._escape_html(link["url"])}">'
+                    f'<a href="{self._escape_url(link["url"])}">'
                     f'{self._escape_html(link["display"])}</a>'
                 )
             text = text.replace(link["tco"], replacement)
         return text.strip()
 
-    def _link_cards(self, tweet: dict) -> str:
-        """Title/description cards for external links, from X's unwound metadata."""
-        cards = []
+    @staticmethod
+    def _escape_url(url: str) -> str:
+        """Escape a URL for an href attribute: quotes too, and no unescaping
+        first (``_escape_html`` would turn ``&copy=`` into ``©=``)."""
+        return html.escape(url or "", quote=True)
+
+    @staticmethod
+    def _clip(text: str, limit: int) -> str:
+        return text if len(text) <= limit else text[:limit].rstrip() + "…"
+
+    def _link_cards(self, tweet: dict, budget: Optional[int] = None) -> str:
+        """Title/description cards for external links, from X's unwound metadata.
+
+        ``budget`` is the number of characters the cards may add to the
+        message; cards that don't fit are dropped (description first,
+        then the whole card) so a deliverable tweet never becomes too long.
+        """
+        out = ""
         for link in link_previews(tweet):
-            card = (
-                f'🔗 <a href="{self._escape_html(link["url"])}">'
-                f'<b>{self._escape_html(link["title"])}</b></a>'
+            head = (
+                f'\n\n🔗 <a href="{self._escape_url(link["url"])}">'
+                f'<b>{self._escape_html(self._clip(link["title"], 120))}</b></a>'
             )
             desc = link.get("description")
-            if desc:
-                if len(desc) > 200:
-                    desc = desc[:200].rstrip() + "…"
-                card += f"\n<i>{self._escape_html(desc)}</i>"
-            cards.append(card)
-        return ("\n\n" + "\n\n".join(cards)) if cards else ""
+            body = f"\n<i>{self._escape_html(self._clip(desc, 200))}</i>" if desc else ""
+            for card in (head + body, head):
+                if budget is None or len(out) + len(card) <= budget:
+                    out += card
+                    break
+            else:
+                break
+        return out
 
     def _retweet_header(self, tweet: dict) -> str:
         """Render a "🔁 retweeted by @retweeter" header for retweets, else empty.

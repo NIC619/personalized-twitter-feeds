@@ -979,3 +979,35 @@ class TestLinkPreviews:
 
     def test_no_entities_unchanged(self, bot, sample_tweet):
         assert sample_tweet["text"] in bot._format_tweet_message(sample_tweet)
+
+
+class TestLinkPreviewSafety:
+    LINK = {"url": "https://t.co/abc", "expanded_url": 'https://ex.com/p?a=1&copy=2&q="x"',
+            "display_url": "ex.com/p", "title": "T", "description": "D"}
+
+    def test_url_not_unescaped_and_quotes_escaped(self, bot, sample_tweet):
+        t = _linked_tweet(sample_tweet, [self.LINK]); t["text"] = "see https://t.co/abc"
+        msg = bot._format_tweet_message(t)
+        assert 'href="https://ex.com/p?a=1&amp;copy=2&amp;q=&quot;x&quot;"' in msg
+        assert "©" not in msg
+
+    def test_cards_dropped_when_message_would_exceed_limit(self, bot, sample_tweet):
+        from src.bot.constants import TELEGRAM_MESSAGE_LIMIT
+        long_link = dict(self.LINK, description="d" * 300)
+        t = _linked_tweet(sample_tweet, [long_link]); t["text"] = "x" * 3850 + " https://t.co/abc"
+        msg = bot._format_tweet_message(t)
+        assert len(msg) <= TELEGRAM_MESSAGE_LIMIT
+        assert "🔗" not in msg  # no room even for the bare title card
+        # a shorter tweet gets the title but not the description
+        t["text"] = "x" * 3700 + " https://t.co/abc"
+        msg = bot._format_tweet_message(t)
+        assert len(msg) <= TELEGRAM_MESSAGE_LIMIT and "🔗" in msg and "<i>" not in msg
+
+    def test_title_capped(self, bot, sample_tweet):
+        t = _linked_tweet(sample_tweet, [dict(self.LINK, title="t" * 300)])
+        msg = bot._format_tweet_message(t)
+        assert "t" * 120 + "…" in msg and "t" * 121 not in msg
+
+    def test_thread_text_uses_url_escaper(self, bot, sample_tweet):
+        t = _linked_tweet(sample_tweet, [self.LINK]); t["text"] = "see https://t.co/abc"
+        assert 'href="https://ex.com/p?a=1&amp;copy=2&amp;q=&quot;x&quot;"' in bot._format_thread_message([t])
