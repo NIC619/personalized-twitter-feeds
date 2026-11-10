@@ -886,3 +886,40 @@ class TestQuotedRowPersistence:
         await vote_bot._handle_feedback(update, MagicMock())
         vote_bot.mark_sent_callback.assert_not_awaited()
         assert vote_bot._message_items[555] == "9"  # new copy still resolves in memory
+
+
+class TestRetweetHeader:
+    def test_retweeted_by_header_and_original_author(self, bot, sample_retweet):
+        msg = bot._format_tweet_message(sample_retweet)
+        assert "🔁 retweeted by <b>@someuser</b>" in msg
+        assert "<b>@vitalikbuterin</b>" in msg
+        assert "status/444555000" in msg
+
+    def test_db_row_falls_back_to_raw_data(self, bot, sample_retweet):
+        row = {k: v for k, v in sample_retweet.items() if k != "retweeted_by"}
+        assert "retweeted by <b>@someuser</b>" in bot._format_tweet_message(row)
+
+    def test_legacy_row_shows_via_original(self, bot, sample_tweet):
+        legacy = dict(sample_tweet, is_retweet=True,
+                      raw_data={"retweeted_from": {"author_username": "orig"}})
+        assert "🔁 via <b>@orig</b>" in bot._format_tweet_message(legacy)
+
+    @pytest.mark.asyncio
+    async def test_retweet_message_buttons_target_original(self, vote_bot, sample_retweet):
+        await vote_bot.send_tweet(sample_retweet)
+        rows = vote_bot.application.bot.send_message.call_args[1]["reply_markup"].inline_keyboard
+        assert rows[0][1].callback_data == "vote:444555000:up:1"
+        assert rows[1][0].callback_data == "fav:vitalikbuterin:444555000"
+
+
+class TestLikeRetweetLink:
+    @pytest.mark.asyncio
+    async def test_pasted_retweet_link_votes_on_original(self, vote_bot, sample_retweet):
+        vote_bot.like_tweet_callback = AsyncMock(return_value=sample_retweet)
+        msg = MagicMock(); msg.reply_text = AsyncMock()
+        update = MagicMock(); update.message = msg
+        await vote_bot._like_tweets(update, ["https://x.com/someuser/status/444555666"])
+        await _settle(vote_bot)
+        vote_bot.like_tweet_callback.assert_awaited_once_with("444555666")
+        assert vote_bot._message_items[555] == "444555000"
+        assert vote_bot._tweet_authors["444555000"] == "vitalikbuterin"

@@ -280,7 +280,8 @@ class CaptureMixin:
                 await update.message.reply_text(f"Tweet {item_id} not found.")
                 continue
 
-            # Format message without score/reason
+            # A retweet link resolves to the original tweet; vote on that id.
+            item_id = tweet["item_id"]
             message = self._format_like_message(tweet)
 
             # Store author mapping for undo functionality

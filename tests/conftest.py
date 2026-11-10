@@ -64,18 +64,21 @@ def sample_tweets(sample_tweet):
 
 @pytest.fixture
 def sample_retweet():
-    """A retweet dict."""
+    """A retweet dict: the original tweet, with the retweeter in retweeted_by."""
+    retweeted_by = {"author_username": "someuser", "author_name": "Some User",
+                    "item_id": "444555666", "created_at": "2025-01-15T13:00:00+00:00"}
     return {
-        "item_id": "444555666",
-        "author_username": "someuser",
-        "author_name": "Some User",
-        "text": "RT @vitalikbuterin: New EIP proposal...",
-        "created_at": "2025-01-15T13:00:00+00:00",
+        "item_id": "444555000",
+        "author_username": "vitalikbuterin",
+        "author_name": "Vitalik Buterin",
+        "text": "New EIP proposal...",
+        "created_at": "2025-01-14T13:00:00+00:00",
         "is_retweet": True,
         "quoted_tweet": None,
-        "metrics": {"likes": 0, "retweets": 0, "replies": 0, "views": 0},
-        "url": "https://twitter.com/someuser/status/444555666",
-        "raw_data": {"id": "444555666", "text": "RT @vitalikbuterin: New EIP proposal...", "author_id": "444", "created_at": "2025-01-15T13:00:00+00:00", "entities": None, "conversation_id": None},
+        "retweeted_by": retweeted_by,
+        "metrics": {"likes": 900, "retweets": 120, "replies": 30, "views": 50000},
+        "url": "https://twitter.com/vitalikbuterin/status/444555000",
+        "raw_data": {"id": "444555000", "text": "New EIP proposal...", "author_id": "1", "created_at": "2025-01-14T13:00:00+00:00", "entities": None, "conversation_id": None, "retweeted_by": retweeted_by},
     }
 
 

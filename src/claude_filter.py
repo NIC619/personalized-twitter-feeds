@@ -412,6 +412,9 @@ class ClaudeFilter:
         }
         if tweet.get("content_type") and tweet["content_type"] != "tweet":
             entry["type"] = tweet["content_type"]
+        retweeted_by = tweet.get("retweeted_by") or (tweet.get("raw_data") or {}).get("retweeted_by")
+        if retweeted_by and retweeted_by.get("author_username"):
+            entry["retweeted_by"] = retweeted_by["author_username"]
         if tweet.get("quoted_tweet"):
             entry["quoted_tweet"] = {
                 "author": tweet["quoted_tweet"]["author_username"],

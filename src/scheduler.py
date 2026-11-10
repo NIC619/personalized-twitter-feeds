@@ -9,6 +9,7 @@ from typing import Optional
 import schedule
 
 from src.twitter_client import TwitterClient
+from src.content import retweeter_username
 from src.claude_filter import ClaudeFilter
 from src.telegram_bot import TelegramCurator
 from src.database import DatabaseClient
@@ -221,11 +222,11 @@ class DailyCurator:
         favorite_authors_set = set(favorite_authors)
         muted_authors = set(self.db.get_muted_authors())
 
-        # Skip retweets from non-favorite authors
+        # Skip retweets unless the retweeter is a favorite author
         tweets_for_filtering = []
         skipped_retweets = 0
         for tweet in new_tweets:
-            if tweet.get("is_retweet") and (tweet.get("author_username") or "").lower() not in favorite_authors_set:
+            if tweet.get("is_retweet") and retweeter_username(tweet) not in favorite_authors_set:
                 skipped_retweets += 1
             else:
                 tweets_for_filtering.append(tweet)
@@ -585,6 +586,15 @@ class DailyCurator:
         """
         if not tweets:
             return []
+        # The same original can arrive directly and via a retweet in one
+        # batch (retweets are stored under the original's id); keep one copy,
+        # preferring the direct one, so the upsert never hits an id twice.
+        unique: dict[str, dict] = {}
+        for t in tweets:
+            prev = unique.get(t["item_id"])
+            if prev is None or (prev.get("is_retweet") and not t.get("is_retweet")):
+                unique[t["item_id"]] = t
+        tweets = list(unique.values())
         scored_ids = self.db.get_scored_ids([t["item_id"] for t in tweets])
         return [t for t in tweets if t["item_id"] not in scored_ids]
 

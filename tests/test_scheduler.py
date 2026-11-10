@@ -56,6 +56,14 @@ class TestDeduplicateTweets:
         result = curator._deduplicate_tweets([{"item_id": "1", "text": "new"}])
         assert [t["item_id"] for t in result] == ["1"]
 
+    def test_same_original_direct_and_via_retweet_keeps_direct(self, curator):
+        curator.db.get_scored_ids.return_value = set()
+        via_rt = {"item_id": "1", "text": "x", "is_retweet": True, "retweeted_by": {"author_username": "s"}}
+        direct = {"item_id": "1", "text": "x", "is_retweet": False}
+        for order in ([via_rt, direct], [direct, via_rt]):
+            result = curator._deduplicate_tweets(order)
+            assert len(result) == 1 and result[0] is direct
+
     def test_mixed_new_and_old_single_query(self, curator):
         curator.db.get_scored_ids.return_value = {"old"}
         tweets = [
@@ -119,9 +127,12 @@ class TestRunDailyCuration:
 
     @pytest.mark.asyncio
     async def test_retweet_skipping(self, curator):
+        # Retweets are the original tweet; the retweeter decides whether it stays.
         tweets = [
-            {"item_id": "1", "author_username": "normal", "text": "RT something", "is_retweet": True},
-            {"item_id": "2", "author_username": "fav", "text": "RT something else", "is_retweet": True},
+            {"item_id": "1", "author_username": "orig_a", "text": "something", "is_retweet": True,
+             "retweeted_by": {"author_username": "normal"}},
+            {"item_id": "2", "author_username": "orig_b", "text": "something else", "is_retweet": True,
+             "retweeted_by": {"author_username": "Fav"}},
             {"item_id": "3", "author_username": "normal", "text": "original", "is_retweet": False},
         ]
         curator.twitter.fetch_timeline.return_value = tweets
