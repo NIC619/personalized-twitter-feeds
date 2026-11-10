@@ -25,6 +25,7 @@ REACTION_VOTES: dict[str, tuple[str, int]] = {
 STRONG_LABEL = "🔥"
 UP_LABEL = "👍"
 DOWN_LABEL = "👎"
+QUOTED_LABEL = "💬 Vote quoted tweet"
 
 
 @dataclass(frozen=True)
@@ -72,13 +73,31 @@ def vote_label(vote: Vote) -> str:
     return STRONG_LABEL if vote.strength >= 2 else UP_LABEL
 
 
+def quoted_item_id(item: dict) -> Optional[str]:
+    """Id of the tweet ``item`` quotes, or None.
+
+    Fresh tweets from the X client carry ``quoted_tweet.item_id``; rows read
+    back from the database only keep ``raw_data.referenced_tweets``.
+    """
+    quoted = item.get("quoted_tweet")
+    if isinstance(quoted, dict) and quoted.get("item_id"):
+        return str(quoted["item_id"])
+    raw = item.get("raw_data") or {}
+    for ref in raw.get("referenced_tweets") or []:
+        if ref.get("type") == "quoted" and ref.get("id"):
+            return str(ref["id"])
+    return None
+
+
 def vote_buttons(
     item_id: str,
     username: Optional[str],
     fav_label: str = "⭐ Author",
     mute_label: str = "🔇 Mute",
+    quoted_id: Optional[str] = None,
 ) -> InlineKeyboardMarkup:
-    """Default keyboard under a sent item: 🔥 👍 👎 + author controls."""
+    """Default keyboard under a sent item: 🔥 👍 👎 + author controls,
+    plus a row to pull up the quoted tweet for its own vote when there is one."""
     rows = [[
         InlineKeyboardButton(STRONG_LABEL, callback_data=f"vote:{item_id}:up:2"),
         InlineKeyboardButton(UP_LABEL, callback_data=f"vote:{item_id}:up:1"),
@@ -89,6 +108,8 @@ def vote_buttons(
             InlineKeyboardButton(fav_label, callback_data=f"fav:{username}:{item_id}"),
             InlineKeyboardButton(mute_label, callback_data=f"mute:{username}:{item_id}"),
         ])
+    if quoted_id:
+        rows.append([InlineKeyboardButton(QUOTED_LABEL, callback_data=f"qt:{quoted_id}")])
     return InlineKeyboardMarkup(rows)
 
 

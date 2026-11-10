@@ -239,9 +239,13 @@ class FormattingMixin:
         username: Optional[str],
         fav_label: str = "⭐ Author",
         mute_label: str = "🔇 Mute",
+        quoted_id: Optional[str] = None,
     ) -> InlineKeyboardMarkup:
-        """Vote row (🔥 👍 👎) plus author controls when a username is known."""
-        return vote_buttons(item_id, username, fav_label=fav_label, mute_label=mute_label)
+        """Vote row (🔥 👍 👎) plus author controls when a username is known,
+        plus a "vote the quoted tweet" row when ``quoted_id`` is given."""
+        return vote_buttons(
+            item_id, username, fav_label=fav_label, mute_label=mute_label, quoted_id=quoted_id,
+        )
 
     def _link(self, item: dict) -> str:
         """Tracking link for an item when configured, else its real URL."""
