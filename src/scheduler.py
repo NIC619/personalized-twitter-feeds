@@ -9,7 +9,6 @@ from typing import Optional
 import schedule
 
 from src.twitter_client import TwitterClient
-from src.content import retweeter_username
 from src.claude_filter import ClaudeFilter
 from src.telegram_bot import TelegramCurator
 from src.database import DatabaseClient
@@ -222,24 +221,10 @@ class DailyCurator:
         favorite_authors_set = set(favorite_authors)
         muted_authors = set(self.db.get_muted_authors())
 
-        # Skip retweets unless the retweeter is a favorite author
-        tweets_for_filtering = []
-        skipped_retweets = 0
-        for tweet in new_tweets:
-            if tweet.get("is_retweet") and retweeter_username(tweet) not in favorite_authors_set:
-                skipped_retweets += 1
-            else:
-                tweets_for_filtering.append(tweet)
-
-        stats["skipped_retweets"] = skipped_retweets
-        if skipped_retweets > 0:
-            logger.info(
-                f"Skipped {skipped_retweets} retweets from non-favorite authors"
-            )
-
-        if not tweets_for_filtering:
-            logger.info("No tweets remaining after retweet filter")
-            return
+        # Retweets are not filtered out: they are stored as the original tweet
+        # and scored like anything else (the model sees who retweeted them).
+        tweets_for_filtering = list(new_tweets)
+        stats["retweets"] = sum(1 for t in new_tweets if t.get("is_retweet"))
 
         # Step 1e: Apply keyword blocklist (pre-LLM, favorite authors exempt)
         blocked_keywords = self.db.get_blocked_keywords()

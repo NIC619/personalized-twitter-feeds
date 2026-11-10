@@ -126,8 +126,9 @@ class TestRunDailyCuration:
         assert stats["filtered"] == 1
 
     @pytest.mark.asyncio
-    async def test_retweet_skipping(self, curator):
-        # Retweets are the original tweet; the retweeter decides whether it stays.
+    async def test_retweets_are_scored_like_any_tweet(self, curator):
+        # Retweets are stored as the original tweet and are no longer filtered
+        # by who retweeted them; they all reach the scorer.
         tweets = [
             {"item_id": "1", "author_username": "orig_a", "text": "something", "is_retweet": True,
              "retweeted_by": {"author_username": "normal"}},
@@ -141,7 +142,7 @@ class TestRunDailyCuration:
         curator.db.get_muted_authors.return_value = []
 
         scored = []
-        for t in [tweets[1], tweets[2]]:  # only non-skipped tweets
+        for t in tweets:
             t_copy = dict(t)
             t_copy["filter_score"] = 80
             t_copy["filter_reason"] = "good"
@@ -155,10 +156,10 @@ class TestRunDailyCuration:
 
         stats = await curator.run_daily_curation()
 
-        assert stats["skipped_retweets"] == 1
-        # Claude should only receive 2 tweets (fav retweet + normal original)
+        assert stats["retweets"] == 2
+        assert "skipped_retweets" not in stats
         call_args = curator.claude.filter_tweets.call_args
-        assert len(call_args[0][0]) == 2
+        assert len(call_args[0][0]) == 3
 
     @pytest.mark.asyncio
     async def test_all_duplicates(self, curator):
