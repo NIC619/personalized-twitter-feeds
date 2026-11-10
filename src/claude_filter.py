@@ -15,6 +15,7 @@ from typing import Optional
 
 from anthropic import Anthropic
 import httpx
+from src.content import link_previews
 
 logger = logging.getLogger(__name__)
 
@@ -420,6 +421,12 @@ class ClaudeFilter:
                 "author": tweet["quoted_tweet"]["author_username"],
                 "text": tweet["quoted_tweet"]["text"],
             }
+        links = [
+            {"url": l["url"], "title": l["title"], "description": (l.get("description") or "")[:300]}
+            for l in link_previews(tweet)
+        ]
+        if links:
+            entry["links"] = links
         if tweet.get("article"):
             entry["article"] = {
                 "title": tweet["article"]["title"],

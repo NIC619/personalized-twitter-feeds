@@ -6,6 +6,7 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Optional
 
 from openai import OpenAI
+from src.content import link_previews
 
 logger = logging.getLogger(__name__)
 
@@ -67,6 +68,10 @@ class EmbeddingManager:
         article = tweet.get("article")
         if article and article.get("title"):
             parts.append(article["title"])
+        for link in link_previews(tweet):
+            parts.append(link["title"])
+            if link.get("description"):
+                parts.append(link["description"])
         text = "\n".join(p for p in parts if p).strip()
         return text or "(empty)"
 

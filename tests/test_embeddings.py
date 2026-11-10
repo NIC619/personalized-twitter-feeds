@@ -168,3 +168,11 @@ class TestFindNeighbors:
         assert "look at this" in text
         assert "deep dive on preconfs" in text
         assert "Based rollups explained" in text
+
+
+def test_embed_text_includes_link_title_and_description():
+    from src.embeddings import EmbeddingManager
+    t = {"text": "https://t.co/x", "raw_data": {"entities": {"urls": [
+        {"url": "https://t.co/x", "expanded_url": "https://ex.com/p", "title": "Rollup economics", "description": "Fees"}]}}}
+    out = EmbeddingManager._embed_text(t)
+    assert "Rollup economics" in out and "Fees" in out

@@ -19,11 +19,15 @@ from src.bot.constants import (
     LIKE_AWAITING_INPUT,
     NEWSLETTER_AWAITING_INPUT,
     STAR_AWAITING_INPUT,
+    TELEGRAM_MESSAGE_LIMIT,
     THREAD_AWAITING_INPUT,
     VOTE_GRACE_SECONDS,
 )
 from src.capture import classify_message, forward_origin
-from src.content import is_blog_content, is_http_url, is_tweet_url, is_twitter_profile_url
+from src.content import (
+    is_blog_content, is_http_url, is_tweet_url, is_twitter_profile_url,
+    link_previews, tweet_links,
+)
 from src.feedback_flow import (
     Vote,
     parse_vote_callback,
@@ -73,7 +77,7 @@ class FormattingMixin:
         lines = [f"<b>Thread by @{author} ({n} tweets)</b>\n"]
 
         for i, tweet in enumerate(tweets, 1):
-            text = self._escape_html(tweet["text"])
+            text = self._render_text(tweet)
             lines.append(f"<b>[{i}/{n}]</b> {text}\n")
 
         lines.append(
@@ -140,7 +144,7 @@ class FormattingMixin:
     def _format_like_message(self, tweet: dict) -> str:
         """Format tweet for like message (no score/reason header)."""
         metrics = tweet.get("metrics", {})
-        text = self._escape_html(tweet["text"])
+        text = self._render_text(tweet)
 
         likes = metrics.get("likes", 0)
         retweets = metrics.get("retweets", 0)
@@ -168,8 +172,11 @@ class FormattingMixin:
                 f"{qt_block}"
             )
 
-        message += f"\n\n❤️ {likes_str}  🔁 {retweets_str}  💬 {replies_str}"
-        return message
+        tail = f"\n\n❤️ {likes_str}  🔁 {retweets_str}  💬 {replies_str}"
+        message += self._link_cards(
+            tweet, budget=TELEGRAM_MESSAGE_LIMIT - len(message) - len(tail)
+        )
+        return message + tail
 
     @staticmethod
     def _make_blockword_buttons(keywords: list[str]) -> InlineKeyboardMarkup:
@@ -267,8 +274,7 @@ class FormattingMixin:
         """
         metrics = tweet.get("metrics", {})
 
-        # Escape HTML special characters in text
-        text = self._escape_html(tweet["text"])
+        text = self._render_text(tweet)
 
         likes = metrics.get("likes", 0)
         retweets = metrics.get("retweets", 0)
@@ -319,8 +325,63 @@ class FormattingMixin:
                 f"{qt_block}"
             )
 
-        message += f"\n\n❤️ {likes_str}  🔁 {retweets_str}  💬 {replies_str}"
-        return message
+        tail = f"\n\n❤️ {likes_str}  🔁 {retweets_str}  💬 {replies_str}"
+        message += self._link_cards(
+            tweet, budget=TELEGRAM_MESSAGE_LIMIT - len(message) - len(tail)
+        )
+        return message + tail
+
+    def _render_text(self, tweet: dict) -> str:
+        """Escaped tweet text with t.co links replaced by readable anchors.
+
+        External links become ``<a href=expanded>display</a>``; photo/video
+        links to the tweet itself are dropped (they only point back at the
+        post); other x.com links keep their display form as anchors.
+        """
+        text = self._escape_html(tweet.get("text") or "")
+        for link in tweet_links(tweet):
+            if link["media"]:
+                replacement = ""
+            else:
+                replacement = (
+                    f'<a href="{self._escape_url(link["url"])}">'
+                    f'{self._escape_html(link["display"])}</a>'
+                )
+            text = text.replace(link["tco"], replacement)
+        return text.strip()
+
+    @staticmethod
+    def _escape_url(url: str) -> str:
+        """Escape a URL for an href attribute: quotes too, and no unescaping
+        first (``_escape_html`` would turn ``&copy=`` into ``©=``)."""
+        return html.escape(url or "", quote=True)
+
+    @staticmethod
+    def _clip(text: str, limit: int) -> str:
+        return text if len(text) <= limit else text[:limit].rstrip() + "…"
+
+    def _link_cards(self, tweet: dict, budget: Optional[int] = None) -> str:
+        """Title/description cards for external links, from X's unwound metadata.
+
+        ``budget`` is the number of characters the cards may add to the
+        message; cards that don't fit are dropped (description first,
+        then the whole card) so a deliverable tweet never becomes too long.
+        """
+        out = ""
+        for link in link_previews(tweet):
+            head = (
+                f'\n\n🔗 <a href="{self._escape_url(link["url"])}">'
+                f'<b>{self._escape_html(self._clip(link["title"], 120))}</b></a>'
+            )
+            desc = link.get("description")
+            body = f"\n<i>{self._escape_html(self._clip(desc, 200))}</i>" if desc else ""
+            for card in (head + body, head):
+                if budget is None or len(out) + len(card) <= budget:
+                    out += card
+                    break
+            else:
+                break
+        return out
 
     def _retweet_header(self, tweet: dict) -> str:
         """Render a "🔁 retweeted by @retweeter" header for retweets, else empty.

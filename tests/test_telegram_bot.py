@@ -923,3 +923,91 @@ class TestLikeRetweetLink:
         vote_bot.like_tweet_callback.assert_awaited_once_with("444555666")
         assert vote_bot._message_items[555] == "444555000"
         assert vote_bot._tweet_authors["444555000"] == "vitalikbuterin"
+
+
+def _linked_tweet(sample_tweet, urls):
+    t = dict(sample_tweet)
+    t["raw_data"] = dict(sample_tweet["raw_data"], entities={"urls": urls})
+    return t
+
+
+class TestLinkPreviews:
+    EXT = {
+        "url": "https://t.co/abc", "expanded_url": "https://example.com/post?x=1&y=2",
+        "unwound_url": "https://example.com/post?x=1&y=2", "display_url": "example.com/post",
+        "title": "A <great> post", "description": "Why it matters & more",
+    }
+    MEDIA = {"url": "https://t.co/pic", "expanded_url": "https://twitter.com/test/status/1/photo/1",
+             "display_url": "pic.twitter.com/xyz"}
+
+    def test_tco_expanded_to_anchor_and_card_rendered(self, bot, sample_tweet):
+        t = _linked_tweet(sample_tweet, [self.EXT])
+        t["text"] = "Read this https://t.co/abc"
+        msg = bot._format_tweet_message(t)
+        assert "https://t.co/abc" not in msg
+        assert '<a href="https://example.com/post?x=1&amp;y=2">example.com/post</a>' in msg
+        assert "🔗 <a href=\"https://example.com/post?x=1&amp;y=2\"><b>A &lt;great&gt; post</b></a>" in msg
+        assert "<i>Why it matters &amp; more</i>" in msg
+
+    def test_media_link_dropped(self, bot, sample_tweet):
+        t = _linked_tweet(sample_tweet, [self.MEDIA])
+        t["text"] = "look https://t.co/pic"
+        msg = bot._format_tweet_message(t)
+        assert "t.co/pic" not in msg and "pic.twitter.com" not in msg
+        assert "🔗" not in msg
+
+    def test_x_link_without_title_has_no_card(self, bot, sample_tweet):
+        t = _linked_tweet(sample_tweet, [{"url": "https://t.co/q", "expanded_url": "https://x.com/a/status/9",
+                                         "display_url": "x.com/a/status/9", "title": "X"}])
+        t["text"] = "see https://t.co/q"
+        msg = bot._format_tweet_message(t)
+        assert '<a href="https://x.com/a/status/9">x.com/a/status/9</a>' in msg
+        assert "🔗" not in msg
+
+    def test_long_description_truncated_and_two_cards_max(self, bot, sample_tweet):
+        urls = [dict(self.EXT, url=f"https://t.co/{i}", title=f"T{i}", description="d" * 500) for i in range(3)]
+        t = _linked_tweet(sample_tweet, urls)
+        msg = bot._format_tweet_message(t)
+        assert msg.count("🔗") == 2
+        assert "d" * 200 + "…" in msg and "d" * 201 not in msg
+
+    def test_like_and_thread_messages_also_expand(self, bot, sample_tweet):
+        t = _linked_tweet(sample_tweet, [self.EXT]); t["text"] = "x https://t.co/abc"
+        assert "example.com/post</a>" in bot._format_like_message(t)
+        assert "🔗" in bot._format_like_message(t)
+        assert "example.com/post</a>" in bot._format_thread_message([t])
+
+    def test_no_entities_unchanged(self, bot, sample_tweet):
+        assert sample_tweet["text"] in bot._format_tweet_message(sample_tweet)
+
+
+class TestLinkPreviewSafety:
+    LINK = {"url": "https://t.co/abc", "expanded_url": 'https://ex.com/p?a=1&copy=2&q="x"',
+            "display_url": "ex.com/p", "title": "T", "description": "D"}
+
+    def test_url_not_unescaped_and_quotes_escaped(self, bot, sample_tweet):
+        t = _linked_tweet(sample_tweet, [self.LINK]); t["text"] = "see https://t.co/abc"
+        msg = bot._format_tweet_message(t)
+        assert 'href="https://ex.com/p?a=1&amp;copy=2&amp;q=&quot;x&quot;"' in msg
+        assert "©" not in msg
+
+    def test_cards_dropped_when_message_would_exceed_limit(self, bot, sample_tweet):
+        from src.bot.constants import TELEGRAM_MESSAGE_LIMIT
+        long_link = dict(self.LINK, description="d" * 300)
+        t = _linked_tweet(sample_tweet, [long_link]); t["text"] = "x" * 3850 + " https://t.co/abc"
+        msg = bot._format_tweet_message(t)
+        assert len(msg) <= TELEGRAM_MESSAGE_LIMIT
+        assert "🔗" not in msg  # no room even for the bare title card
+        # a shorter tweet gets the title but not the description
+        t["text"] = "x" * 3700 + " https://t.co/abc"
+        msg = bot._format_tweet_message(t)
+        assert len(msg) <= TELEGRAM_MESSAGE_LIMIT and "🔗" in msg and "<i>" not in msg
+
+    def test_title_capped(self, bot, sample_tweet):
+        t = _linked_tweet(sample_tweet, [dict(self.LINK, title="t" * 300)])
+        msg = bot._format_tweet_message(t)
+        assert "t" * 120 + "…" in msg and "t" * 121 not in msg
+
+    def test_thread_text_uses_url_escaper(self, bot, sample_tweet):
+        t = _linked_tweet(sample_tweet, [self.LINK]); t["text"] = "see https://t.co/abc"
+        assert 'href="https://ex.com/p?a=1&amp;copy=2&amp;q=&quot;x&quot;"' in bot._format_thread_message([t])

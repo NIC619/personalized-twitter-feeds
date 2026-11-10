@@ -116,3 +116,10 @@ class TestFilterBlockedKeywords:
         kept, blocked = filter_blocked_keywords(items, ["staking"])
         assert len(kept) == 1
         assert len(blocked) == 0
+
+
+def test_blocked_keyword_in_link_title_matches():
+    from src.keyword_filter import compile_keyword_pattern, find_blocked_match
+    item = {"text": "check this https://t.co/x", "raw_data": {"entities": {"urls": [
+        {"url": "https://t.co/x", "expanded_url": "https://ex.com/p", "title": "Huge Airdrop Guide"}]}}}
+    assert find_blocked_match(item, compile_keyword_pattern(["airdrop"])) is not None
