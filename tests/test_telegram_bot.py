@@ -846,3 +846,43 @@ class TestQuotedTweetVote:
         await vote_bot._handle_feedback(update, MagicMock())
         rows = query.edit_message_reply_markup.call_args[1]["reply_markup"].inline_keyboard
         assert rows[-1][0].callback_data == "qt:777"
+
+
+class TestQuotedRowPersistence:
+    @pytest.mark.asyncio
+    async def test_reaction_removal_keeps_quoted_row(self, vote_bot):
+        vote_bot._quoted_items["42"] = "888"
+        vote_bot._message_items[100] = "42"
+        update = MagicMock()
+        update.message_reaction = SimpleNamespace(
+            chat=SimpleNamespace(id=12345), message_id=100,
+            new_reaction=[], old_reaction=[SimpleNamespace(emoji="👍")],
+        )
+        await vote_bot._handle_reaction(update, MagicMock())
+        kwargs = vote_bot.application.bot.edit_message_reply_markup.call_args[1]
+        assert kwargs["reply_markup"].inline_keyboard[-1][0].callback_data == "qt:888"
+
+    @pytest.mark.asyncio
+    async def test_reaction_removal_recovers_quoted_row_from_db(self, vote_bot):
+        vote_bot._message_items[100] = "42"
+        vote_bot.lookup_message_callback = AsyncMock(return_value={
+            "item_id": "42", "raw_data": {"referenced_tweets": [{"type": "quoted", "id": "777"}]},
+        })
+        update = MagicMock()
+        update.message_reaction = SimpleNamespace(
+            chat=SimpleNamespace(id=12345), message_id=100,
+            new_reaction=[], old_reaction=[SimpleNamespace(emoji="👍")],
+        )
+        await vote_bot._handle_reaction(update, MagicMock())
+        kwargs = vote_bot.application.bot.edit_message_reply_markup.call_args[1]
+        assert kwargs["reply_markup"].inline_keyboard[-1][0].callback_data == "qt:777"
+
+    @pytest.mark.asyncio
+    async def test_qt_does_not_overwrite_existing_message_mapping(self, vote_bot, sample_tweet):
+        already_sent = dict(sample_tweet, item_id="9", telegram_message_id=321)
+        vote_bot.like_tweet_callback = AsyncMock(return_value=already_sent)
+        vote_bot.mark_sent_callback = AsyncMock()
+        update, query = _query("qt:9")
+        await vote_bot._handle_feedback(update, MagicMock())
+        vote_bot.mark_sent_callback.assert_not_awaited()
+        assert vote_bot._message_items[555] == "9"  # new copy still resolves in memory

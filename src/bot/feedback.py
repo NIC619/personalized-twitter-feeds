@@ -174,16 +174,20 @@ class FeedbackMixin:
                 )
             )
 
-    async def _quoted_for(self, item_id: str, query=None) -> Optional[str]:
+    async def _quoted_for(
+        self, item_id: str, query=None, message_id: Optional[int] = None
+    ) -> Optional[str]:
         """Id of the tweet ``item_id`` quotes, so a re-rendered keyboard keeps
         its quoted row. Memory first; after a restart, the stored item."""
         quoted_id = self._quoted_items.get(item_id)
-        if quoted_id or not self.lookup_message_callback or query is None:
+        if message_id is None and query is not None:
+            message_id = query.message.message_id
+        if quoted_id or not self.lookup_message_callback or message_id is None:
             return quoted_id
         try:
-            item = await self.lookup_message_callback(query.message.message_id)
+            item = await self.lookup_message_callback(message_id)
         except Exception as e:
-            logger.warning(f"Message lookup failed for {query.message.message_id}: {e}")
+            logger.warning(f"Message lookup failed for {message_id}: {e}")
             return None
         if not item or item.get("item_id") != item_id:
             return None
@@ -224,7 +228,14 @@ class FeedbackMixin:
         except Exception as e:
             logger.error(f"Error sending quoted tweet {quoted_id}: {e}")
             return False
-        await self._remember_sent(quoted_id, sent.message_id)
+        # items.telegram_message_id holds ONE message per item. If this tweet
+        # was already delivered (DB row carries a message id), keep that
+        # mapping and remember the new copy in memory only, so reactions and
+        # notes on the earlier message keep resolving after a restart.
+        if tweet.get("telegram_message_id"):
+            self._message_items[sent.message_id] = quoted_id
+        else:
+            await self._remember_sent(quoted_id, sent.message_id)
         return True
 
     async def _notify(self, text: str) -> None:
@@ -481,7 +492,10 @@ class FeedbackMixin:
             if retracted:
                 await self._set_keyboard(
                     mr.message_id,
-                    self._make_tweet_buttons(item_id, self._tweet_authors.get(item_id)),
+                    self._make_tweet_buttons(
+                        item_id, self._tweet_authors.get(item_id),
+                        quoted_id=await self._quoted_for(item_id, message_id=mr.message_id),
+                    ),
                 )
                 logger.info(f"Reaction removed → vote retracted: item={item_id}")
                 return
