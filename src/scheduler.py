@@ -19,6 +19,22 @@ from src.profile_compiler import ProfileCompiler, scoring_profile
 logger = logging.getLogger(__name__)
 
 
+
+def _prefer_direct(tweets: list[dict]) -> list[dict]:
+    """One copy per item_id, order preserved, a direct copy beating a retweet copy.
+
+    Retweets are stored under the original's id, so the same original can
+    arrive directly and via a retweet in one batch; the upsert must never
+    hit an id twice and the direct copy carries the author's own context.
+    """
+    unique: dict[str, dict] = {}
+    for t in tweets:
+        prev = unique.get(t["item_id"])
+        if prev is None or (prev.get("is_retweet") and not t.get("is_retweet")):
+            unique[t["item_id"]] = t
+    return list(unique.values())
+
+
 class DailyCurator:
     """Orchestrates the daily tweet curation workflow."""
 
@@ -171,14 +187,11 @@ class DailyCurator:
             )
             stats["starred_fetched"] = len(starred_tweets)
 
-            # Merge and deduplicate by item_id
-            seen_ids = {t["item_id"] for t in tweets}
-            new_from_starred = 0
-            for st in starred_tweets:
-                if st["item_id"] not in seen_ids:
-                    tweets.append(st)
-                    seen_ids.add(st["item_id"])
-                    new_from_starred += 1
+            # Merge and deduplicate by item_id. A starred author's own tweet
+            # beats the home timeline's retweet copy of it.
+            home_ids = {t["item_id"] for t in tweets}
+            new_from_starred = sum(1 for st in starred_tweets if st["item_id"] not in home_ids)
+            tweets = _prefer_direct(tweets + starred_tweets)
 
             stats["starred_new"] = new_from_starred
             logger.info(
@@ -571,15 +584,7 @@ class DailyCurator:
         """
         if not tweets:
             return []
-        # The same original can arrive directly and via a retweet in one
-        # batch (retweets are stored under the original's id); keep one copy,
-        # preferring the direct one, so the upsert never hits an id twice.
-        unique: dict[str, dict] = {}
-        for t in tweets:
-            prev = unique.get(t["item_id"])
-            if prev is None or (prev.get("is_retweet") and not t.get("is_retweet")):
-                unique[t["item_id"]] = t
-        tweets = list(unique.values())
+        tweets = _prefer_direct(tweets)
         scored_ids = self.db.get_scored_ids([t["item_id"] for t in tweets])
         return [t for t in tweets if t["item_id"] not in scored_ids]
 

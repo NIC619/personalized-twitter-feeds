@@ -275,8 +275,16 @@ def init_components(settings, num_tweets=None, hours=None):
         if tweet:
             return tweet
         tweet = await asyncio.to_thread(twitter.fetch_tweet, item_id)
-        if tweet:
-            db.save_items([tweet])
+        if not tweet:
+            return None
+        # A retweet link normalizes to the ORIGINAL's id. If that original is
+        # already stored (possibly scored), keep the stored row: the upsert
+        # would wipe filter_score/filter_reason/domain.
+        if tweet["item_id"] != item_id:
+            existing = db.get_item(tweet["item_id"])
+            if existing:
+                return existing
+        db.save_items([tweet])
         return tweet
 
     # Create thread callback

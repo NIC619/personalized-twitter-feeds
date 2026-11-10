@@ -56,6 +56,23 @@ class TestDeduplicateTweets:
         result = curator._deduplicate_tweets([{"item_id": "1", "text": "new"}])
         assert [t["item_id"] for t in result] == ["1"]
 
+    @pytest.mark.asyncio
+    async def test_starred_direct_copy_beats_home_timeline_retweet(self, curator):
+        via_rt = {"item_id": "1", "author_username": "fav", "text": "x", "is_retweet": True,
+                  "retweeted_by": {"author_username": "someone"}}
+        direct = {"item_id": "1", "author_username": "fav", "text": "x", "is_retweet": False}
+        curator.twitter.fetch_timeline.return_value = [via_rt]
+        curator.twitter.fetch_user_tweets.return_value = [direct]
+        curator.db.get_favorite_authors.return_value = ["fav"]
+        curator.db.get_muted_authors.return_value = []
+        curator.claude.filter_tweets.return_value = []
+
+        stats = await curator.run_daily_curation()
+
+        sent = curator.claude.filter_tweets.call_args[0][0]
+        assert len(sent) == 1 and sent[0] is direct
+        assert stats["starred_new"] == 0  # same id was already in the home timeline
+
     def test_same_original_direct_and_via_retweet_keeps_direct(self, curator):
         curator.db.get_scored_ids.return_value = set()
         via_rt = {"item_id": "1", "text": "x", "is_retweet": True, "retweeted_by": {"author_username": "s"}}
