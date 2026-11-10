@@ -5,6 +5,7 @@ from types import SimpleNamespace
 from src.feedback_flow import (
     Vote,
     parse_vote_callback,
+    quoted_item_id,
     reason_done_text,
     reason_prompt_buttons,
     reason_prompt_text,
@@ -106,3 +107,27 @@ class TestTexts:
 
     def test_done_text(self):
         assert reason_done_text(Vote("up", 1), "z") == "👍 ✅ <i>z</i>"
+
+
+class TestQuotedItemId:
+    def test_from_fresh_tweet(self):
+        assert quoted_item_id({"quoted_tweet": {"item_id": "888", "text": "x"}}) == "888"
+
+    def test_from_db_row_referenced_tweets(self):
+        row = {"quoted_tweet": None, "raw_data": {"referenced_tweets": [
+            {"type": "replied_to", "id": "1"}, {"type": "quoted", "id": "999"},
+        ]}}
+        assert quoted_item_id(row) == "999"
+
+    def test_retweet_is_not_a_quote(self):
+        row = {"raw_data": {"referenced_tweets": [{"type": "retweeted", "id": "7"}]}}
+        assert quoted_item_id(row) is None
+
+    def test_plain_tweet(self):
+        assert quoted_item_id({"quoted_tweet": None, "raw_data": None}) is None
+
+    def test_vote_buttons_quoted_row(self):
+        kb = vote_buttons("42", "alice", quoted_id="888").inline_keyboard
+        assert len(kb) == 3
+        assert [b.callback_data for b in kb[2]] == ["qt:888"]
+        assert vote_buttons("42", "alice").inline_keyboard[-1][1].callback_data == "mute:alice:42"

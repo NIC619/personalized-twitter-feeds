@@ -19,7 +19,7 @@ from telegram.ext import (
     filters,
 )
 
-from src.feedback_flow import Vote
+from src.feedback_flow import Vote, quoted_item_id
 from src.webhook_server import make_app
 from src.bot.admin import AdminMixin
 from src.bot.capture import CaptureMixin
@@ -149,6 +149,7 @@ class TelegramCurator(
         self._blockword_list: dict[str, list[str]] = {}  # chat_id → keyword list shown
         self._tasks: set[asyncio.Task] = set()  # background tasks (reason proposals)
         self._vote_generation: dict[str, int] = {}  # item_id → bumps on every (re)vote
+        self._quoted_items: dict[str, str] = {}  # item_id → id of the tweet it quotes
         logger.info("Telegram bot initialized")
 
     async def initialize(self) -> None:
@@ -380,8 +381,13 @@ class TelegramCurator(
         # Store author mapping for undo functionality
         self._tweet_authors[tweet["item_id"]] = tweet["author_username"]
 
-        # Create inline keyboard with feedback buttons
-        keyboard = self._make_tweet_buttons(tweet["item_id"], tweet["author_username"])
+        # Create inline keyboard with feedback buttons (+ quoted-tweet row)
+        quoted_id = quoted_item_id(tweet)
+        if quoted_id:
+            self._quoted_items[tweet["item_id"]] = quoted_id
+        keyboard = self._make_tweet_buttons(
+            tweet["item_id"], tweet["author_username"], quoted_id=quoted_id
+        )
 
         try:
             sent_message = await self.application.bot.send_message(

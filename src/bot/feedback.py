@@ -27,6 +27,7 @@ from src.content import is_blog_content, is_http_url, is_tweet_url, is_twitter_p
 from src.feedback_flow import (
     Vote,
     parse_vote_callback,
+    quoted_item_id,
     reason_done_text,
     reason_prompt_buttons,
     reason_prompt_text,
@@ -104,6 +105,11 @@ class FeedbackMixin:
                 except Exception:
                     pass
 
+        # Quoted tweet: "qt:{quoted_item_id}" → post it with its own vote keyboard
+        elif data.startswith("qt:"):
+            _, _, quoted_id = data.partition(":")
+            await self._send_quoted_tweet(quoted_id)
+
         # Handle undo: "undo:{item_id}"
         elif data.startswith("undo:"):
             _, _, item_id = data.partition(":")
@@ -114,7 +120,9 @@ class FeedbackMixin:
             self._item_votes.pop(item_id, None)
             username = self._tweet_authors.get(item_id)
             await query.edit_message_reply_markup(
-                reply_markup=self._make_tweet_buttons(item_id, username)
+                reply_markup=self._make_tweet_buttons(
+                    item_id, username, quoted_id=await self._quoted_for(item_id, query),
+                )
             )
             logger.info(f"Feedback undone: item={item_id}")
 
@@ -136,7 +144,10 @@ class FeedbackMixin:
 
             label = f"⭐ @{username}" if state == "favorited" else f"⭐ Author"
             await query.edit_message_reply_markup(
-                reply_markup=self._make_tweet_buttons(item_id, username, fav_label=label)
+                reply_markup=self._make_tweet_buttons(
+                    item_id, username, fav_label=label,
+                    quoted_id=await self._quoted_for(item_id, query),
+                )
             )
 
         # Handle mute author: "mute:{username}:{item_id}"
@@ -157,8 +168,70 @@ class FeedbackMixin:
 
             label = f"🔇 @{username}" if state == "muted" else f"🔇 Mute"
             await query.edit_message_reply_markup(
-                reply_markup=self._make_tweet_buttons(item_id, username, mute_label=label)
+                reply_markup=self._make_tweet_buttons(
+                    item_id, username, mute_label=label,
+                    quoted_id=await self._quoted_for(item_id, query),
+                )
             )
+
+    async def _quoted_for(self, item_id: str, query=None) -> Optional[str]:
+        """Id of the tweet ``item_id`` quotes, so a re-rendered keyboard keeps
+        its quoted row. Memory first; after a restart, the stored item."""
+        quoted_id = self._quoted_items.get(item_id)
+        if quoted_id or not self.lookup_message_callback or query is None:
+            return quoted_id
+        try:
+            item = await self.lookup_message_callback(query.message.message_id)
+        except Exception as e:
+            logger.warning(f"Message lookup failed for {query.message.message_id}: {e}")
+            return None
+        if not item or item.get("item_id") != item_id:
+            return None
+        quoted_id = quoted_item_id(item)
+        if quoted_id:
+            self._quoted_items[item_id] = quoted_id
+        return quoted_id
+
+    async def _send_quoted_tweet(self, quoted_id: str) -> bool:
+        """Fetch (and store) the quoted tweet, then post it with the normal
+        vote keyboard so it can be voted on in its own right."""
+        if not self.like_tweet_callback:
+            await self._notify("Tweet lookup not available.")
+            return False
+        try:
+            tweet = await self.like_tweet_callback(quoted_id)
+        except Exception as e:
+            logger.error(f"Error fetching quoted tweet {quoted_id}: {e}")
+            await self._notify(f"Error fetching tweet {quoted_id}.")
+            return False
+        if not tweet:
+            await self._notify(f"Tweet {quoted_id} not found.")
+            return False
+        self._tweet_authors[quoted_id] = tweet.get("author_username")
+        nested = quoted_item_id(tweet)
+        if nested:
+            self._quoted_items[quoted_id] = nested
+        try:
+            sent = await self.application.bot.send_message(
+                chat_id=self.chat_id,
+                text=self._format_like_message(tweet),
+                reply_markup=self._make_tweet_buttons(
+                    quoted_id, tweet.get("author_username"), quoted_id=nested
+                ),
+                parse_mode="HTML",
+                disable_web_page_preview=True,
+            )
+        except Exception as e:
+            logger.error(f"Error sending quoted tweet {quoted_id}: {e}")
+            return False
+        await self._remember_sent(quoted_id, sent.message_id)
+        return True
+
+    async def _notify(self, text: str) -> None:
+        try:
+            await self.application.bot.send_message(chat_id=self.chat_id, text=text)
+        except Exception as e:
+            logger.debug(f"Notify failed: {e}")
 
     async def _item_for_message(self, message_id: int) -> Optional[str]:
         item_id = self._message_items.get(message_id)

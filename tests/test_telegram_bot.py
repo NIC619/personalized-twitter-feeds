@@ -780,3 +780,69 @@ class TestFormatThreadMessage:
 
         assert "1 tweets" in msg
         assert "[1/1]" in msg
+
+
+class TestQuotedTweetVote:
+    @pytest.mark.asyncio
+    async def test_quote_tweet_gets_quoted_row(self, vote_bot, sample_quote_tweet, sample_tweet):
+        await vote_bot.send_tweet(sample_quote_tweet)
+        rows = vote_bot.application.bot.send_message.call_args[1]["reply_markup"].inline_keyboard
+        assert rows[-1][0].callback_data == "qt:888999000"
+        assert vote_bot._quoted_items["555666777"] == "888999000"
+
+        await vote_bot.send_tweet(sample_tweet)
+        rows = vote_bot.application.bot.send_message.call_args[1]["reply_markup"].inline_keyboard
+        assert all(not b.callback_data.startswith("qt:") for row in rows for b in row)
+
+    @pytest.mark.asyncio
+    async def test_qt_button_posts_quoted_tweet_with_vote_keyboard(self, vote_bot, sample_tweet):
+        quoted = dict(sample_tweet, item_id="888999000", author_username="vitalikbuterin",
+                      url="https://twitter.com/vitalikbuterin/status/888999000")
+        vote_bot.like_tweet_callback = AsyncMock(return_value=quoted)
+        vote_bot.mark_sent_callback = AsyncMock()
+        update, query = _query("qt:888999000")
+
+        await vote_bot._handle_feedback(update, MagicMock())
+
+        vote_bot.like_tweet_callback.assert_awaited_once_with("888999000")
+        kwargs = vote_bot.application.bot.send_message.call_args[1]
+        assert "@vitalikbuterin" in kwargs["text"]
+        rows = kwargs["reply_markup"].inline_keyboard
+        assert [b.callback_data for b in rows[0]] == [
+            "vote:888999000:up:2", "vote:888999000:up:1", "vote:888999000:down:1",
+        ]
+        assert rows[1][0].callback_data == "fav:vitalikbuterin:888999000"
+        # No vote is recorded until the user taps one on the new message
+        vote_bot.feedback_callback.assert_not_awaited()
+        assert vote_bot._message_items[555] == "888999000"
+        vote_bot.mark_sent_callback.assert_awaited_once_with("888999000", 555)
+        query.edit_message_reply_markup.assert_not_awaited()  # original keyboard untouched
+
+    @pytest.mark.asyncio
+    async def test_qt_button_tweet_not_found(self, vote_bot):
+        vote_bot.like_tweet_callback = AsyncMock(return_value=None)
+        update, query = _query("qt:1")
+        await vote_bot._handle_feedback(update, MagicMock())
+        assert "not found" in vote_bot.application.bot.send_message.call_args[1]["text"]
+
+    @pytest.mark.asyncio
+    async def test_undo_keeps_quoted_row(self, vote_bot):
+        vote_bot._quoted_items["42"] = "888"
+        update, query = _query("vote:42:up:1")
+        await vote_bot._handle_feedback(update, MagicMock())
+        update, query = _query("undo:42")
+        await vote_bot._handle_feedback(update, MagicMock())
+        await _settle(vote_bot)
+        rows = query.edit_message_reply_markup.call_args[1]["reply_markup"].inline_keyboard
+        assert rows[-1][0].callback_data == "qt:888"
+
+    @pytest.mark.asyncio
+    async def test_fav_rerender_recovers_quoted_row_from_db_after_restart(self, vote_bot):
+        vote_bot.favorite_author_callback = AsyncMock(return_value="favorited")
+        vote_bot.lookup_message_callback = AsyncMock(return_value={
+            "item_id": "42", "raw_data": {"referenced_tweets": [{"type": "quoted", "id": "777"}]},
+        })
+        update, query = _query("fav:alice:42")
+        await vote_bot._handle_feedback(update, MagicMock())
+        rows = query.edit_message_reply_markup.call_args[1]["reply_markup"].inline_keyboard
+        assert rows[-1][0].callback_data == "qt:777"
