@@ -48,6 +48,13 @@ class Settings(BaseSettings):
         description="Number of random below-threshold items to send per run for recall measurement",
     )
 
+    # Replies pull the tweets they answer into the batch as items of their
+    # own (scored and voted independently), up to this many levels up.
+    reply_parent_depth: int = Field(
+        default=5,
+        description="Levels of replied-to tweets fetched into the daily batch (0 disables)",
+    )
+
     # RSS/Atom feeds polled in the daily run
     feed_max_entries_per_run: int = Field(
         default=10, description="Newest entries fetched per feed per run"

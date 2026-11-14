@@ -696,3 +696,133 @@ class TestInbox:
         claude.filter_tweets.assert_called_once()
         assert claude.filter_tweets.call_args[1]["threshold"] == 0
         db.save_items.assert_called_once_with(items)
+
+
+# --- _expand_reply_parents ---
+
+def _reply(item_id, author, parent_id=None, conv="c1"):
+    t = {"item_id": item_id, "author_username": author, "text": f"t{item_id}",
+         "created_at": f"2025-01-15T10:{int(item_id) % 60:02d}:00+00:00",
+         "raw_data": {"conversation_id": conv, "referenced_tweets": None}}
+    if parent_id:
+        t["raw_data"]["referenced_tweets"] = [{"type": "replied_to", "id": parent_id}]
+        t["reply_to"] = {"item_id": parent_id, "author_username": "?", "text": "?"}
+    return t
+
+
+class TestExpandReplyParents:
+    def test_walks_chain_one_lookup_per_level(self, curator):
+        # 3 replies to 2 (known in db, unscored) replies to 1 (fetched) → root
+        curator.db.get_items.side_effect = lambda ids: (
+            {"2": _reply("2", "bob", "1")} if "2" in ids else {}
+        )
+        curator.twitter.fetch_tweets.return_value = [_reply("1", "carol")]
+
+        parents = curator._expand_reply_parents([_reply("3", "alice", "2")], max_depth=5)
+
+        assert [p["item_id"] for p in parents] == ["2", "1"]
+        assert parents[0]["replied_by"] == ["alice"]
+        assert parents[1]["replied_by"] == ["bob"]
+        # level 1 came from the db (no API call); level 2 was fetched
+        curator.twitter.fetch_tweets.assert_called_once_with(["1"])
+
+    def test_depth_cap(self, curator):
+        curator.db.get_items.return_value = {}
+        curator.twitter.fetch_tweets.side_effect = lambda ids: [
+            _reply(i, "x", str(int(i) - 1)) for i in ids
+        ]
+        parents = curator._expand_reply_parents([_reply("10", "a", "9")], max_depth=2)
+        assert [p["item_id"] for p in parents] == ["9", "8"]
+
+    def test_shared_parent_fetched_once_with_all_repliers(self, curator):
+        curator.db.get_items.return_value = {}
+        curator.twitter.fetch_tweets.return_value = [_reply("1", "root")]
+        parents = curator._expand_reply_parents(
+            [_reply("2", "bob", "1"), _reply("3", "alice", "1"), _reply("4", "zed")],
+            max_depth=5,
+        )
+        assert [p["item_id"] for p in parents] == ["1"]
+        assert parents[0]["replied_by"] == ["alice", "bob"]
+        assert curator.twitter.fetch_tweets.call_args[0][0] == ["1"]
+
+    def test_parent_already_in_batch_not_fetched_but_attributed(self, curator):
+        root = _reply("1", "root")
+        parents = curator._expand_reply_parents(
+            [root, _reply("2", "bob", "1")], max_depth=5
+        )
+        assert parents == []
+        curator.twitter.fetch_tweets.assert_not_called()
+        assert root["replied_by"] == ["bob"]
+
+    def test_shared_parent_met_at_two_depths_merges_repliers(self, curator):
+        # alice → 1 directly; bob → 2 → 1. Parent 1 is fetched at depth 1
+        # (for alice) and met again at depth 2 (via 2): both repliers kept.
+        curator.db.get_items.return_value = {}
+        curator.twitter.fetch_tweets.side_effect = lambda ids: [
+            {"1": _reply("1", "root"), "2": _reply("2", "carol", "1")}[i] for i in ids
+        ]
+        parents = curator._expand_reply_parents(
+            [_reply("3", "alice", "1"), _reply("4", "bob", "2")], max_depth=5
+        )
+        by_id = {p["item_id"]: p for p in parents}
+        assert by_id["1"]["replied_by"] == ["alice", "carol"]
+        assert by_id["2"]["replied_by"] == ["bob"]
+
+    def test_lookup_failure_keeps_batch(self, curator):
+        curator.db.get_items.return_value = {}
+        curator.twitter.fetch_tweets.side_effect = RuntimeError("rate limited")
+        assert curator._expand_reply_parents([_reply("2", "bob", "1")], max_depth=5) == []
+
+    def test_unavailable_parent_stops_chain(self, curator):
+        curator.db.get_items.return_value = {}
+        curator.twitter.fetch_tweets.return_value = []  # deleted / protected
+        assert curator._expand_reply_parents([_reply("2", "bob", "1")], max_depth=5) == []
+
+    @pytest.mark.asyncio
+    async def test_parents_scored_and_grouped_with_reply(self, curator):
+        reply = _reply("2", "alice", "1")
+        parent = _reply("1", "bob")
+        curator.twitter.fetch_timeline.return_value = [reply]
+        curator.twitter.fetch_user_tweets.return_value = []
+        curator.twitter.fetch_tweets.return_value = [parent]
+        curator.db.get_items.return_value = {}
+        curator.db.get_favorite_authors.return_value = []
+        curator.db.get_muted_authors.return_value = []
+        curator.db.get_blocked_keywords.return_value = []
+
+        def score(tweets, **kw):
+            out = []
+            for t in tweets:
+                t = dict(t, filter_reason="r", filter_score=90 if t["item_id"] == "1" else 10)
+                out.append(t)
+            return out
+        curator.claude.filter_tweets.side_effect = score
+
+        async def mock_digest(groups, **kw):
+            return [(t, 1) for g in groups for t in g]
+        curator.telegram.send_daily_digest.side_effect = mock_digest
+
+        stats = await curator.run_daily_curation()
+
+        scored_ids = {t["item_id"] for t in curator.claude.filter_tweets.call_args[0][0]}
+        assert scored_ids == {"1", "2"}
+        assert stats["reply_parents"] == 1
+        groups = curator.telegram.send_daily_digest.call_args[0][0]
+        sent = [t["item_id"] for g in groups for t in g]
+        assert "1" in sent  # parent passed on its own merits
+        saved = {t["item_id"] for t in curator.db.save_items.call_args[0][0]}
+        assert saved == {"1", "2"}  # the low-scoring reply is stored too
+
+    @pytest.mark.asyncio
+    async def test_disabled_when_depth_zero(self, components):
+        twitter, claude, telegram, db = components
+        c = DailyCurator(twitter=twitter, claude=claude, telegram=telegram, db=db,
+                         reply_parent_depth=0)
+        twitter.fetch_timeline.return_value = [_reply("2", "alice", "1")]
+        twitter.fetch_user_tweets.return_value = []
+        db.get_favorite_authors.return_value = []
+        db.get_muted_authors.return_value = []
+        db.get_blocked_keywords.return_value = []
+        claude.filter_tweets.return_value = []
+        await c.run_daily_curation()
+        twitter.fetch_tweets.assert_not_called()

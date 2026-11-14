@@ -10,6 +10,7 @@ from src.claude_filter import (
     DEFAULT_PROFILE,
     EXTRACT_TOOL,
     SCORE_TOOL,
+    SCORING_PROMPT,
     ClaudeFilter,
 )
 
@@ -277,3 +278,30 @@ class TestBuildItemEntryLinks:
     def test_no_links_key_without_titles(self):
         entry = ClaudeFilter.build_item_entry({"item_id": "1", "author_username": "a", "text": "hi"})
         assert "links" not in entry
+
+
+class TestBuildItemEntryReply:
+    def test_reply_to_context_clipped(self):
+        entry = ClaudeFilter.build_item_entry({
+            "item_id": "1", "author_username": "a", "text": "@bob agreed",
+            "reply_to": {"author_username": "bob", "text": "x" * 600, "item_id": "7"},
+        })
+        assert entry["reply_to"]["author"] == "bob"
+        assert len(entry["reply_to"]["text"]) == 500
+
+    def test_reply_to_from_stored_row(self):
+        entry = ClaudeFilter.build_item_entry({
+            "item_id": "1", "author_username": "a", "text": "hi",
+            "raw_data": {"reply_to": {"author_username": "bob", "text": "root", "item_id": "7"}},
+        })
+        assert entry["reply_to"] == {"author": "bob", "text": "root"}
+
+    def test_replied_by_listed_for_parent(self):
+        entry = ClaudeFilter.build_item_entry({
+            "item_id": "7", "author_username": "bob", "text": "root", "replied_by": ["a", "c"],
+        })
+        assert entry["replied_by"] == ["a", "c"]
+        assert "reply_to" not in entry
+
+    def test_prompt_explains_reply_fields(self):
+        assert "reply_to" in SCORING_PROMPT and "replied_by" in SCORING_PROMPT

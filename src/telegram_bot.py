@@ -19,6 +19,7 @@ from telegram.ext import (
     filters,
 )
 
+from src.content import parent_item_id
 from src.feedback_flow import Vote, quoted_item_id
 from src.webhook_server import make_app
 from src.bot.admin import AdminMixin
@@ -150,6 +151,8 @@ class TelegramCurator(
         self._tasks: set[asyncio.Task] = set()  # background tasks (reason proposals)
         self._vote_generation: dict[str, int] = {}  # item_id → bumps on every (re)vote
         self._quoted_items: dict[str, str] = {}  # item_id → id of the tweet it quotes
+        self._parent_items: dict[str, str] = {}  # item_id → id of the tweet it replies to
+        self._links_known: set[str] = set()  # item_ids whose quoted/parent links were recorded
         logger.info("Telegram bot initialized")
 
     async def initialize(self) -> None:
@@ -355,6 +358,7 @@ class TelegramCurator(
         self,
         tweet: dict,
         position: Optional[tuple[int, int]] = None,
+        hide_parent: bool = False,
     ) -> Optional[int]:
         """Send a formatted tweet message with feedback buttons.
 
@@ -376,17 +380,18 @@ class TelegramCurator(
             raise RuntimeError("Application not initialized")
 
         # Format message
-        message = self._format_tweet_message(tweet, position=position)
+        message = self._format_tweet_message(
+            tweet, position=position, hide_parent=hide_parent
+        )
 
         # Store author mapping for undo functionality
         self._tweet_authors[tweet["item_id"]] = tweet["author_username"]
 
-        # Create inline keyboard with feedback buttons (+ quoted-tweet row)
-        quoted_id = quoted_item_id(tweet)
-        if quoted_id:
-            self._quoted_items[tweet["item_id"]] = quoted_id
+        # Create inline keyboard with feedback buttons (+ quoted / parent rows)
+        quoted_id, parent_id = self._remember_links(tweet)
         keyboard = self._make_tweet_buttons(
-            tweet["item_id"], tweet["author_username"], quoted_id=quoted_id
+            tweet["item_id"], tweet["author_username"],
+            quoted_id=quoted_id, parent_id=parent_id,
         )
 
         try:
@@ -436,25 +441,21 @@ class TelegramCurator(
         flat_index = 0
 
         for group in tweet_groups:
-            # Thread header for multi-tweet groups
+            # Thread / conversation header for multi-tweet groups
             if len(group) > 1:
-                author = group[0]["author_username"]
-                header = (
-                    f"🧵 <b>Thread by @{self._escape_html(author)}</b> "
-                    f"({len(group)} tweets in this batch)\n"
-                    f"────────────────────"
-                )
                 await self.application.bot.send_message(
                     chat_id=self.chat_id,
-                    text=header,
+                    text=self._group_header(group),
                     parse_mode="HTML",
                 )
                 await asyncio.sleep(delay_seconds)
 
+            group_ids = {t["item_id"] for t in group}
             for tweet in group:
                 flat_index += 1
                 message_id = await self._send_item(
                     tweet, position=(flat_index, total_tweets),
+                    hide_parent=parent_item_id(tweet) in group_ids,
                 )
                 results.append((tweet, message_id))
 
@@ -465,6 +466,17 @@ class TelegramCurator(
         sent_count = sum(1 for _, mid in results if mid)
         logger.info(f"Sent {sent_count} tweets in daily digest")
         return results
+
+    def _group_header(self, group: list[dict]) -> str:
+        """Header above a multi-tweet group: a thread when one author wrote
+        it all, otherwise a conversation naming the authors in order."""
+        authors = list(dict.fromkeys(t["author_username"] for t in group))
+        if len(authors) == 1:
+            title = f"🧵 <b>Thread by @{self._escape_html(authors[0])}</b>"
+        else:
+            names = ", ".join(f"@{self._escape_html(a)}" for a in authors)
+            title = f"💬 <b>Conversation</b> {names}"
+        return f"{title} ({len(group)} tweets in this batch)\n────────────────────"
 
     async def send_error_notification(self, error_message: str) -> None:
         """Send error notification to user.

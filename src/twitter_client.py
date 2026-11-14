@@ -238,6 +238,24 @@ class TwitterClient:
                 }
             break
 
+        # The tweet this one replies to, when the API included it (it is
+        # expanded alongside quoted/retweeted references). Only a preview:
+        # the parent becomes an item of its own via fetch_tweets().
+        reply_to = None
+        for ref in subject_refs:
+            if ref["type"] != "replied_to":
+                continue
+            parent = referenced_tweets_map.get(str(ref["id"]))
+            if parent:
+                parent_author = users.get(parent.get("author_id"))
+                reply_to = {
+                    "author_username": parent_author["username"] if parent_author else "unknown",
+                    "author_name": parent_author["name"] if parent_author else "Unknown",
+                    "text": _full_tweet_text(parent),
+                    "item_id": str(parent["id"]),
+                }
+            break
+
         full_text = _full_tweet_text(subject)
         metrics = subject.get("public_metrics") or {}
 
@@ -264,6 +282,7 @@ class TwitterClient:
             "created_at": created_at,
             "is_retweet": is_retweet,
             "quoted_tweet": quoted_tweet,
+            "reply_to": reply_to,
             "retweeted_by": retweeted_by,
             "article": article,
             "metrics": {
@@ -285,6 +304,7 @@ class TwitterClient:
                     for ref in subject_refs
                 ] if subject_refs else None,
                 "retweeted_by": retweeted_by,
+                "reply_to": reply_to,
             },
         }
 
@@ -485,6 +505,74 @@ class TwitterClient:
             return None
 
         return self._normalize_tweet(tweet, author, ref_tweets_map, users)
+
+    def fetch_tweets(self, item_ids: list[str], chunk_size: int = 100) -> list[dict]:
+        """Fetch many tweets by id in batches (one API call per 100 ids).
+
+        Deleted, protected or otherwise unavailable tweets are silently
+        absent from the result.
+
+        Returns:
+            Normalized tweet dicts, in no particular order
+        """
+        tweet_fields = [
+            "created_at",
+            "public_metrics",
+            "entities",
+            "author_id",
+            "conversation_id",
+            "referenced_tweets",
+            "note_tweet",
+        ]
+        user_fields = ["username", "name", "profile_image_url"]
+        expansions = ["author_id", "referenced_tweets.id", "referenced_tweets.id.author_id"]
+
+        ids = list(dict.fromkeys(str(i) for i in item_ids if i))
+        out: list[dict] = []
+        for i in range(0, len(ids), chunk_size):
+            chunk = ids[i : i + chunk_size]
+            response = None
+            for attempt in range(3):
+                try:
+                    response = self.client.posts.get_by_ids(
+                        ids=chunk,
+                        tweet_fields=tweet_fields,
+                        user_fields=user_fields,
+                        expansions=expansions,
+                    )
+                    break
+                except requests.exceptions.HTTPError as e:
+                    if attempt < 2:
+                        wait_time = 2 ** (attempt + 1)
+                        logger.warning(
+                            "Error fetching %d tweets (attempt %d): %s. Retrying in %ds...",
+                            len(chunk), attempt + 1, e, wait_time,
+                        )
+                        time.sleep(wait_time)
+                    else:
+                        raise
+
+            if not response or not response.data:
+                continue
+
+            users = {}
+            if response.includes and "users" in response.includes:
+                for user in response.includes["users"]:
+                    users[user["id"]] = user
+            ref_tweets_map = {}
+            if response.includes and "tweets" in response.includes:
+                for ref_tweet in response.includes["tweets"]:
+                    ref_tweets_map[ref_tweet["id"]] = ref_tweet
+
+            for tweet in response.data:
+                author = users.get(tweet.get("author_id"))
+                if not author:
+                    logger.warning("No author found for tweet %s", tweet.get("id"))
+                    continue
+                out.append(self._normalize_tweet(tweet, author, ref_tweets_map, users))
+
+        logger.info("Fetched %d of %d requested tweets", len(out), len(ids))
+        return out
 
     def fetch_thread(self, item_id: str, max_tweets: int = 50) -> list[dict] | None:
         """Fetch a full thread by walking the reply chain backwards from a tweet.

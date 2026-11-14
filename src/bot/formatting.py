@@ -26,7 +26,7 @@ from src.bot.constants import (
 from src.capture import classify_message, forward_origin
 from src.content import (
     is_blog_content, is_http_url, is_tweet_url, is_twitter_profile_url,
-    link_previews, tweet_links,
+    link_previews, reply_to_preview, tweet_links,
 )
 from src.feedback_flow import (
     Vote,
@@ -143,40 +143,12 @@ class FormattingMixin:
 
     def _format_like_message(self, tweet: dict) -> str:
         """Format tweet for like message (no score/reason header)."""
-        metrics = tweet.get("metrics", {})
-        text = self._render_text(tweet)
-
-        likes = metrics.get("likes", 0)
-        retweets = metrics.get("retweets", 0)
-        replies = metrics.get("replies", 0)
-
-        likes_str = self._format_number(likes)
-        retweets_str = self._format_number(retweets)
-        replies_str = self._format_number(replies)
-
-        header = self._retweet_header(tweet) + self._quote_header(tweet)
-        message = (
+        head = (
             f"<b>@{tweet['author_username']}</b> | "
             f"<a href=\"{self._link(tweet)}\">View Tweet</a>\n\n"
-            f"{header}{text}"
+            f"{self._retweet_header(tweet)}{self._quote_header(tweet)}"
         )
-
-        quoted = tweet.get("quoted_tweet")
-        if quoted:
-            qt_author = self._escape_html(quoted["author_username"])
-            qt_text = self._escape_html(quoted["text"])
-            qt_lines = qt_text.split("\n")
-            qt_block = "\n".join(f"┃ {line}" for line in qt_lines)
-            message += (
-                f"\n\n┃ <b>@{qt_author}:</b>\n"
-                f"{qt_block}"
-            )
-
-        tail = f"\n\n❤️ {likes_str}  🔁 {retweets_str}  💬 {replies_str}"
-        message += self._link_cards(
-            tweet, budget=TELEGRAM_MESSAGE_LIMIT - len(message) - len(tail)
-        )
-        return message + tail
+        return self._assemble(tweet, head, self._metrics_tail(tweet))
 
     @staticmethod
     def _make_blockword_buttons(keywords: list[str]) -> InlineKeyboardMarkup:
@@ -247,11 +219,14 @@ class FormattingMixin:
         fav_label: str = "⭐ Author",
         mute_label: str = "🔇 Mute",
         quoted_id: Optional[str] = None,
+        parent_id: Optional[str] = None,
     ) -> InlineKeyboardMarkup:
         """Vote row (🔥 👍 👎) plus author controls when a username is known,
-        plus a "vote the quoted tweet" row when ``quoted_id`` is given."""
+        plus "vote the quoted tweet" / "vote the parent tweet" rows when
+        ``quoted_id`` / ``parent_id`` are given."""
         return vote_buttons(
-            item_id, username, fav_label=fav_label, mute_label=mute_label, quoted_id=quoted_id,
+            item_id, username, fav_label=fav_label, mute_label=mute_label,
+            quoted_id=quoted_id, parent_id=parent_id,
         )
 
     def _link(self, item: dict) -> str:
@@ -262,74 +237,108 @@ class FormattingMixin:
         self,
         tweet: dict,
         position: Optional[tuple[int, int]] = None,
+        hide_parent: bool = False,
     ) -> str:
         """Format tweet for Telegram message.
 
         Args:
             tweet: Tweet dictionary
             position: Optional (index, total) for digest numbering, 1-indexed.
+            hide_parent: Skip the replied-to preview (the parent is its own
+                message right above this one in the digest).
 
         Returns:
             Formatted message string (HTML)
         """
-        metrics = tweet.get("metrics", {})
-
-        text = self._render_text(tweet)
-
-        likes = metrics.get("likes", 0)
-        retweets = metrics.get("retweets", 0)
-        replies = metrics.get("replies", 0)
-
-        # Format engagement numbers
-        likes_str = self._format_number(likes)
-        retweets_str = self._format_number(retweets)
-        replies_str = self._format_number(replies)
-
         prefix = f"<b>[{position[0]}/{position[1]}]</b>\n" if position else ""
         if tweet.get("exploration"):
             prefix += "🎲 <i>Exploration: scored below threshold. Vote to tell me if I missed it.</i>\n"
-        message = (
+        head = (
             f"{prefix}"
             f"<b>@{tweet['author_username']}</b> | "
             f"<a href=\"{self._link(tweet)}\">View Tweet</a>\n\n"
             f"{self._retweet_header(tweet)}{self._quote_header(tweet)}"
         )
+        return self._assemble(tweet, head, self._metrics_tail(tweet), hide_parent)
 
-        # Show article info for X Articles
-        article = tweet.get("article")
-        if article:
-            title = self._escape_html(article["title"])
-            article_url = article.get("url")
-            if article_url:
-                message += f"<b>[Article]</b> <a href=\"{article_url}\">{title}</a>\n"
-            else:
-                message += f"<b>[Article]</b> {title}\n"
-            body = article.get("body", "")
-            if body:
-                preview = self._escape_html(body[:300])
-                if len(body) > 300:
-                    preview += "..."
-                message += f"{preview}\n"
-        else:
-            message += text
-
-        # Append quoted tweet block if present
-        quoted = tweet.get("quoted_tweet")
-        if quoted:
-            qt_author = self._escape_html(quoted["author_username"])
-            qt_text = self._escape_html(quoted["text"])
-            qt_lines = qt_text.split("\n")
-            qt_block = "\n".join(f"┃ {line}" for line in qt_lines)
-            message += (
-                f"\n\n┃ <b>@{qt_author}:</b>\n"
-                f"{qt_block}"
-            )
-
-        tail = f"\n\n❤️ {likes_str}  🔁 {retweets_str}  💬 {replies_str}"
-        message += self._link_cards(
-            tweet, budget=TELEGRAM_MESSAGE_LIMIT - len(message) - len(tail)
+    def _metrics_tail(self, tweet: dict) -> str:
+        metrics = tweet.get("metrics", {})
+        return (
+            f"\n\n❤️ {self._format_number(metrics.get('likes', 0))}  "
+            f"🔁 {self._format_number(metrics.get('retweets', 0))}  "
+            f"💬 {self._format_number(metrics.get('replies', 0))}"
         )
+
+    def _assemble(self, tweet: dict, head: str, tail: str, hide_parent: bool = False) -> str:
+        """``head`` + parent preview + text/article + quoted block + link
+        cards + ``tail``, kept within Telegram's message limit.
+
+        When the full rendering would not fit, the parent preview shrinks
+        to its header line, then the quoted block is dropped, then the
+        tweet's own text is clipped; link cards only use what is left.
+        """
+        budget = TELEGRAM_MESSAGE_LIMIT - len(head) - len(tail)
+        body = self._article_block(tweet) or self._render_text(tweet)
+        quoted = self._quoted_block(tweet)
+        reply_full = self._reply_block(tweet, hide_parent)
+        reply_head = self._reply_block(tweet, hide_parent, quote=False)
+        for parts in (
+            (reply_full, body, quoted),
+            (reply_head, body, quoted),
+            (reply_head, body, ""),
+        ):
+            if sum(len(p) for p in parts) <= budget:
+                break
+        else:
+            parts = (reply_head, self._render_text_clipped(tweet, budget - len(reply_head)), "")
+        message = head + "".join(parts)
+        message += self._link_cards(tweet, budget=budget - (len(message) - len(head)))
         return message + tail
+
+    def _article_block(self, tweet: dict) -> str:
+        """"[Article] title" plus a 300-char body preview for X Articles, else empty."""
+        article = tweet.get("article")
+        if not article:
+            return ""
+        title = self._escape_html(article["title"])
+        article_url = article.get("url")
+        if article_url:
+            block = f"<b>[Article]</b> <a href=\"{article_url}\">{title}</a>\n"
+        else:
+            block = f"<b>[Article]</b> {title}\n"
+        body = article.get("body", "")
+        if body:
+            preview = self._escape_html(body[:300])
+            if len(body) > 300:
+                preview += "..."
+            block += f"{preview}\n"
+        return block
+
+    def _quoted_block(self, tweet: dict) -> str:
+        """The quoted tweet as a ``┃``-prefixed block under the text, else empty."""
+        quoted = tweet.get("quoted_tweet")
+        if not quoted:
+            return ""
+        qt_author = self._escape_html(quoted["author_username"])
+        qt_lines = self._escape_html(quoted["text"]).split("\n")
+        qt_block = "\n".join(f"┃ {line}" for line in qt_lines)
+        return f"\n\n┃ <b>@{qt_author}:</b>\n{qt_block}"
+
+    def _render_text_clipped(self, tweet: dict, limit: int) -> str:
+        """``_render_text`` of the tweet with its raw text clipped so the
+        rendered (escaped, linkified) result fits in ``limit`` characters.
+        Clipping happens on the raw text so no HTML tag is cut in half."""
+        raw = tweet.get("text") or ""
+        n = len(raw)
+        rendered = self._render_text(tweet)
+        for _ in range(8):
+            if len(rendered) <= limit:
+                return rendered
+            # Escaping only grows text, so shrink the raw length in
+            # proportion to the overflow (minus one for the ellipsis).
+            n = max(0, int(n * limit / len(rendered)) - 1)
+            rendered = self._render_text(dict(tweet, text=self._clip(raw, n)))
+        return rendered if len(rendered) <= limit else ""
 
     def _render_text(self, tweet: dict) -> str:
         """Escaped tweet text with t.co links replaced by readable anchors.
@@ -402,6 +411,25 @@ class FormattingMixin:
             return "🔁 <i>retweet</i>\n\n"
         original_author = self._escape_html(retweeted_from.get("author_username", ""))
         return f"🔁 via <b>@{original_author}</b>\n\n"
+
+    def _reply_block(self, tweet: dict, hide_parent: bool = False, quote: bool = True) -> str:
+        """"↩️ replying to @parent" plus a clipped quote of the parent tweet,
+        placed above the reply's own text. Only the header when the parent's
+        text is unknown, it is shown as its own message (``hide_parent``),
+        or the quote is not wanted (``quote=False``)."""
+        reply_to = reply_to_preview(tweet)
+        if not reply_to:
+            return ""
+        parent_author = reply_to.get("author_username") or ""
+        if hide_parent and parent_author.lower() == (tweet.get("author_username") or "").lower():
+            return ""  # own thread, already under a "Thread by" header
+        header = f"↩️ replying to <b>@{self._escape_html(parent_author)}</b>\n"
+        text = (reply_to.get("text") or "").strip()
+        if hide_parent or not quote or not text:
+            return header + "\n"
+        lines = self._escape_html(self._clip(text, 300)).split("\n")
+        block = "\n".join(f"┃ {line}" for line in lines)
+        return f"{header}{block}\n\n"
 
     def _quote_header(self, tweet: dict) -> str:
         """Render a "💬 quoting @quoted_author" header for quote tweets, else empty."""

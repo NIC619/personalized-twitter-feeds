@@ -15,7 +15,7 @@ from typing import Optional
 
 from anthropic import Anthropic
 import httpx
-from src.content import link_previews
+from src.content import link_previews, reply_to_preview
 
 logger = logging.getLogger(__name__)
 
@@ -77,6 +77,9 @@ Domains: {domains}
 
 ## How to use past votes
 Some items include `similar_past_votes`: the reader's most similar past votes, with cosine similarity. Treat them as the strongest evidence you have. An item close to upvoted content should score high even if the profile is vague about it; an item close to downvoted content should score low even if it keyword-matches the profile. Ignore neighbours with similarity below 0.5.
+
+## Replies and the tweets they answer
+A reply carries `reply_to` (the tweet it answers) as context only: score the reply's own content, not the parent's. A tweet carrying `replied_by` was answered by those authors from the reader's timeline; it is scored on its own merits, the replies being mild evidence that people the reader follows found it worth engaging with.
 
 ## Items
 {items_json}
@@ -421,6 +424,14 @@ class ClaudeFilter:
                 "author": tweet["quoted_tweet"]["author_username"],
                 "text": tweet["quoted_tweet"]["text"],
             }
+        reply_to = reply_to_preview(tweet)
+        if reply_to:
+            entry["reply_to"] = {
+                "author": reply_to["author_username"],
+                "text": (reply_to.get("text") or "")[:500],
+            }
+        if tweet.get("replied_by"):
+            entry["replied_by"] = list(tweet["replied_by"])
         links = [
             {"url": l["url"], "title": l["title"], "description": (l.get("description") or "")[:300]}
             for l in link_previews(tweet)
