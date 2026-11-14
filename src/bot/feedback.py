@@ -23,7 +23,9 @@ from src.bot.constants import (
     VOTE_GRACE_SECONDS,
 )
 from src.capture import classify_message, forward_origin
-from src.content import is_blog_content, is_http_url, is_tweet_url, is_twitter_profile_url
+from src.content import (
+    is_blog_content, is_http_url, is_tweet_url, is_twitter_profile_url, parent_item_id,
+)
 from src.feedback_flow import (
     Vote,
     parse_vote_callback,
@@ -121,7 +123,7 @@ class FeedbackMixin:
             username = self._tweet_authors.get(item_id)
             await query.edit_message_reply_markup(
                 reply_markup=self._make_tweet_buttons(
-                    item_id, username, quoted_id=await self._quoted_for(item_id, query),
+                    item_id, username, **await self._links_for(item_id, query),
                 )
             )
             logger.info(f"Feedback undone: item={item_id}")
@@ -146,7 +148,7 @@ class FeedbackMixin:
             await query.edit_message_reply_markup(
                 reply_markup=self._make_tweet_buttons(
                     item_id, username, fav_label=label,
-                    quoted_id=await self._quoted_for(item_id, query),
+                    **await self._links_for(item_id, query),
                 )
             )
 
@@ -170,31 +172,45 @@ class FeedbackMixin:
             await query.edit_message_reply_markup(
                 reply_markup=self._make_tweet_buttons(
                     item_id, username, mute_label=label,
-                    quoted_id=await self._quoted_for(item_id, query),
+                    **await self._links_for(item_id, query),
                 )
             )
 
-    async def _quoted_for(
+    def _remember_links(self, tweet: dict) -> tuple[Optional[str], Optional[str]]:
+        """Note (and return) the ids of the tweet ``tweet`` quotes and the
+        one it replies to, so re-rendered keyboards keep their extra rows."""
+        quoted_id = quoted_item_id(tweet)
+        if quoted_id:
+            self._quoted_items[tweet["item_id"]] = quoted_id
+        parent_id = parent_item_id(tweet)
+        if parent_id:
+            self._parent_items[tweet["item_id"]] = parent_id
+        self._links_known.add(tweet["item_id"])
+        return quoted_id, parent_id
+
+    async def _links_for(
         self, item_id: str, query=None, message_id: Optional[int] = None
-    ) -> Optional[str]:
-        """Id of the tweet ``item_id`` quotes, so a re-rendered keyboard keeps
-        its quoted row. Memory first; after a restart, the stored item."""
+    ) -> dict:
+        """``{"quoted_id": ..., "parent_id": ...}`` for ``item_id``, so a
+        re-rendered keyboard keeps its quoted / parent rows. Memory first;
+        after a restart, the stored item behind the message."""
         quoted_id = self._quoted_items.get(item_id)
+        parent_id = self._parent_items.get(item_id)
         if message_id is None and query is not None:
             message_id = query.message.message_id
-        if quoted_id or not self.lookup_message_callback or message_id is None:
-            return quoted_id
-        try:
-            item = await self.lookup_message_callback(message_id)
-        except Exception as e:
-            logger.warning(f"Message lookup failed for {message_id}: {e}")
-            return None
-        if not item or item.get("item_id") != item_id:
-            return None
-        quoted_id = quoted_item_id(item)
-        if quoted_id:
-            self._quoted_items[item_id] = quoted_id
-        return quoted_id
+        if (
+            item_id not in self._links_known
+            and self.lookup_message_callback
+            and message_id is not None
+        ):
+            try:
+                item = await self.lookup_message_callback(message_id)
+            except Exception as e:
+                logger.warning(f"Message lookup failed for {message_id}: {e}")
+                item = None
+            if item and item.get("item_id") == item_id:
+                quoted_id, parent_id = self._remember_links(item)
+        return {"quoted_id": quoted_id, "parent_id": parent_id}
 
     async def _send_quoted_tweet(self, quoted_id: str) -> bool:
         """Fetch (and store) the quoted tweet, then post it with the normal
@@ -212,15 +228,14 @@ class FeedbackMixin:
             await self._notify(f"Tweet {quoted_id} not found.")
             return False
         self._tweet_authors[quoted_id] = tweet.get("author_username")
-        nested = quoted_item_id(tweet)
-        if nested:
-            self._quoted_items[quoted_id] = nested
+        nested_quoted, nested_parent = self._remember_links(tweet)
         try:
             sent = await self.application.bot.send_message(
                 chat_id=self.chat_id,
                 text=self._format_like_message(tweet),
                 reply_markup=self._make_tweet_buttons(
-                    quoted_id, tweet.get("author_username"), quoted_id=nested
+                    quoted_id, tweet.get("author_username"),
+                    quoted_id=nested_quoted, parent_id=nested_parent,
                 ),
                 parse_mode="HTML",
                 disable_web_page_preview=True,
@@ -494,7 +509,7 @@ class FeedbackMixin:
                     mr.message_id,
                     self._make_tweet_buttons(
                         item_id, self._tweet_authors.get(item_id),
-                        quoted_id=await self._quoted_for(item_id, message_id=mr.message_id),
+                        **await self._links_for(item_id, message_id=mr.message_id),
                     ),
                 )
                 logger.info(f"Reaction removed → vote retracted: item={item_id}")

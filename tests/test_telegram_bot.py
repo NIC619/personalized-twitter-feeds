@@ -1011,3 +1011,127 @@ class TestLinkPreviewSafety:
     def test_thread_text_uses_url_escaper(self, bot, sample_tweet):
         t = _linked_tweet(sample_tweet, [self.LINK]); t["text"] = "see https://t.co/abc"
         assert 'href="https://ex.com/p?a=1&amp;copy=2&amp;q=&quot;x&quot;"' in bot._format_thread_message([t])
+
+
+def _reply_tweet(sample_tweet, parent_text="The original proposal & its tradeoffs", parent_id="7"):
+    t = dict(sample_tweet, item_id="42", text="@bob agreed, this is the way",
+             url="https://twitter.com/vitalikbuterin/status/42")
+    t["reply_to"] = {"author_username": "bob", "author_name": "Bob",
+                     "text": parent_text, "item_id": parent_id}
+    t["raw_data"] = dict(sample_tweet["raw_data"], reply_to=t["reply_to"],
+                         referenced_tweets=[{"type": "replied_to", "id": parent_id}])
+    return t
+
+
+class TestReplyBlock:
+    def test_parent_quoted_above_reply_text(self, bot, sample_tweet):
+        msg = bot._format_tweet_message(_reply_tweet(sample_tweet))
+        assert "↩️ replying to <b>@bob</b>" in msg
+        assert "┃ The original proposal &amp; its tradeoffs" in msg
+        assert msg.index("┃ The original") < msg.index("@bob agreed")
+
+    def test_parent_clipped(self, bot, sample_tweet):
+        msg = bot._format_tweet_message(_reply_tweet(sample_tweet, parent_text="y" * 400))
+        assert "┃ " + "y" * 300 + "…" in msg
+        assert "y" * 301 not in msg
+
+    def test_hide_parent_keeps_only_header(self, bot, sample_tweet):
+        msg = bot._format_tweet_message(_reply_tweet(sample_tweet), hide_parent=True)
+        assert "↩️ replying to <b>@bob</b>" in msg
+        assert "┃" not in msg
+
+    def test_own_thread_continuation_has_no_reply_header(self, bot, sample_tweet):
+        t = _reply_tweet(sample_tweet)
+        t["reply_to"]["author_username"] = "VitalikButerin"
+        assert "replying to" not in bot._format_tweet_message(t, hide_parent=True)
+        assert "replying to <b>@VitalikButerin</b>" in bot._format_tweet_message(t)
+
+    def test_header_only_when_parent_text_unknown(self, bot, sample_tweet):
+        t = _reply_tweet(sample_tweet)
+        t["reply_to"] = None
+        t["raw_data"]["reply_to"] = None
+        msg = bot._format_tweet_message(t)
+        assert "replying to" not in msg
+
+    def test_like_message_shows_parent(self, bot, sample_tweet):
+        msg = bot._format_like_message(_reply_tweet(sample_tweet))
+        assert "↩️ replying to <b>@bob</b>" in msg and "┃ The original" in msg
+
+    def test_plain_tweet_unchanged(self, bot, sample_tweet):
+        assert "replying to" not in bot._format_tweet_message(sample_tweet)
+
+
+class TestConversationHeader:
+    def test_single_author_is_thread(self, bot):
+        group = [{"author_username": "alice"}, {"author_username": "alice"}]
+        assert "🧵 <b>Thread by @alice</b> (2 tweets in this batch)" in bot._group_header(group)
+
+    def test_multiple_authors_is_conversation(self, bot):
+        group = [{"author_username": "bob"}, {"author_username": "alice"}, {"author_username": "bob"}]
+        header = bot._group_header(group)
+        assert "💬 <b>Conversation</b> @bob, @alice (3 tweets in this batch)" in header
+
+    @pytest.mark.asyncio
+    async def test_digest_hides_parent_shown_in_same_group(self, vote_bot, sample_tweet):
+        parent = dict(sample_tweet, item_id="7", author_username="bob",
+                      url="https://twitter.com/bob/status/7")
+        reply = _reply_tweet(sample_tweet)
+        await vote_bot.send_daily_digest([[parent, reply]], delay_seconds=0)
+        texts = [c[1]["text"] for c in vote_bot.application.bot.send_message.call_args_list]
+        # intro, group header, parent, reply
+        assert "Conversation</b> @bob, @vitalikbuterin" in texts[1]
+        assert "┃" not in texts[3] and "replying to <b>@bob</b>" in texts[3]
+
+    @pytest.mark.asyncio
+    async def test_digest_quotes_parent_not_in_group(self, vote_bot, sample_tweet):
+        await vote_bot.send_daily_digest([[_reply_tweet(sample_tweet)]], delay_seconds=0)
+        text = vote_bot.application.bot.send_message.call_args[1]["text"]
+        assert "┃ The original proposal" in text
+
+
+class TestParentTweetVote:
+    @pytest.mark.asyncio
+    async def test_reply_gets_parent_row(self, vote_bot, sample_tweet):
+        await vote_bot.send_tweet(_reply_tweet(sample_tweet))
+        rows = vote_bot.application.bot.send_message.call_args[1]["reply_markup"].inline_keyboard
+        assert rows[-1][0].callback_data == "qt:7"
+        assert rows[-1][0].text == "↩️ Vote parent tweet"
+        assert vote_bot._parent_items["42"] == "7"
+
+    @pytest.mark.asyncio
+    async def test_fav_rerender_keeps_parent_row(self, vote_bot, sample_tweet):
+        await vote_bot.send_tweet(_reply_tweet(sample_tweet))
+        vote_bot.favorite_author_callback = AsyncMock(return_value="favorited")
+        update, query = _query("fav:vitalikbuterin:42")
+        await vote_bot._handle_feedback(update, MagicMock())
+        rows = query.edit_message_reply_markup.call_args[1]["reply_markup"].inline_keyboard
+        assert rows[-1][0].callback_data == "qt:7"
+        vote_bot.lookup_message_callback.assert_not_awaited()  # memory served it
+
+    @pytest.mark.asyncio
+    async def test_undo_recovers_parent_row_from_db_after_restart(self, vote_bot):
+        vote_bot.lookup_message_callback = AsyncMock(return_value={
+            "item_id": "42", "raw_data": {"referenced_tweets": [
+                {"type": "quoted", "id": "5"}, {"type": "replied_to", "id": "7"},
+            ]},
+        })
+        update, query = _query("vote:42:up:1")
+        await vote_bot._handle_feedback(update, MagicMock())
+        update, query = _query("undo:42")
+        await vote_bot._handle_feedback(update, MagicMock())
+        await _settle(vote_bot)
+        rows = query.edit_message_reply_markup.call_args[1]["reply_markup"].inline_keyboard
+        assert [r[0].callback_data for r in rows[-2:]] == ["qt:5", "qt:7"]
+        assert vote_bot.lookup_message_callback.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_posted_parent_carries_its_own_parent_row(self, vote_bot, sample_tweet):
+        grandparent_reply = _reply_tweet(sample_tweet, parent_id="3")
+        grandparent_reply["item_id"] = "7"
+        vote_bot.like_tweet_callback = AsyncMock(return_value=grandparent_reply)
+        vote_bot.mark_sent_callback = AsyncMock()
+        update, query = _query("qt:7")
+        await vote_bot._handle_feedback(update, MagicMock())
+        kwargs = vote_bot.application.bot.send_message.call_args[1]
+        assert "┃ The original proposal" in kwargs["text"]
+        assert kwargs["reply_markup"].inline_keyboard[-1][0].callback_data == "qt:3"

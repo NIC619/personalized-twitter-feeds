@@ -2,6 +2,7 @@
 
 import hashlib
 import re
+from typing import Optional
 
 
 def generate_blog_id(url: str) -> str:
@@ -107,3 +108,29 @@ def tweet_links(item: dict) -> list[dict]:
 def link_previews(item: dict, limit: int = 2) -> list[dict]:
     """External links that X returned a page title for, most useful first."""
     return [l for l in tweet_links(item) if l["external"] and l["title"]][:limit]
+
+
+def parent_item_id(item: dict) -> Optional[str]:
+    """Id of the tweet ``item`` replies to, or None.
+
+    Fresh tweets carry ``reply_to.item_id`` when the API expanded the parent;
+    ``raw_data.referenced_tweets`` has the id either way (also for rows read
+    back from the database).
+    """
+    reply_to = reply_to_preview(item)
+    if reply_to and reply_to.get("item_id"):
+        return str(reply_to["item_id"])
+    raw = item.get("raw_data") or {}
+    for ref in raw.get("referenced_tweets") or []:
+        if ref.get("type") == "replied_to" and ref.get("id"):
+            return str(ref["id"])
+    return None
+
+
+def reply_to_preview(item: dict) -> Optional[dict]:
+    """``{author_username, author_name, text, item_id}`` of the parent tweet
+    when known (top-level on fresh tweets, ``raw_data.reply_to`` on stored rows)."""
+    reply_to = item.get("reply_to")
+    if not isinstance(reply_to, dict):
+        reply_to = (item.get("raw_data") or {}).get("reply_to")
+    return reply_to if isinstance(reply_to, dict) and reply_to.get("item_id") else None

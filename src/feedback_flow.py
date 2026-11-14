@@ -26,6 +26,7 @@ STRONG_LABEL = "🔥"
 UP_LABEL = "👍"
 DOWN_LABEL = "👎"
 QUOTED_LABEL = "💬 Vote quoted tweet"
+PARENT_LABEL = "↩️ Vote parent tweet"
 
 
 @dataclass(frozen=True)
@@ -95,9 +96,11 @@ def vote_buttons(
     fav_label: str = "⭐ Author",
     mute_label: str = "🔇 Mute",
     quoted_id: Optional[str] = None,
+    parent_id: Optional[str] = None,
 ) -> InlineKeyboardMarkup:
     """Default keyboard under a sent item: 🔥 👍 👎 + author controls,
-    plus a row to pull up the quoted tweet for its own vote when there is one."""
+    plus rows to pull up the quoted tweet / the tweet it replies to for
+    their own votes when there are any (both use the ``qt:`` callback)."""
     rows = [[
         InlineKeyboardButton(STRONG_LABEL, callback_data=f"vote:{item_id}:up:2"),
         InlineKeyboardButton(UP_LABEL, callback_data=f"vote:{item_id}:up:1"),
@@ -110,6 +113,8 @@ def vote_buttons(
         ])
     if quoted_id:
         rows.append([InlineKeyboardButton(QUOTED_LABEL, callback_data=f"qt:{quoted_id}")])
+    if parent_id:
+        rows.append([InlineKeyboardButton(PARENT_LABEL, callback_data=f"qt:{parent_id}")])
     return InlineKeyboardMarkup(rows)
 
 

@@ -377,8 +377,8 @@ personalized-twitter-feeds/
 | `preference_profiles` | Versioned compiled Markdown profiles per domain plus `overall`. |
 
 ### Daily run
-1. **Fetch**: Pulls tweets from your home timeline (last 24 hours) plus starred authors' timelines
-2. **Pre-filter**: Retweets from non-starred authors and blocked keywords are dropped before scoring
+1. **Fetch**: Pulls tweets from your home timeline (last 24 hours) plus starred authors' timelines. Retweets are recorded as the original tweet (the retweeter is credited separately). Replies pull in the tweets they answer, up to `REPLY_PARENT_DEPTH` levels, as items of their own
+2. **Pre-filter**: Blocked keywords are dropped before scoring
 3. **Neighbours**: Each tweet is embedded and its 3 most similar past votes are looked up in pgvector
 4. **Score**: Claude scores each tweet 0-100 against the compiled profile, seeing each tweet's own past-vote neighbours, and tags its domain
 5. **Send**: Tweets at or above the threshold (per-author tiers apply) go to Telegram, plus 2 random below-threshold items marked 🎲 (exploration)
@@ -427,7 +427,8 @@ The choices below reflect how I personally want this tool to behave. They are no
 
 ### Author tiers & filtering
 
-- **Retweets from non-favorite authors are dropped entirely** (`src/scheduler.py`). Favorites' retweets are treated as curation signal worth reading; everyone else's are treated as noise.
+- **Retweets are stored and voted as the original tweet** (`src/twitter_client.py`). A vote credits the original author in full and the retweeter at half weight, so good curators surface in `/stats` without their retweets masquerading as their own content.
+- **Replies bring their parents along as independent items** (`src/scheduler.py`). A thin "agreed 🔥🔥" reply scores low on its own while the tweet it answers is scored, sent and voted on its own merits, with its own author credited. This is the main way authors you don't follow yet enter the system. The digest shows a reply chain as a 💬 Conversation group; a reply whose parent is not in the digest quotes it inline and offers a "↩️ Vote parent tweet" button.
 - **Three author tiers with different score thresholds**: favorites pass at 30, defaults at 50, muted at 65 (`FILTER_THRESHOLD` ± offsets; defaults calibrated for Sonnet 5.5). Claude scores everything against the lowest floor so feedback signal isn't lost for muted authors.
 - **Starred authors have a dedicated fetch path** alongside the home timeline, capped per author. Favorites are treated as a distinct content source, not just surfaced by timeline algorithms.
 - **Keyword blocklist runs before Claude scoring; favorites are exempt.** Saves API cost on obvious noise, but trusts favorites' judgment even when they post about blocked topics.
@@ -470,6 +471,7 @@ The choices below reflect how I personally want this tool to behave. They are no
 | `RAG_ENABLED`       | true        | Attach voted neighbours to items when scoring |
 | `RAG_SIMILARITY_LIMIT` | 3        | Neighbours per item                     |
 | `EXPLORATION_PER_RUN` | 2         | Random below-threshold items sent per run (🎲) |
+| `REPLY_PARENT_DEPTH` | 5          | Levels of replied-to tweets pulled into the batch as their own items (0 = off) |
 | `FEED_MAX_ENTRIES_PER_RUN` | 10   | Newest entries fetched per feed per run |
 | `CLAUDE_MODEL`      | claude-sonnet-5-5 | Scoring model                     |
 | `EMAIL_IMAP_HOST` / `EMAIL_IMAP_USER` / `EMAIL_IMAP_PASSWORD` | (unset) | Mailbox for forwarded newsletters; all three enable email ingestion |

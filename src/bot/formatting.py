@@ -26,7 +26,7 @@ from src.bot.constants import (
 from src.capture import classify_message, forward_origin
 from src.content import (
     is_blog_content, is_http_url, is_tweet_url, is_twitter_profile_url,
-    link_previews, tweet_links,
+    link_previews, reply_to_preview, tweet_links,
 )
 from src.feedback_flow import (
     Vote,
@@ -154,7 +154,10 @@ class FormattingMixin:
         retweets_str = self._format_number(retweets)
         replies_str = self._format_number(replies)
 
-        header = self._retweet_header(tweet) + self._quote_header(tweet)
+        header = (
+            self._retweet_header(tweet) + self._quote_header(tweet)
+            + self._reply_block(tweet)
+        )
         message = (
             f"<b>@{tweet['author_username']}</b> | "
             f"<a href=\"{self._link(tweet)}\">View Tweet</a>\n\n"
@@ -247,11 +250,14 @@ class FormattingMixin:
         fav_label: str = "⭐ Author",
         mute_label: str = "🔇 Mute",
         quoted_id: Optional[str] = None,
+        parent_id: Optional[str] = None,
     ) -> InlineKeyboardMarkup:
         """Vote row (🔥 👍 👎) plus author controls when a username is known,
-        plus a "vote the quoted tweet" row when ``quoted_id`` is given."""
+        plus "vote the quoted tweet" / "vote the parent tweet" rows when
+        ``quoted_id`` / ``parent_id`` are given."""
         return vote_buttons(
-            item_id, username, fav_label=fav_label, mute_label=mute_label, quoted_id=quoted_id,
+            item_id, username, fav_label=fav_label, mute_label=mute_label,
+            quoted_id=quoted_id, parent_id=parent_id,
         )
 
     def _link(self, item: dict) -> str:
@@ -262,12 +268,15 @@ class FormattingMixin:
         self,
         tweet: dict,
         position: Optional[tuple[int, int]] = None,
+        hide_parent: bool = False,
     ) -> str:
         """Format tweet for Telegram message.
 
         Args:
             tweet: Tweet dictionary
             position: Optional (index, total) for digest numbering, 1-indexed.
+            hide_parent: Skip the replied-to preview (the parent is its own
+                message right above this one in the digest).
 
         Returns:
             Formatted message string (HTML)
@@ -293,6 +302,7 @@ class FormattingMixin:
             f"<b>@{tweet['author_username']}</b> | "
             f"<a href=\"{self._link(tweet)}\">View Tweet</a>\n\n"
             f"{self._retweet_header(tweet)}{self._quote_header(tweet)}"
+            f"{self._reply_block(tweet, hide_parent)}"
         )
 
         # Show article info for X Articles
@@ -402,6 +412,24 @@ class FormattingMixin:
             return "🔁 <i>retweet</i>\n\n"
         original_author = self._escape_html(retweeted_from.get("author_username", ""))
         return f"🔁 via <b>@{original_author}</b>\n\n"
+
+    def _reply_block(self, tweet: dict, hide_parent: bool = False) -> str:
+        """"↩️ replying to @parent" plus a clipped quote of the parent tweet,
+        placed above the reply's own text. Only the header when the parent's
+        text is unknown or it is shown as its own message (``hide_parent``)."""
+        reply_to = reply_to_preview(tweet)
+        if not reply_to:
+            return ""
+        parent_author = reply_to.get("author_username") or ""
+        if hide_parent and parent_author.lower() == (tweet.get("author_username") or "").lower():
+            return ""  # own thread, already under a "Thread by" header
+        header = f"↩️ replying to <b>@{self._escape_html(parent_author)}</b>\n"
+        text = (reply_to.get("text") or "").strip()
+        if hide_parent or not text:
+            return header + "\n"
+        lines = self._escape_html(self._clip(text, 300)).split("\n")
+        block = "\n".join(f"┃ {line}" for line in lines)
+        return f"{header}{block}\n\n"
 
     def _quote_header(self, tweet: dict) -> str:
         """Render a "💬 quoting @quoted_author" header for quote tweets, else empty."""

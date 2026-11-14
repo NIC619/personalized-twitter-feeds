@@ -541,3 +541,64 @@ class TestFetchThread:
 
         assert result is not None
         assert len(result) == 5
+
+
+class TestReplyParents:
+    def test_reply_to_attached_from_includes(self, twitter_client):
+        tweet = _make_tweet(
+            item_id=42, text="@bob agreed", author_id="100",
+            referenced_tweets=[{"type": "replied_to", "id": "7"}],
+        )
+        author = _make_user(user_id="100", username="alice", name="Alice")
+        parent = _make_tweet(item_id=7, text="Proposal: do X", author_id="200")
+        users = {"100": author, "200": _make_user(user_id="200", username="bob", name="Bob")}
+
+        result = twitter_client._normalize_tweet(tweet, author, {"7": parent}, users)
+
+        assert result["reply_to"] == {
+            "author_username": "bob", "author_name": "Bob",
+            "text": "Proposal: do X", "item_id": "7",
+        }
+        assert result["raw_data"]["reply_to"]["item_id"] == "7"
+        assert result["raw_data"]["referenced_tweets"] == [{"type": "replied_to", "id": "7"}]
+
+    def test_reply_to_none_when_parent_not_included(self, twitter_client):
+        tweet = _make_tweet(
+            item_id=42, author_id="100",
+            referenced_tweets=[{"type": "replied_to", "id": "7"}],
+        )
+        author = _make_user(user_id="100", username="alice", name="Alice")
+        result = twitter_client._normalize_tweet(tweet, author, {}, {"100": author})
+        assert result["reply_to"] is None
+        # the id is still there for the chain walk
+        assert result["raw_data"]["referenced_tweets"][0]["id"] == "7"
+
+    def test_fetch_tweets_batches_and_normalizes(self, twitter_client):
+        users = [_make_user(user_id="200", username="bob", name="Bob")]
+        resp = SimpleNamespace(
+            data=[_make_tweet(item_id=7, text="root", author_id="200"),
+                  _make_tweet(item_id=8, text="also", author_id="200")],
+            includes={"users": users},
+        )
+        twitter_client.client.posts.get_by_ids = MagicMock(return_value=resp)
+
+        out = twitter_client.fetch_tweets(["7", "8", "7", "9"])
+
+        call = twitter_client.client.posts.get_by_ids.call_args[1]
+        assert call["ids"] == ["7", "8", "9"]
+        assert "referenced_tweets.id" in call["expansions"]
+        assert {t["item_id"] for t in out} == {"7", "8"}  # 9 missing → absent
+        assert out[0]["author_username"] == "bob"
+
+    def test_fetch_tweets_chunks_by_100(self, twitter_client):
+        twitter_client.client.posts.get_by_ids = MagicMock(
+            return_value=SimpleNamespace(data=None, includes=None)
+        )
+        twitter_client.fetch_tweets([str(i) for i in range(150)])
+        sizes = [len(c[1]["ids"]) for c in twitter_client.client.posts.get_by_ids.call_args_list]
+        assert sizes == [100, 50]
+
+    def test_fetch_tweets_empty(self, twitter_client):
+        twitter_client.client.posts.get_by_ids = MagicMock()
+        assert twitter_client.fetch_tweets([]) == []
+        twitter_client.client.posts.get_by_ids.assert_not_called()

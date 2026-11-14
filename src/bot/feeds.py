@@ -93,14 +93,17 @@ class FeedsMixin:
         )
         await self._send_scored_items(items)
 
-    async def _send_item(self, item: dict, position: Optional[tuple[int, int]] = None) -> Optional[int]:
+    async def _send_item(
+        self, item: dict, position: Optional[tuple[int, int]] = None,
+        hide_parent: bool = False,
+    ) -> Optional[int]:
         """Send any scored item with the vote keyboard (articles use the article layout).
 
         Items without a ``content_type`` are tweets (rows written before the
         column existed, and the X client's dicts before they carried it).
         """
         if (item.get("content_type") or "tweet") == "tweet":
-            return await self.send_tweet(item, position=position)
+            return await self.send_tweet(item, position=position, hide_parent=hide_parent)
         message = self._format_blog_scored_message(item, position=position)
         try:
             sent = await self.application.bot.send_message(

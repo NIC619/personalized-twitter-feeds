@@ -11,6 +11,7 @@ import schedule
 from src.twitter_client import TwitterClient
 from src.claude_filter import ClaudeFilter
 from src.telegram_bot import TelegramCurator
+from src.content import parent_item_id
 from src.database import DatabaseClient
 from src.embeddings import EmbeddingManager
 from src.keyword_filter import filter_blocked_keywords
@@ -54,6 +55,7 @@ class DailyCurator:
         rag_enabled: bool = True,
         neighbors_per_item: int = 3,
         exploration_per_run: int = 2,
+        reply_parent_depth: int = 5,
         profile_source: str = "compiled",
         feed_fetcher=None,
         feed_max_entries: int = 10,
@@ -79,6 +81,8 @@ class DailyCurator:
             neighbors_per_item: Nearest voted neighbours attached to each item
             exploration_per_run: Random below-threshold items sent per run
                 (marked 🎲) so recall below the threshold can be measured
+            reply_parent_depth: How many levels of replied-to tweets to pull
+                into the batch as items of their own (0 disables)
             profile_source: 'compiled' loads the latest compiled profiles
                 for the scoring prompt, 'static' uses the built-in baseline
             feed_fetcher: Optional FeedFetcher; subscribed RSS/Atom feeds are
@@ -105,6 +109,7 @@ class DailyCurator:
         self.rag_enabled = rag_enabled
         self.neighbors_per_item = neighbors_per_item
         self.exploration_per_run = exploration_per_run
+        self.reply_parent_depth = reply_parent_depth
         self.profile_source = profile_source
         self.feed_fetcher = feed_fetcher
         self.feed_max_entries = feed_max_entries
@@ -198,6 +203,16 @@ class DailyCurator:
                 f"Starred authors: {len(starred_tweets)} total, "
                 f"{new_from_starred} new (not in home timeline)"
             )
+
+        # Step 1a2: Replies bring the tweets they answer into the batch as
+        # items of their own, so a thin reply can score low while the
+        # parent it answers scores (and is voted) on its own merits.
+        if self.reply_parent_depth > 0 and tweets:
+            parents = self._expand_reply_parents(tweets, self.reply_parent_depth)
+            if parents:
+                stats["reply_parents"] = len(parents)
+                tweets.extend(parents)
+                logger.info(f"Step 1a2: Added {len(parents)} replied-to tweets")
 
         # Step 1b: New entries from subscribed feeds join the batch here,
         # before the dedup / retweet / keyword steps, so they are blocked
@@ -546,6 +561,48 @@ class DailyCurator:
         if not candidates:
             return []
         return random.sample(candidates, min(self.exploration_per_run, len(candidates)))
+
+    def _expand_reply_parents(self, tweets: list[dict], max_depth: int) -> list[dict]:
+        """Walk reply chains upward and return the parent tweets not already
+        in ``tweets``, up to ``max_depth`` levels.
+
+        Each level is one batched lookup for the whole batch. Parents already
+        stored are taken from the database (and still walked through, so a
+        chain is not cut short by a known tweet); the scored ones are then
+        dropped by the usual dedup. Each parent gets a transient
+        ``replied_by`` list naming the batch authors who answered it, for the
+        scorer. Lookup failures are logged and leave the batch as it was.
+        """
+        pool = {t["item_id"]: t for t in tweets}
+        added: list[dict] = []
+        frontier = list(tweets)
+        for _ in range(max_depth):
+            wanted: dict[str, list[dict]] = {}
+            for t in frontier:
+                pid = parent_item_id(t)
+                if pid and pid != t["item_id"]:
+                    wanted.setdefault(pid, []).append(t)
+            missing = [pid for pid in wanted if pid not in pool]
+            if not missing:
+                break
+            try:
+                known = self.db.get_items(missing)
+                to_fetch = [pid for pid in missing if pid not in known]
+                fetched = self.twitter.fetch_tweets(to_fetch) if to_fetch else []
+            except Exception as e:
+                logger.warning(f"Reply parent lookup failed, continuing without: {e}")
+                break
+            level = [known[pid] for pid in missing if pid in known]
+            level += [t for t in fetched if t["item_id"] not in pool and t["item_id"] in wanted]
+            for parent in level:
+                parent["replied_by"] = sorted({
+                    c["author_username"] for c in wanted[parent["item_id"]]
+                    if c.get("author_username")
+                })
+                pool[parent["item_id"]] = parent
+                added.append(parent)
+            frontier = level
+        return added
 
     @staticmethod
     def _group_by_thread(tweets: list[dict]) -> list[list[dict]]:

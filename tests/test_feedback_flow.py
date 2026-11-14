@@ -2,7 +2,9 @@
 
 from types import SimpleNamespace
 
+from src.content import parent_item_id, reply_to_preview
 from src.feedback_flow import (
+    PARENT_LABEL,
     Vote,
     parse_vote_callback,
     quoted_item_id,
@@ -131,3 +133,36 @@ class TestQuotedItemId:
         assert len(kb) == 3
         assert [b.callback_data for b in kb[2]] == ["qt:888"]
         assert vote_buttons("42", "alice").inline_keyboard[-1][1].callback_data == "mute:alice:42"
+
+
+class TestParentItemId:
+    def test_from_fresh_reply_to(self):
+        assert parent_item_id({"reply_to": {"item_id": "7", "author_username": "bob"}}) == "7"
+
+    def test_from_raw_data_reply_to(self):
+        item = {"raw_data": {"reply_to": {"item_id": "7"}}}
+        assert parent_item_id(item) == "7"
+        assert reply_to_preview(item) == {"item_id": "7"}
+
+    def test_from_referenced_tweets_without_preview(self):
+        item = {"raw_data": {"referenced_tweets": [
+            {"type": "quoted", "id": "5"}, {"type": "replied_to", "id": "7"},
+        ]}}
+        assert parent_item_id(item) == "7"
+        assert reply_to_preview(item) is None
+
+    def test_none(self):
+        assert parent_item_id({"reply_to": None, "raw_data": {}}) is None
+        assert parent_item_id({}) is None
+
+
+class TestParentButton:
+    def test_parent_row_uses_qt_callback(self):
+        rows = vote_buttons("1", "alice", quoted_id="5", parent_id="7").inline_keyboard
+        assert rows[-2][0].callback_data == "qt:5"
+        assert rows[-1][0].callback_data == "qt:7"
+        assert rows[-1][0].text == PARENT_LABEL
+
+    def test_no_parent_row_without_parent(self):
+        rows = vote_buttons("1", "alice").inline_keyboard
+        assert len(rows) == 2

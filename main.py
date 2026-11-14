@@ -465,6 +465,7 @@ def init_components(settings, num_tweets=None, hours=None):
         rag_enabled=settings.rag_enabled,
         neighbors_per_item=settings.rag_similarity_limit,
         exploration_per_run=settings.exploration_per_run,
+        reply_parent_depth=settings.reply_parent_depth,
         profile_source=settings.profile_source,
         feed_fetcher=feed_fetcher,
         feed_max_entries=settings.feed_max_entries_per_run,
