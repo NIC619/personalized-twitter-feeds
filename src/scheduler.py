@@ -582,6 +582,10 @@ class DailyCurator:
                 pid = parent_item_id(t)
                 if pid and pid != t["item_id"]:
                     wanted.setdefault(pid, []).append(t)
+            # Parents already in the batch still get their repliers noted.
+            for pid in wanted:
+                if pid in pool:
+                    self._note_repliers(pool[pid], wanted[pid])
             missing = [pid for pid in wanted if pid not in pool]
             if not missing:
                 break
@@ -595,14 +599,18 @@ class DailyCurator:
             level = [known[pid] for pid in missing if pid in known]
             level += [t for t in fetched if t["item_id"] not in pool and t["item_id"] in wanted]
             for parent in level:
-                parent["replied_by"] = sorted({
-                    c["author_username"] for c in wanted[parent["item_id"]]
-                    if c.get("author_username")
-                })
+                self._note_repliers(parent, wanted[parent["item_id"]])
                 pool[parent["item_id"]] = parent
                 added.append(parent)
             frontier = level
         return added
+
+    @staticmethod
+    def _note_repliers(parent: dict, replies: list[dict]) -> None:
+        """Merge the authors of ``replies`` into ``parent["replied_by"]`` (sorted, unique)."""
+        names = set(parent.get("replied_by") or [])
+        names.update(c["author_username"] for c in replies if c.get("author_username"))
+        parent["replied_by"] = sorted(names)
 
     @staticmethod
     def _group_by_thread(tweets: list[dict]) -> list[list[dict]]:

@@ -745,12 +745,28 @@ class TestExpandReplyParents:
         assert parents[0]["replied_by"] == ["alice", "bob"]
         assert curator.twitter.fetch_tweets.call_args[0][0] == ["1"]
 
-    def test_parent_already_in_batch_not_fetched(self, curator):
+    def test_parent_already_in_batch_not_fetched_but_attributed(self, curator):
+        root = _reply("1", "root")
         parents = curator._expand_reply_parents(
-            [_reply("1", "root"), _reply("2", "bob", "1")], max_depth=5
+            [root, _reply("2", "bob", "1")], max_depth=5
         )
         assert parents == []
         curator.twitter.fetch_tweets.assert_not_called()
+        assert root["replied_by"] == ["bob"]
+
+    def test_shared_parent_met_at_two_depths_merges_repliers(self, curator):
+        # alice → 1 directly; bob → 2 → 1. Parent 1 is fetched at depth 1
+        # (for alice) and met again at depth 2 (via 2): both repliers kept.
+        curator.db.get_items.return_value = {}
+        curator.twitter.fetch_tweets.side_effect = lambda ids: [
+            {"1": _reply("1", "root"), "2": _reply("2", "carol", "1")}[i] for i in ids
+        ]
+        parents = curator._expand_reply_parents(
+            [_reply("3", "alice", "1"), _reply("4", "bob", "2")], max_depth=5
+        )
+        by_id = {p["item_id"]: p for p in parents}
+        assert by_id["1"]["replied_by"] == ["alice", "carol"]
+        assert by_id["2"]["replied_by"] == ["bob"]
 
     def test_lookup_failure_keeps_batch(self, curator):
         curator.db.get_items.return_value = {}

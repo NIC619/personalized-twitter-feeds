@@ -1061,6 +1061,44 @@ class TestReplyBlock:
         assert "replying to" not in bot._format_tweet_message(sample_tweet)
 
 
+class TestReplyBudget:
+    def test_long_reply_keeps_parent_header_only(self, bot, sample_tweet):
+        t = _reply_tweet(sample_tweet, parent_text="p" * 300)
+        t["text"] = "r" * 3800
+        msg = bot._format_tweet_message(t, position=(1, 20))
+        assert len(msg) <= 4096
+        assert "replying to <b>@bob</b>" in msg
+        assert "┃ ppp" not in msg
+        assert "r" * 3800 in msg
+
+    def test_long_reply_drops_quoted_block_before_own_text(self, bot, sample_tweet):
+        t = _reply_tweet(sample_tweet)
+        t["text"] = "r" * 3900
+        t["quoted_tweet"] = {"author_username": "q", "text": "quoted " * 30, "item_id": "9"}
+        msg = bot._format_tweet_message(t)
+        assert len(msg) <= 4096
+        assert "┃ <b>@q:</b>" not in msg
+        assert "r" * 3900 in msg
+
+    def test_oversized_text_is_clipped_last(self, bot, sample_tweet):
+        t = _reply_tweet(sample_tweet)
+        t["text"] = "word & " * 900  # escapes to > 4096
+        msg = bot._format_tweet_message(t)
+        assert len(msg) <= 4096
+        assert msg.count("&amp;") > 340 and "…" in msg  # ~4096 / len("word &amp; ")
+        assert "<" not in msg.split("View Tweet</a>")[1].split("❤️")[0].replace("<b>", "").replace("</b>", "")
+
+    def test_like_message_budgeted_too(self, bot, sample_tweet):
+        t = _reply_tweet(sample_tweet, parent_text="p" * 300)
+        t["text"] = "r" * 3900
+        assert len(bot._format_like_message(t)) <= 4096
+
+    def test_short_messages_unchanged(self, bot, sample_tweet, sample_quote_tweet):
+        msg = bot._format_tweet_message(sample_quote_tweet)
+        assert "┃ <b>@vitalikbuterin:</b>" in msg and "This is a great analysis!" in msg
+        assert "❤️ 300" in msg
+
+
 class TestConversationHeader:
     def test_single_author_is_thread(self, bot):
         group = [{"author_username": "alice"}, {"author_username": "alice"}]
