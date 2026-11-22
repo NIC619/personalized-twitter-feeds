@@ -14,6 +14,7 @@ from src.telegram_bot import TelegramCurator
 from src.content import parent_item_id
 from src.database import DatabaseClient
 from src.embeddings import EmbeddingManager
+from src.skips import pick_skips, skip_signal
 from src.keyword_filter import filter_blocked_keywords
 from src.profile_compiler import ProfileCompiler, scoring_profile
 
@@ -135,12 +136,13 @@ class DailyCurator:
         Returns:
             Dict with workflow statistics
         """
+        started = datetime.now(timezone.utc)
         stats = {
             "fetched": 0,
             "filtered": 0,
             "sent": 0,
             "errors": [],
-            "started_at": datetime.now(timezone.utc).isoformat(),
+            "started_at": started.isoformat(),
         }
 
         try:
@@ -164,9 +166,32 @@ class DailyCurator:
                 logger.error(f"Inbox processing failed: {e}", exc_info=True)
                 stats["errors"].append(f"Inbox error: {e}")
 
+        # Step 6: one footer with "rest are meh" covering everything sent this run
+        if stats["sent"] or (stats.get("inbox") or {}).get("sent"):
+            try:
+                await self.telegram.send_digest_footer(started, datetime.now(timezone.utc))
+            except Exception as e:
+                logger.warning(f"Digest footer failed: {e}")
+
         stats["completed_at"] = datetime.now(timezone.utc).isoformat()
         logger.info(f"Curation complete: {stats}")
         return stats
+
+    def mark_rest_meh(self, since: datetime, until: datetime) -> int:
+        """"Rest are meh": a ``skip`` vote on every item sent in the window
+        that has no vote and no open. Returns the number written."""
+        sent = self.db.get_sent_items(since.isoformat(), until.isoformat())
+        if not sent:
+            return 0
+        engaged = self.db.get_engaged_ids([i["item_id"] for i in sent])
+        to_mark = pick_skips(sent, engaged)
+        written = 0
+        for i in range(0, len(to_mark), 200):
+            batch = to_mark[i : i + 200]
+            written += self.db.save_signals([skip_signal(it, "meh") for it in batch])
+        if written:
+            logger.info(f"Recorded {written} skip signals (meh) for run {since.isoformat()}")
+        return written
 
     async def _curate_twitter(self, stats: dict) -> None:
         """Steps 1-4: fetch, filter, score, save, send. Mutates ``stats``."""

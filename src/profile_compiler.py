@@ -19,13 +19,14 @@ logger = logging.getLogger(__name__)
 # How much evidence goes into one domain's prompt
 MAX_UP_EXAMPLES = 120
 MAX_DOWN_EXAMPLES = 60
+MAX_SKIP_EXAMPLES = 40
 MAX_NOTES = 40
 MIN_VOTES_FOR_DOMAIN = 8
 # Scoring prompt budget for the compiled profile (characters)
 SCORING_PROFILE_BUDGET = 7000
 
 
-PROFILE_PROMPT = """You maintain a preference profile for one reader. Below is their voting record in the domain "{domain}": items they upvoted (🔥 = strongly), items they downvoted, their own stated reasons, and free-text notes. Write the profile section for this domain in Markdown.
+PROFILE_PROMPT = """You maintain a preference profile for one reader. Below is their voting record in the domain "{domain}": items they upvoted (🔥 = strongly), items they downvoted, items they marked 😐 "seen, not for me" (weaker than a downvote), their own stated reasons, and free-text notes. Write the profile section for this domain in Markdown.
 
 Requirements:
 - Write in second person ("You want…", "You skip…"), concrete and specific. Name sub-topics, angles, formats, authors and tells. Prefer "deep dives that quantify X" over "technical content".
@@ -70,10 +71,10 @@ def group_signals(rows: list[dict]) -> dict[str, dict]:
     """Group signal rows (with embedded item) by domain.
 
     Returns:
-        {domain: {"up": [...], "down": [...], "notes": [...]}} where each
+        {domain: {"up": [...], "down": [...], "skip": [...], "notes": [...]}} where each
         entry is {text, reason, strength, created_at, author}.
     """
-    groups: dict[str, dict] = defaultdict(lambda: {"up": [], "down": [], "notes": []})
+    groups: dict[str, dict] = defaultdict(lambda: {"up": [], "down": [], "skip": [], "notes": []})
     for row in rows:
         item = row.get("items") or {}
         domain = item.get("domain") or "other"
@@ -88,7 +89,7 @@ def group_signals(rows: list[dict]) -> dict[str, dict]:
             "created_at": row.get("created_at"),
             "author": item.get("author_username"),
         }
-        if row["kind"] == "vote" and row.get("value") in ("up", "down"):
+        if row["kind"] == "vote" and row.get("value") in ("up", "down", "skip"):
             groups[domain][row["value"]].append(entry)
         elif row["kind"] == "note" and row.get("reason"):
             groups[domain]["notes"].append(entry)
@@ -100,6 +101,7 @@ def format_record(group: dict) -> str:
     lines = []
     ups = sorted(group["up"], key=lambda e: -e["strength"])[:MAX_UP_EXAMPLES]
     downs = group["down"][:MAX_DOWN_EXAMPLES]
+    skips = group.get("skip", [])[:MAX_SKIP_EXAMPLES]
     notes = group["notes"][:MAX_NOTES]
 
     lines.append(f"### Upvoted ({len(group['up'])} total, showing {len(ups)})")
@@ -114,6 +116,12 @@ def format_record(group: dict) -> str:
         reason = f' — reason: "{e["reason"]}"' if e.get("reason") else ""
         author = f" (@{e['author']})" if e.get("author") else ""
         lines.append(f"- 👎{author}: {_one_line(e['text'])}{reason}")
+    if skips:
+        lines.append("")
+        lines.append(f"### Skipped as 'seen, not for me' ({len(group['skip'])} total, showing {len(skips)})")
+        for e in skips:
+            author = f" (@{e['author']})" if e.get("author") else ""
+            lines.append(f"- 😐{author}: {_one_line(e['text'])}")
     if notes:
         lines.append("")
         lines.append(f"### Notes the reader wrote ({len(notes)})")

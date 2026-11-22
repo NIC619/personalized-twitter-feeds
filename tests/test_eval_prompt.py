@@ -58,11 +58,14 @@ class TestSummarize:
             {"score": 65, "vote": "up", "reason": "Tech content"},
             {"score": 55, "vote": "up", "reason": "Life wisdom", "exploration": True},
             {"score": 30, "vote": "down", "reason": "Event/promo"},
+            {"score": 70, "vote": "skip"},  # delivered, never voted or opened
             {"score": None, "vote": "up"},  # unscored rows are dropped
         ]
         s = summarize(rows, 70)
-        assert s["n"] == 4 and s["n_up"] == 3 and s["n_down"] == 1
-        assert s["auc"] == 1.0
+        assert s["n"] == 5 and s["n_up"] == 3 and s["n_down"] == 1 and s["n_skip"] == 1
+        assert s["auc"] == 1.0  # skips are not downvotes
+        assert s["auc_skip"] == 1 / 3 and s["mean_skip"] == 70  # only 95 beats the skip
+        assert s["at_threshold"]["down_blocked"] == 1.0
         assert s["at_threshold"]["recall"] == 1 / 3
         assert s["by_reason"]["Tech content"] == {"n": 2, "sent": 1, "recall": 0.5}
         assert s["exploration"] == {"n": 1, "n_up": 1}

@@ -247,6 +247,10 @@ def init_components(settings, num_tweets=None, hours=None):
     async def on_mark_sent(item_id: str, telegram_message_id: int) -> None:
         await asyncio.to_thread(db.mark_item_sent, item_id, telegram_message_id)
 
+    # "Rest are meh": the curator is built after the bot, so resolve it at call time
+    async def on_meh(since, until) -> int:
+        return await asyncio.to_thread(curator.mark_rest_meh, since, until)
+
     redirect_base_url = settings.redirect_base_url
     if redirect_base_url is None and not settings.development_mode:
         redirect_base_url = settings.webhook_url
@@ -446,6 +450,7 @@ def init_components(settings, num_tweets=None, hours=None):
         open_callback=on_open,
         lookup_message_callback=on_lookup_message,
         mark_sent_callback=on_mark_sent,
+        meh_callback=on_meh,
         redirect_base_url=redirect_base_url,
     )
 

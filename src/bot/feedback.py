@@ -8,6 +8,7 @@ import asyncio
 import html
 import logging
 import re
+from datetime import datetime, timezone
 from typing import Optional
 
 import telegram.error
@@ -106,6 +107,10 @@ class FeedbackMixin:
                     )
                 except Exception:
                     pass
+
+        # "Rest are meh": "meh:{since_ts}:{until_ts}" → skip the unvoted items of that run
+        elif data.startswith("meh:"):
+            await self._handle_meh(query, data)
 
         # Quoted tweet: "qt:{quoted_item_id}" → post it with its own vote keyboard
         elif data.startswith("qt:"):
@@ -366,7 +371,8 @@ class FeedbackMixin:
         else:
             await _save(0)
 
-        if reason:
+        if reason or vote.vote == "skip":
+            # A skip is "not for me", nothing to explain.
             return
         # Proposals call the model (seconds). Run them off the update
         # handler so an Undo tapped meanwhile is processed in time.
@@ -480,6 +486,29 @@ class FeedbackMixin:
             )
         except Exception as e:
             logger.debug(f"Reason prompt delete skipped: {e}")
+
+    async def _handle_meh(self, query, data: str) -> None:
+        """Mark every unvoted, unopened item of a run as skipped."""
+        if not self.meh_callback:
+            return
+        try:
+            _, since_ts, until_ts = data.split(":")
+            since = datetime.fromtimestamp(int(since_ts), tz=timezone.utc)
+            until = datetime.fromtimestamp(int(until_ts), tz=timezone.utc)
+        except ValueError:
+            logger.warning(f"Bad meh callback: {data}")
+            return
+        try:
+            count = await self.meh_callback(since, until)
+        except Exception as e:
+            logger.error(f"Meh failed: {e}", exc_info=True)
+            await query.edit_message_text("Could not mark the rest; try again later.")
+            return
+        if count:
+            text = f"😐 Marked {count} unvoted item{'s' if count != 1 else ''} as skipped. A vote on any of them still overrides it."
+        else:
+            text = "Nothing left to mark: every item in this run already has a vote or was opened."
+        await query.edit_message_text(text)
 
     async def _handle_reaction(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE

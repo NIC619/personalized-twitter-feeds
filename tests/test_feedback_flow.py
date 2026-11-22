@@ -76,7 +76,7 @@ class TestParseVoteCallback:
 class TestKeyboards:
     def test_vote_buttons_with_author(self):
         kb = vote_buttons("42", "alice").inline_keyboard
-        assert [b.callback_data for b in kb[0]] == ["vote:42:up:2", "vote:42:up:1", "vote:42:down:1"]
+        assert [b.callback_data for b in kb[0]] == ["vote:42:up:2", "vote:42:up:1", "vote:42:down:1", "vote:42:skip:1"]
         assert [b.callback_data for b in kb[1]] == ["fav:alice:42", "mute:alice:42"]
 
     def test_vote_buttons_without_author(self):
@@ -166,3 +166,23 @@ class TestParentButton:
     def test_no_parent_row_without_parent(self):
         rows = vote_buttons("1", "alice").inline_keyboard
         assert len(rows) == 2
+
+
+class TestSkip:
+    def test_parse_skip_callback(self):
+        from src.feedback_flow import parse_vote_callback, Vote
+        assert parse_vote_callback("vote:42:skip:1") == ("42", Vote("skip", 1))
+        assert parse_vote_callback("vote:42:skip:2") == ("42", Vote("skip", 1))  # never strong
+
+    def test_default_keyboard_has_skip_button(self):
+        from src.feedback_flow import vote_buttons
+        row = vote_buttons("42", None).inline_keyboard[0]
+        assert [b.text for b in row] == ["🔥", "👍", "👎", "😐"]
+        assert row[3].callback_data == "vote:42:skip:1"
+
+    def test_skip_reactions_and_label(self):
+        from types import SimpleNamespace
+        from src.feedback_flow import Vote, vote_from_reaction_set, vote_label
+        assert vote_from_reaction_set([SimpleNamespace(emoji="🤷")]) == Vote("skip", 1)
+        # 👍 beats 😐 on the same message? No: equal strength, first wins, so 😐 is a real vote
+        assert vote_label(Vote("skip", 1)) == "😐"

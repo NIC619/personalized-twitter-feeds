@@ -35,6 +35,12 @@ class TestGroupSignals:
         assert g["ethereum-protocol"]["notes"][0]["reason"] == "remember this"
         assert g["other"]["up"][0]["text"] == "untagged"
 
+    def test_skips_grouped_separately_from_downvotes(self):
+        rows = [_row("vote", "skip", text="passed"), _row("vote", "down", text="rejected")]
+        g = group_signals(rows)["ethereum-protocol"]
+        assert [e["text"] for e in g["skip"]] == ["passed"]
+        assert [e["text"] for e in g["down"]] == ["rejected"]
+
     def test_title_and_text_joined(self):
         row = _row("vote", "up")
         row["items"]["title"] = "Title"
@@ -55,6 +61,14 @@ class TestFormatRecord:
         assert "- 👍: y" in out
         assert "👎 (@b): z — reason: \"promo\"" in out
         assert '"revisit"' in out
+        assert "skipped" not in out  # no section without skips
+
+    def test_skips_section(self):
+        group = {"up": [], "down": [], "notes": [],
+                 "skip": [{"text": "passed over", "reason": None, "strength": 1, "author": "c"}]}
+        out = format_record(group)
+        assert "### Skipped as 'seen, not for me'" in out
+        assert "- 😐 (@c): passed over" in out
 
 
 class TestScoringProfile:

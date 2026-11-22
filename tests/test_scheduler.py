@@ -826,3 +826,48 @@ class TestExpandReplyParents:
         claude.filter_tweets.return_value = []
         await c.run_daily_curation()
         twitter.fetch_tweets.assert_not_called()
+
+
+# --- "rest are meh" ---
+
+class TestMeh:
+    def _sent(self, *ids, exploration=()):
+        return [{
+            "item_id": i, "sent_to_telegram": "2026-11-22T01:00:00+00:00",
+            "telegram_message_id": 100 + n, "exploration": i in exploration,
+        } for n, i in enumerate(ids)]
+
+    def test_marks_everything_unengaged_including_exploration(self, curator):
+        from datetime import datetime, timezone
+        curator.db.get_sent_items.return_value = self._sent("a", "b", "x", exploration=("x",))
+        curator.db.get_engaged_ids.return_value = {"a"}
+        curator.db.save_signals.return_value = 2
+
+        since = datetime(2026, 11, 22, 1, tzinfo=timezone.utc)
+        until = datetime(2026, 11, 22, 1, 10, tzinfo=timezone.utc)
+        assert curator.mark_rest_meh(since, until) == 2
+
+        assert curator.db.get_sent_items.call_args[0] == (since.isoformat(), until.isoformat())
+        rows = curator.db.save_signals.call_args[0][0]
+        assert {(r["item_id"], r["value"], r["source"]) for r in rows} == {("b", "skip", "meh"), ("x", "skip", "meh")}
+
+    def test_nothing_sent_writes_nothing(self, curator):
+        from datetime import datetime, timezone
+        curator.db.get_sent_items.return_value = []
+        now = datetime.now(timezone.utc)
+        assert curator.mark_rest_meh(now, now) == 0
+        curator.db.save_signals.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_daily_run_ends_with_footer_when_something_was_sent(self, curator):
+        curator._curate_twitter = AsyncMock(side_effect=lambda stats: stats.__setitem__("sent", 3))
+        curator.telegram.send_digest_footer = AsyncMock()
+        await curator.run_daily_curation()
+        curator.telegram.send_digest_footer.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_no_footer_when_nothing_sent(self, curator):
+        curator._curate_twitter = AsyncMock()
+        curator.telegram.send_digest_footer = AsyncMock()
+        await curator.run_daily_curation()
+        curator.telegram.send_digest_footer.assert_not_awaited()
