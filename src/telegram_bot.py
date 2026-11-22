@@ -7,6 +7,8 @@ import re
 from typing import Callable, Optional
 
 import telegram.error
+from datetime import datetime
+
 from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import (
     Application,
@@ -74,6 +76,7 @@ class TelegramCurator(
         open_callback: Optional[Callable] = None,
         lookup_message_callback: Optional[Callable] = None,
         mark_sent_callback: Optional[Callable] = None,
+        meh_callback: Optional[Callable] = None,
         redirect_base_url: Optional[str] = None,
     ):
         """Initialize Telegram bot.
@@ -106,6 +109,8 @@ class TelegramCurator(
             note_callback: Async function(item_id, text, telegram_message_id) → None
             open_callback: Async function(item_id) → destination URL or None; records the open
             lookup_message_callback: Async function(telegram_message_id) → item dict or None
+            meh_callback: Async function(since, until) → int; marks every unvoted,
+                unopened item sent in that window as skipped ("rest are meh")
             mark_sent_callback: Async function(item_id, telegram_message_id) → None; persists
                 the message id for items sent outside the daily digest
             redirect_base_url: Public base URL for /r/<item_id> tracking links (None = direct links)
@@ -137,6 +142,7 @@ class TelegramCurator(
         self.open_callback = open_callback
         self.lookup_message_callback = lookup_message_callback
         self.mark_sent_callback = mark_sent_callback
+        self.meh_callback = meh_callback
         self.redirect_base_url = redirect_base_url
         self.application: Optional[Application] = None
         self._pending_feedback: dict[str, dict] = {}  # item_id → pending save info
@@ -466,6 +472,22 @@ class TelegramCurator(
         sent_count = sum(1 for _, mid in results if mid)
         logger.info(f"Sent {sent_count} tweets in daily digest")
         return results
+
+    async def send_digest_footer(self, since: datetime, until: datetime) -> None:
+        """Close a run with a one-tap "rest are meh" for everything sent in it."""
+        if not self.application or not self.meh_callback:
+            return
+        text = (
+            "That's everything for this run. Items you don't vote on count as a weak "
+            "skip after a few days; tap below to mark them now instead."
+        )
+        keyboard = InlineKeyboardMarkup([[InlineKeyboardButton(
+            "😐 Rest are meh",
+            callback_data=f"meh:{int(since.timestamp())}:{int(until.timestamp())}",
+        )]])
+        await self.application.bot.send_message(
+            chat_id=self.chat_id, text=text, reply_markup=keyboard,
+        )
 
     def _group_header(self, group: list[dict]) -> str:
         """Header above a multi-tweet group: a thread when one author wrote

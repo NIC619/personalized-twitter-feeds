@@ -551,6 +551,54 @@ class TestVoteButtons:
         assert not await vote_bot._handle_text_signals(update)
 
 
+class TestMeh:
+    @pytest.mark.asyncio
+    async def test_footer_carries_window_in_callback(self, vote_bot):
+        from datetime import datetime, timezone
+        vote_bot.meh_callback = AsyncMock(return_value=2)
+        since = datetime(2026, 11, 22, 1, 0, tzinfo=timezone.utc)
+        until = datetime(2026, 11, 22, 1, 10, tzinfo=timezone.utc)
+
+        await vote_bot.send_digest_footer(since, until)
+
+        markup = vote_bot.application.bot.send_message.call_args[1]["reply_markup"]
+        assert markup.inline_keyboard[0][0].callback_data == f"meh:{int(since.timestamp())}:{int(until.timestamp())}"
+
+    @pytest.mark.asyncio
+    async def test_footer_skipped_without_callback(self, vote_bot):
+        from datetime import datetime, timezone
+        vote_bot.meh_callback = None
+        await vote_bot.send_digest_footer(datetime.now(timezone.utc), datetime.now(timezone.utc))
+        vote_bot.application.bot.send_message.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_press_marks_rest_and_reports_count(self, vote_bot):
+        from datetime import datetime, timezone
+        vote_bot.meh_callback = AsyncMock(return_value=4)
+        update, query = _query("meh:1763773200:1763773800", message_id=900)
+
+        await vote_bot._handle_feedback(update, MagicMock())
+
+        since, until = vote_bot.meh_callback.call_args[0]
+        assert since == datetime.fromtimestamp(1763773200, tz=timezone.utc)
+        assert until == datetime.fromtimestamp(1763773800, tz=timezone.utc)
+        assert "4 unvoted items" in query.edit_message_text.call_args[0][0]
+
+    @pytest.mark.asyncio
+    async def test_press_with_nothing_left(self, vote_bot):
+        vote_bot.meh_callback = AsyncMock(return_value=0)
+        update, query = _query("meh:1763773200:1763773800", message_id=900)
+        await vote_bot._handle_feedback(update, MagicMock())
+        assert "Nothing left" in query.edit_message_text.call_args[0][0]
+
+    @pytest.mark.asyncio
+    async def test_bad_callback_is_ignored(self, vote_bot):
+        vote_bot.meh_callback = AsyncMock()
+        update, query = _query("meh:oops", message_id=900)
+        await vote_bot._handle_feedback(update, MagicMock())
+        vote_bot.meh_callback.assert_not_awaited()
+
+
 class TestReactions:
     def _reaction_update(self, message_id, new, old, chat_id=12345):
         mr = SimpleNamespace(

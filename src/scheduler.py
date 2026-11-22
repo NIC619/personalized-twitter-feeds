@@ -3,7 +3,7 @@
 import asyncio
 import logging
 import random
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 import schedule
@@ -14,6 +14,7 @@ from src.telegram_bot import TelegramCurator
 from src.content import parent_item_id
 from src.database import DatabaseClient
 from src.embeddings import EmbeddingManager
+from src.skips import pick_skips, skip_signal
 from src.keyword_filter import filter_blocked_keywords
 from src.profile_compiler import ProfileCompiler, scoring_profile
 
@@ -55,6 +56,8 @@ class DailyCurator:
         rag_enabled: bool = True,
         neighbors_per_item: int = 3,
         exploration_per_run: int = 2,
+        skip_after_days: int = 3,
+        skip_window_days: int = 10,
         reply_parent_depth: int = 5,
         profile_source: str = "compiled",
         feed_fetcher=None,
@@ -80,6 +83,9 @@ class DailyCurator:
             rag_enabled: Whether to attach voted neighbours to items for scoring
             neighbors_per_item: Nearest voted neighbours attached to each item
             exploration_per_run: Random below-threshold items sent per run
+            skip_after_days: Days after delivery before an unvoted, unopened
+                item on an engaged digest day gets a ``skip`` signal (0 = off)
+            skip_window_days: How far back skip detection looks
                 (marked 🎲) so recall below the threshold can be measured
             reply_parent_depth: How many levels of replied-to tweets to pull
                 into the batch as items of their own (0 disables)
@@ -109,6 +115,8 @@ class DailyCurator:
         self.rag_enabled = rag_enabled
         self.neighbors_per_item = neighbors_per_item
         self.exploration_per_run = exploration_per_run
+        self.skip_after_days = skip_after_days
+        self.skip_window_days = skip_window_days
         self.reply_parent_depth = reply_parent_depth
         self.profile_source = profile_source
         self.feed_fetcher = feed_fetcher
@@ -135,13 +143,21 @@ class DailyCurator:
         Returns:
             Dict with workflow statistics
         """
+        started = datetime.now(timezone.utc)
         stats = {
             "fetched": 0,
             "filtered": 0,
             "sent": 0,
             "errors": [],
-            "started_at": datetime.now(timezone.utc).isoformat(),
+            "started_at": started.isoformat(),
         }
+
+        # Step 0: silence on earlier digests becomes weak negative votes
+        try:
+            stats["skips_recorded"] = self.record_skips()
+        except Exception as e:
+            logger.error(f"Skip detection failed: {e}", exc_info=True)
+            stats["errors"].append(f"Skip detection error: {e}")
 
         try:
             await self._curate_twitter(stats)
@@ -164,9 +180,57 @@ class DailyCurator:
                 logger.error(f"Inbox processing failed: {e}", exc_info=True)
                 stats["errors"].append(f"Inbox error: {e}")
 
+        # Step 6: one footer with "rest are meh" covering everything sent this run
+        if stats["sent"] or (stats.get("inbox") or {}).get("sent"):
+            try:
+                await self.telegram.send_digest_footer(started, datetime.now(timezone.utc))
+            except Exception as e:
+                logger.warning(f"Digest footer failed: {e}")
+
         stats["completed_at"] = datetime.now(timezone.utc).isoformat()
         logger.info(f"Curation complete: {stats}")
         return stats
+
+    def record_skips(self) -> int:
+        """Mark delivered items the reader never voted on or opened as ``skip``.
+
+        Looks at items sent between ``skip_window_days`` and
+        ``skip_after_days`` ago, on days the reader engaged with the digest
+        (see :mod:`src.skips`). Returns the number of signals written.
+        """
+        if self.skip_after_days <= 0:
+            return 0
+        now = datetime.now(timezone.utc)
+        until = (now - timedelta(days=self.skip_after_days)).isoformat()
+        since = (now - timedelta(days=self.skip_window_days)).isoformat()
+        return self._write_skips(since, until, source="ignored", include_exploration=False)
+
+    def mark_rest_meh(self, since: datetime, until: datetime) -> int:
+        """"Rest are meh": skip every unvoted, unopened item sent in the window."""
+        return self._write_skips(
+            since.isoformat(), until.isoformat(), source="meh", include_exploration=True,
+            require_engaged_day=False,
+        )
+
+    def _write_skips(
+        self, since: str, until: str, source: str,
+        include_exploration: bool, require_engaged_day: bool = True,
+    ) -> int:
+        sent = self.db.get_sent_items(since, until)
+        if not sent:
+            return 0
+        engaged = self.db.get_engaged_ids([i["item_id"] for i in sent])
+        to_mark = pick_skips(
+            sent, engaged, require_engaged_day=require_engaged_day,
+            include_exploration=include_exploration,
+        )
+        written = 0
+        for i in range(0, len(to_mark), 200):
+            batch = to_mark[i : i + 200]
+            written += self.db.save_signals([skip_signal(it, source) for it in batch])
+        if written:
+            logger.info(f"Recorded {written} skip signals ({source}) for {since[:10]}..{until[:10]}")
+        return written
 
     async def _curate_twitter(self, stats: dict) -> None:
         """Steps 1-4: fetch, filter, score, save, send. Mutates ``stats``."""

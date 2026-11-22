@@ -29,6 +29,8 @@ Caveats the numbers inherit from the data:
   and are reported separately once there are enough of them.
 * Downvotes are ~9% of votes, so precision is noisy. AUC is the headline
   number: the probability a random upvote outscores a random downvote.
+  ``skip`` labels (delivered, never voted or opened) are reported as a
+  second AUC (up vs skip) and never counted as downvotes.
 * Neighbour lookup excludes the item itself, but neighbours voted *after*
   the item still leak a little future information.
 """
@@ -89,6 +91,7 @@ def summarize(rows: list[dict], threshold: int) -> dict:
     rows = [r for r in rows if r.get("score") is not None]
     ups = [r["score"] for r in rows if r["vote"] == "up"]
     downs = [r["score"] for r in rows if r["vote"] == "down"]
+    skips = [r["score"] for r in rows if r["vote"] == "skip"]
 
     bands = []
     for lo, hi in BANDS:
@@ -118,7 +121,10 @@ def summarize(rows: list[dict], threshold: int) -> dict:
         "n": len(rows),
         "n_up": len(ups),
         "n_down": len(downs),
+        "n_skip": len(skips),
         "auc": auc(ups, downs),
+        "auc_skip": auc(ups, skips),
+        "mean_skip": statistics.mean(skips) if skips else None,
         "mean_up": statistics.mean(ups) if ups else None,
         "mean_down": statistics.mean(downs) if downs else None,
         "at_threshold": metrics_at(rows, threshold),
@@ -261,7 +267,7 @@ def format_report(runs: list[dict], threshold: int) -> str:
     lines.append("")
     for label, s, cfg in summaries:
         desc = ", ".join(f"{k}={v}" for k, v in cfg.items() if k in ("model", "rag", "k", "profile_file") and v is not None)
-        lines.append(f"  {label}: {desc}  (n={s['n']}, up={s['n_up']}, down={s['n_down']})")
+        lines.append(f"  {label}: {desc}  (n={s['n']}, up={s['n_up']}, down={s['n_down']}, skip={s['n_skip']})")
     lines.append("")
 
     header = f"{'metric':<22}" + "".join(f"{l[:14]:>15}" for l, _, _ in summaries)
@@ -271,9 +277,11 @@ def format_report(runs: list[dict], threshold: int) -> str:
     def row(name, getter, fmt):
         lines.append(f"{name:<22}" + "".join(f"{fmt(getter(s)):>15}" for _, s, _ in summaries))
 
-    row("AUC", lambda s: s["auc"], lambda v: "  -  " if v is None else f"{v:.3f}")
+    row("AUC (up vs down)", lambda s: s["auc"], lambda v: "  -  " if v is None else f"{v:.3f}")
+    row("AUC (up vs skip)", lambda s: s["auc_skip"], lambda v: "  -  " if v is None else f"{v:.3f}")
     row("mean score (up)", lambda s: s["mean_up"], _num)
     row("mean score (down)", lambda s: s["mean_down"], _num)
+    row("mean score (skip)", lambda s: s["mean_skip"], _num)
     row(f"recall @{threshold}", lambda s: s["at_threshold"]["recall"], _pct)
     row(f"downs blocked @{threshold}", lambda s: s["at_threshold"]["down_blocked"], _pct)
     row(f"precision @{threshold}", lambda s: s["at_threshold"]["precision"], _pct)

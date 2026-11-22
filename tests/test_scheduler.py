@@ -826,3 +826,74 @@ class TestExpandReplyParents:
         claude.filter_tweets.return_value = []
         await c.run_daily_curation()
         twitter.fetch_tweets.assert_not_called()
+
+
+# --- skips: silence as a weak negative ---
+
+class TestSkips:
+    def _sent(self, *ids, day=18, exploration=()):
+        return [{
+            "item_id": i, "sent_to_telegram": f"2026-11-{day:02d}T01:00:00+00:00",
+            "telegram_message_id": 100 + n, "exploration": i in exploration,
+        } for n, i in enumerate(ids)]
+
+    def test_record_skips_writes_ignored_signals(self, curator):
+        curator.db.get_sent_items.return_value = self._sent("a", "b", "x", exploration=("x",))
+        curator.db.get_engaged_ids.return_value = {"a"}
+        curator.db.save_signals.return_value = 1
+
+        assert curator.record_skips() == 1
+
+        since, until = curator.db.get_sent_items.call_args[0]
+        assert since < until  # window ends skip_after_days ago
+        rows = curator.db.save_signals.call_args[0][0]
+        assert [(r["item_id"], r["value"], r["source"]) for r in rows] == [("b", "skip", "ignored")]
+
+    def test_record_skips_disabled(self, components):
+        twitter, claude, telegram, db = components
+        curator = DailyCurator(
+            twitter=twitter, claude=claude, telegram=telegram, db=db,
+            filter_threshold=70, favorite_threshold_offset=20,
+            muted_threshold_offset=15, skip_after_days=0,
+        )
+        assert curator.record_skips() == 0
+        db.get_sent_items.assert_not_called()
+
+    def test_meh_marks_everything_unengaged_including_exploration(self, curator):
+        from datetime import datetime, timezone
+        curator.db.get_sent_items.return_value = self._sent("a", "b", "x", exploration=("x",))
+        curator.db.get_engaged_ids.return_value = {"a"}
+        curator.db.save_signals.return_value = 2
+
+        since = datetime(2026, 11, 22, 1, tzinfo=timezone.utc)
+        until = datetime(2026, 11, 22, 1, 10, tzinfo=timezone.utc)
+        assert curator.mark_rest_meh(since, until) == 2
+
+        assert curator.db.get_sent_items.call_args[0] == (since.isoformat(), until.isoformat())
+        rows = curator.db.save_signals.call_args[0][0]
+        assert {(r["item_id"], r["source"]) for r in rows} == {("b", "meh"), ("x", "meh")}
+
+    def test_nothing_sent_writes_nothing(self, curator):
+        curator.db.get_sent_items.return_value = []
+        assert curator.record_skips() == 0
+        curator.db.save_signals.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_daily_run_records_skips_and_sends_footer(self, curator):
+        curator.db.get_sent_items.return_value = []
+        curator.twitter.get_timeline_tweets = AsyncMock(return_value=[])
+        curator._curate_twitter = AsyncMock(side_effect=lambda stats: stats.__setitem__("sent", 3))
+        curator.telegram.send_digest_footer = AsyncMock()
+
+        stats = await curator.run_daily_curation()
+
+        assert stats["skips_recorded"] == 0
+        curator.telegram.send_digest_footer.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_no_footer_when_nothing_sent(self, curator):
+        curator.db.get_sent_items.return_value = []
+        curator._curate_twitter = AsyncMock()
+        curator.telegram.send_digest_footer = AsyncMock()
+        await curator.run_daily_curation()
+        curator.telegram.send_digest_footer.assert_not_awaited()

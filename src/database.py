@@ -329,7 +329,7 @@ class DatabaseClient:
                 self.client.table("signals")
                 .select(select)
                 .eq("kind", "vote")
-                .in_("value", ["up", "down"])
+                .in_("value", ["up", "down", "skip"])
                 .order("created_at")
                 .order("id")  # imports share timestamps; keep page boundaries stable
                 .range(offset, offset + page_size - 1)
@@ -402,36 +402,81 @@ class DatabaseClient:
             raise
 
     def get_voted_ids(self, item_ids: list[str], chunk_size: int = 200, page_size: int = 1000) -> set[str]:
-        """Subset of ``item_ids`` that already carry at least one vote signal.
+        """Subset of ``item_ids`` that already carry an explicit vote (up/down)."""
+        return self.get_signal_item_ids(item_ids, kinds=["vote"], values=["up", "down"],
+                                        chunk_size=chunk_size, page_size=page_size)
 
-        An item can have many votes, so each chunk is paginated past
+    def get_engaged_ids(self, item_ids: list[str], chunk_size: int = 200, page_size: int = 1000) -> set[str]:
+        """Subset of ``item_ids`` the reader reacted to in any way: any vote
+        (up, down or an earlier skip) or an open. Used for skip detection."""
+        return self.get_signal_item_ids(item_ids, kinds=["vote", "open"], values=None,
+                                        chunk_size=chunk_size, page_size=page_size)
+
+    def get_signal_item_ids(
+        self, item_ids: list[str], kinds: list[str], values: Optional[list[str]] = None,
+        chunk_size: int = 200, page_size: int = 1000,
+    ) -> set[str]:
+        """Subset of ``item_ids`` with at least one signal of the given kinds
+        (and values, when given).
+
+        An item can have many signals, so each chunk is paginated past
         PostgREST's row cap.
         """
-        voted: set[str] = set()
+        found: set[str] = set()
         ids = list(dict.fromkeys(item_ids))
         for i in range(0, len(ids), chunk_size):
             chunk = ids[i : i + chunk_size]
             offset = 0
             while True:
                 try:
-                    result = (
+                    query = (
                         self.client.table("signals")
                         .select("item_id")
-                        .eq("kind", "vote")
+                        .in_("kind", kinds)
                         .in_("item_id", chunk)
-                        .order("id")
-                        .range(offset, offset + page_size - 1)
-                        .execute()
                     )
+                    if values:
+                        query = query.in_("value", values)
+                    result = query.order("id").range(offset, offset + page_size - 1).execute()
                 except Exception as e:
-                    logger.error(f"Error checking voted ids: {e}")
+                    logger.error(f"Error checking signals for ids: {e}")
                     raise
                 page = result.data or []
-                voted.update(row["item_id"] for row in page)
+                found.update(row["item_id"] for row in page)
                 if len(page) < page_size:
                     break
                 offset += page_size
-        return voted
+        return found
+
+    def get_sent_items(self, since: str, until: str, page_size: int = 1000) -> list[dict]:
+        """Items delivered to Telegram in [since, until] (ISO timestamps), oldest first.
+
+        Returns only what skip detection needs: item_id, sent_to_telegram,
+        telegram_message_id, exploration.
+        """
+        rows: list[dict] = []
+        offset = 0
+        while True:
+            try:
+                result = (
+                    self.client.table("items")
+                    .select("item_id,sent_to_telegram,telegram_message_id,exploration")
+                    .gte("sent_to_telegram", since)
+                    .lte("sent_to_telegram", until)
+                    .order("sent_to_telegram")
+                    .order("item_id")
+                    .range(offset, offset + page_size - 1)
+                    .execute()
+                )
+            except Exception as e:
+                logger.error(f"Error loading sent items: {e}")
+                raise
+            page = result.data or []
+            rows.extend(page)
+            if len(page) < page_size:
+                break
+            offset += page_size
+        return rows
 
     RETWEETER_WEIGHT = 0.5  # curation credit for sharing a tweet you voted on
 

@@ -124,7 +124,7 @@ AS $$
     WITH latest_vote AS (
         SELECT DISTINCT ON (s.item_id) s.item_id, s.value, s.strength, s.reason
         FROM public.signals s
-        WHERE s.kind = 'vote' AND s.value IN ('up', 'down')
+        WHERE s.kind = 'vote' AND s.value IN ('up', 'down', 'skip')
         ORDER BY s.item_id, s.created_at DESC
     )
     SELECT
@@ -149,7 +149,7 @@ WITH (security_invoker = true) AS
 SELECT DISTINCT ON (s.item_id)
     s.item_id, s.value AS vote, s.strength, s.reason, s.source, s.created_at AS voted_at
 FROM public.signals s
-WHERE s.kind = 'vote' AND s.value IN ('up', 'down')
+WHERE s.kind = 'vote' AND s.value IN ('up', 'down', 'skip')
 ORDER BY s.item_id, s.created_at DESC;
 
 -- ------------------------------------------------------------ authors
