@@ -1,66 +1,29 @@
-"""Silence as a weak negative: which delivered items count as skipped.
+"""Skips: "seen it, not for me", recorded only on the reader's explicit action.
 
 Upvotes dominate explicit votes (~90%), so the scorer rarely sees examples
-of on-topic items the reader did not care about. An item that was sent,
-never voted on and never opened is such an example. This module decides
-which of those become ``skip`` signals; the scheduler records them.
+of on-topic items the reader did not care about. A ``skip`` vote is that
+example: weaker than ``down`` in the scoring prompt and the compiled
+profile. It is never inferred from silence; the reader records it by:
 
-Two sources write ``skip``:
-
-* ``ignored``: automatic, a few days after delivery, only for digest days
-  the reader engaged with (voted on or opened at least one item that day),
-  so a day the digest was never read adds nothing. Exploration items are
-  left out: nobody is expected to answer every 🎲.
-* ``meh``: the reader tapped "rest are meh" under a digest. Deliberate, so
-  it covers every unvoted item of that digest, exploration included.
+* the 😐 button (or a 😐 / 🤷 reaction) on one item → ``source=button`` /
+  ``reaction``, like any other vote;
+* "😐 Rest are meh" under a run → every item sent in that run with no vote
+  and no open gets ``source=meh`` (this module picks them).
 
 A later real vote on the item wins (latest vote per item everywhere).
 """
 
-from datetime import datetime, timezone
-from typing import Iterable, Optional
+from typing import Iterable
 
 
-def _sent_day(item: dict) -> Optional[str]:
-    raw = item.get("sent_to_telegram")
-    if not raw:
-        return None
-    if isinstance(raw, datetime):
-        return raw.astimezone(timezone.utc).date().isoformat()
-    return str(raw)[:10]
-
-
-def pick_skips(
-    sent_items: Iterable[dict],
-    engaged_ids: set[str],
-    require_engaged_day: bool = True,
-    include_exploration: bool = False,
-) -> list[dict]:
-    """Delivered items that should get a ``skip`` signal.
+def pick_skips(sent_items: Iterable[dict], engaged_ids: set[str]) -> list[dict]:
+    """Delivered items with no vote and no open, in input order.
 
     Args:
-        sent_items: rows with item_id, sent_to_telegram, exploration,
-            telegram_message_id
+        sent_items: rows with item_id, telegram_message_id (and anything else)
         engaged_ids: ids that carry a vote (any value) or an open
-        require_engaged_day: only mark items from days the reader engaged
-            with (by the UTC date of ``sent_to_telegram``)
-        include_exploration: also mark 🎲 items
-
-    Returns:
-        The rows to mark, in input order.
     """
-    items = [i for i in sent_items if i.get("item_id") and _sent_day(i)]
-    engaged_days = {_sent_day(i) for i in items if i["item_id"] in engaged_ids}
-    out = []
-    for item in items:
-        if item["item_id"] in engaged_ids:
-            continue
-        if item.get("exploration") and not include_exploration:
-            continue
-        if require_engaged_day and _sent_day(item) not in engaged_days:
-            continue
-        out.append(item)
-    return out
+    return [i for i in sent_items if i.get("item_id") and i["item_id"] not in engaged_ids]
 
 
 def skip_signal(item: dict, source: str) -> dict:

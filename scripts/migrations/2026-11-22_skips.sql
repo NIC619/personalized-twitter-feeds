@@ -1,8 +1,8 @@
--- Skips: silence as a weak negative vote.
+-- Skips: an explicit "seen, not for me" vote, weaker than down.
 --
--- Adds value 'skip' to vote signals (source 'ignored' = delivered, never
--- voted or opened, on a day the reader engaged with the digest; source
--- 'meh' = the reader tapped "rest are meh"). The neighbour RPC and the
+-- Adds value 'skip' to vote signals (the 😐 button or reaction on an item;
+-- source 'meh' = the reader tapped "rest are meh" under a run, which skips
+-- every unvoted, unopened item of that run). The neighbour RPC and the
 -- latest-vote view now include skips so the scorer and the eval see them.
 -- A later real vote on the same item still wins (latest per item).
 
@@ -52,6 +52,6 @@ FROM public.signals s
 WHERE s.kind = 'vote' AND s.value IN ('up', 'down', 'skip')
 ORDER BY s.item_id, s.created_at DESC;
 
--- Lookups by delivery time (skip detection reads a window of sent items)
+-- Lookups by delivery time ("rest are meh" reads the run's sent items)
 CREATE INDEX IF NOT EXISTS idx_items_sent_to_telegram
     ON public.items(sent_to_telegram) WHERE sent_to_telegram IS NOT NULL;

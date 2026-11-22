@@ -372,17 +372,16 @@ personalized-twitter-feeds/
 | Table | Holds |
 | --- | --- |
 | `items` | Anything from any source: tweets, articles, forwarded posts, notes, imports. Carries the LLM-assigned `domain`, score, and delivery state. |
-| `signals` | Every preference event: `vote` (up/down/skip, strength 1 or 2, reason), `note`, `open`. With `source` (button, reaction, like_cmd, reply, redirect, telegram, import:x, agent, ignored, meh). |
+| `signals` | Every preference event: `vote` (up/down/skip, strength 1 or 2, reason), `note`, `open`. With `source` (button, reaction, like_cmd, reply, redirect, telegram, import:x, agent, meh). |
 | `item_embeddings` | pgvector embeddings for voted items, used for per-item neighbours and `search_liked`. |
 | `preference_profiles` | Versioned compiled Markdown profiles per domain plus `overall`. |
 
 ### Daily run
-0. **Skips**: Items sent 3+ days ago that you never voted on or opened become weak `skip` votes, on days you engaged with the digest (`SKIP_AFTER_DAYS`; migration `scripts/migrations/2026-11-22_skips.sql` for existing deployments)
 1. **Fetch**: Pulls tweets from your home timeline (last 24 hours) plus starred authors' timelines. Retweets are recorded as the original tweet (the retweeter is credited separately). Replies pull in the tweets they answer, up to `REPLY_PARENT_DEPTH` levels, as items of their own
 2. **Pre-filter**: Blocked keywords are dropped before scoring
 3. **Neighbours**: Each tweet is embedded and its 3 most similar past votes are looked up in pgvector
 4. **Score**: Claude scores each tweet 0-100 against the compiled profile, seeing each tweet's own past-vote neighbours, and tags its domain
-5. **Send**: Tweets at or above the threshold (per-author tiers apply) go to Telegram, plus 2 random below-threshold items marked 🎲 (exploration); the run ends with a **😐 Rest are meh** button that skips everything you did not vote on
+5. **Send**: Tweets at or above the threshold (per-author tiers apply) go to Telegram, plus 2 random below-threshold items marked 🎲 (exploration); the run ends with a **😐 Rest are meh** button that skips everything you did not vote on (migration `scripts/migrations/2026-11-22_skips.sql` for existing deployments)
 6. **Store**: Every scored item is saved; every vote, reaction, reason, note and link open becomes a signal
 7. **Learn**: Signals feed neighbours immediately and the compiled profile weekly; the eval script measures the effect
 
@@ -447,11 +446,11 @@ The choices below reflect how I personally want this tool to behave. They are no
 
 ### Feedback capture
 
-- **Three ways to vote, lowest friction first**: react to the message with an emoji (🔥 strong like, 👍 / ❤️ like, 👎 skip; remove the reaction to retract), tap the 🔥 👍 👎 buttons, or `/like` a URL. Reactions save immediately; buttons keep a 10-second undo.
+- **Three ways to vote, lowest friction first**: react to the message with an emoji (🔥 strong like, 👍 / ❤️ like, 👎 dislike, 😐 / 🤷 skip; remove the reaction to retract), tap the 🔥 👍 👎 😐 buttons, or `/like` a URL. Reactions save immediately; buttons keep a 10-second undo.
 - **The model proposes the reason, you confirm it.** After every vote the bot replies with a one-line guess ("Liked because: concrete preconf economics?") and ✅ / ✏️ / skip. Free text beats fixed categories, and it is what the compiled profile is built from. The old eight reason buttons are gone; their labels survive as reason text on past votes.
 - **Reply to any item to attach a note.**
 - **Opens are tracked.** In production, item links go through `/r/<item_id>` on the bot's own web server, which records an `open` signal and redirects. Set `REDIRECT_BASE_URL` to override (defaults to `WEBHOOK_URL`); links stay direct in `DEVELOPMENT_MODE`.
-- **Silence is a weak skip.** Upvotes are ~90% of explicit votes, so the scorer would otherwise rarely see on-topic items you did not care about. An item that was sent, never voted on and never opened becomes a `skip` vote after `SKIP_AFTER_DAYS` (default 3), but only for digest days you engaged with (voted on or opened at least one item), so an unread day adds nothing; 🎲 items are left out. Each run ends with a **😐 Rest are meh** button that does the same immediately and deliberately for that run (🎲 included). A skip is weaker than 👎 in the scoring prompt and the compiled profile, and any later vote on the item overrides it.
+- **😐 means "seen, not for me".** Upvotes are ~90% of votes, so the scorer would otherwise rarely see on-topic items you did not care about, and 👎 feels too harsh for most of them. Every item has a 😐 button (or react with 😐 / 🤷); it records a `skip` vote, weaker than 👎 in the scoring prompt and the compiled profile, with no reason prompt. Each run ends with a **😐 Rest are meh** button that skips every item of that run you did not vote on or open (🎲 included). Nothing is ever inferred from silence: an item you never touch stays unlabelled. A later vote on a skipped item overrides it.
 - **Everything lands in the `signals` table** (`kind`: vote / note / open, with `strength`, `reason`, `source`). Votes are also still written to the legacy `feedback` table until phase 3 moves reads over.
 
 ### Feedback & RAG

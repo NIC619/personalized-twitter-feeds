@@ -470,8 +470,6 @@ def init_components(settings, num_tweets=None, hours=None):
         rag_enabled=settings.rag_enabled,
         neighbors_per_item=settings.rag_similarity_limit,
         exploration_per_run=settings.exploration_per_run,
-        skip_after_days=settings.skip_after_days,
-        skip_window_days=settings.skip_window_days,
         reply_parent_depth=settings.reply_parent_depth,
         profile_source=settings.profile_source,
         feed_fetcher=feed_fetcher,

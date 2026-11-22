@@ -41,7 +41,6 @@ This project deploys as a single always-on **Web** service on Railway. One proce
 - `FAVORITE_THRESHOLD_OFFSET`, `MUTED_THRESHOLD_OFFSET`, `STARRED_AUTHOR_MAX_TWEETS`
 - `RAG_ENABLED`, `EMBEDDING_MODEL`, `RAG_SIMILARITY_LIMIT` (neighbours per item)
 - `EXPLORATION_PER_RUN`, `CLAUDE_MODEL`
-- `SKIP_AFTER_DAYS` (default `3`, `0` disables), `SKIP_WINDOW_DAYS` (default `10`) — silence as a weak `skip` vote
 - `FEED_MAX_ENTRIES_PER_RUN` (default `10`)
 - `EMAIL_IMAP_HOST`, `EMAIL_IMAP_USER`, `EMAIL_IMAP_PASSWORD` (all three enable newsletter email ingestion), `EMAIL_IMAP_FOLDER` (default `INBOX`), `EMAIL_MAX_PER_RUN` (default `10`), `EMAIL_DELETE_PROCESSED` (default `false`)
 - `PROFILE_SOURCE` (default `compiled`), `PROFILE_COMPILE_WEEKDAY` (default `sunday`, runs at `SCHEDULE_HOUR`:30)

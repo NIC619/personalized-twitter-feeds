@@ -20,18 +20,23 @@ REACTION_VOTES: dict[str, tuple[str, int]] = {
     "👎": ("down", 1),
     "💩": ("down", 1),
     "🤮": ("down", 1),
+    "😐": ("skip", 1),
+    "🤷": ("skip", 1),
+    "🤷‍♂️": ("skip", 1),
+    "🤷‍♀️": ("skip", 1),
 }
 
 STRONG_LABEL = "🔥"
 UP_LABEL = "👍"
 DOWN_LABEL = "👎"
+SKIP_LABEL = "😐"
 QUOTED_LABEL = "💬 Vote quoted tweet"
 PARENT_LABEL = "↩️ Vote parent tweet"
 
 
 @dataclass(frozen=True)
 class Vote:
-    vote: str          # 'up' | 'down'
+    vote: str          # 'up' | 'down' | 'skip' (seen, not for me: weaker than down)
     strength: int = 1  # 1 normal, 2 strong
 
 
@@ -71,6 +76,8 @@ def vote_from_reaction_set(reactions) -> Optional[Vote]:
 def vote_label(vote: Vote) -> str:
     if vote.vote == "down":
         return DOWN_LABEL
+    if vote.vote == "skip":
+        return SKIP_LABEL
     return STRONG_LABEL if vote.strength >= 2 else UP_LABEL
 
 
@@ -98,13 +105,14 @@ def vote_buttons(
     quoted_id: Optional[str] = None,
     parent_id: Optional[str] = None,
 ) -> InlineKeyboardMarkup:
-    """Default keyboard under a sent item: 🔥 👍 👎 + author controls,
+    """Default keyboard under a sent item: 🔥 👍 👎 😐 + author controls,
     plus rows to pull up the quoted tweet / the tweet it replies to for
     their own votes when there are any (both use the ``qt:`` callback)."""
     rows = [[
         InlineKeyboardButton(STRONG_LABEL, callback_data=f"vote:{item_id}:up:2"),
         InlineKeyboardButton(UP_LABEL, callback_data=f"vote:{item_id}:up:1"),
         InlineKeyboardButton(DOWN_LABEL, callback_data=f"vote:{item_id}:down:1"),
+        InlineKeyboardButton(SKIP_LABEL, callback_data=f"vote:{item_id}:skip:1"),
     ]]
     if username:
         rows.append([
@@ -127,12 +135,12 @@ def voted_buttons(item_id: str, vote: Vote, undo: bool) -> InlineKeyboardMarkup:
 
 
 def parse_vote_callback(data: str) -> Optional[tuple[str, Vote]]:
-    """Parse 'vote:{item_id}:{up|down}[:{strength}]' → (item_id, Vote)."""
+    """Parse 'vote:{item_id}:{up|down|skip}[:{strength}]' → (item_id, Vote)."""
     parts = data.split(":")
     if len(parts) not in (3, 4) or parts[0] != "vote":
         return None
     vote = parts[2]
-    if vote not in ("up", "down"):
+    if vote not in ("up", "down", "skip"):
         return None
     strength = 1
     if len(parts) == 4:
@@ -140,7 +148,7 @@ def parse_vote_callback(data: str) -> Optional[tuple[str, Vote]]:
             strength = max(1, min(2, int(parts[3])))
         except ValueError:
             return None
-    if vote == "down":
+    if vote in ("down", "skip"):
         strength = 1
     return parts[1], Vote(vote, strength)
 

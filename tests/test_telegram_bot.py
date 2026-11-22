@@ -551,6 +551,36 @@ class TestVoteButtons:
         assert not await vote_bot._handle_text_signals(update)
 
 
+class TestSkipVote:
+    @pytest.mark.asyncio
+    async def test_skip_button_saves_vote_without_reason_prompt(self, vote_bot):
+        update, query = _query("vote:42:skip:1", message_id=100)
+        await vote_bot._handle_feedback(update, MagicMock())
+        await _settle(vote_bot)
+
+        # Undo grace like any button vote, 😐 label, and no reason proposal
+        row = query.edit_message_reply_markup.call_args[1]["reply_markup"].inline_keyboard[0]
+        assert row[0].text == "😐" and row[1].callback_data == "undo:42"
+        assert vote_bot._item_votes["42"] == Vote("skip", 1)
+        vote_bot.reason_callback.assert_not_awaited()
+        vote_bot.application.bot.send_message.assert_not_awaited()
+        vote_bot._pending_feedback["42"]["task"].cancel()
+
+    @pytest.mark.asyncio
+    async def test_skip_reaction(self, vote_bot):
+        vote_bot._message_items[100] = "42"
+        mr = SimpleNamespace(
+            chat=SimpleNamespace(id=12345), message_id=100,
+            new_reaction=[SimpleNamespace(emoji="😐")], old_reaction=[],
+        )
+        update = MagicMock(); update.message_reaction = mr
+        await vote_bot._handle_reaction(update, MagicMock())
+        await _settle(vote_bot)
+        kwargs = vote_bot.feedback_callback.call_args[1]
+        assert (kwargs["vote"], kwargs["source"]) == ("skip", "reaction")
+        vote_bot.reason_callback.assert_not_awaited()
+
+
 class TestMeh:
     @pytest.mark.asyncio
     async def test_footer_carries_window_in_callback(self, vote_bot):
@@ -858,6 +888,7 @@ class TestQuotedTweetVote:
         rows = kwargs["reply_markup"].inline_keyboard
         assert [b.callback_data for b in rows[0]] == [
             "vote:888999000:up:2", "vote:888999000:up:1", "vote:888999000:down:1",
+            "vote:888999000:skip:1",
         ]
         assert rows[1][0].callback_data == "fav:vitalikbuterin:888999000"
         # No vote is recorded until the user taps one on the new message

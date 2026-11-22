@@ -76,7 +76,7 @@ Domains: {domains}
 {profile}
 
 ## How to use past votes
-Some items include `similar_past_votes`: the reader's most similar past votes, with cosine similarity. Treat them as the strongest evidence you have. An item close to upvoted content should score high even if the profile is vague about it; an item close to downvoted content should score low even if it keyword-matches the profile. A `skip` vote means the item was delivered and the reader neither voted on nor opened it: weaker than `down`, but several skips near an item are good evidence it is on-topic yet not worth their time. Ignore neighbours with similarity below 0.5.
+Some items include `similar_past_votes`: the reader's most similar past votes, with cosine similarity. Treat them as the strongest evidence you have. An item close to upvoted content should score high even if the profile is vague about it; an item close to downvoted content should score low even if it keyword-matches the profile. A `skip` vote means the reader saw the item and marked it "not for me" without disliking it: weaker than `down`, but several skips near an item are good evidence it is on-topic yet not worth their time. Ignore neighbours with similarity below 0.5.
 
 ## Replies and the tweets they answer
 A reply carries `reply_to` (the tweet it answers) as context only: score the reply's own content, not the parent's. A tweet carrying `replied_by` was answered by those authors from the reader's timeline; it is scored on its own merits, the replies being mild evidence that people the reader follows found it worth engaging with.

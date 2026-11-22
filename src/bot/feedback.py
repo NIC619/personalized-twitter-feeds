@@ -371,7 +371,8 @@ class FeedbackMixin:
         else:
             await _save(0)
 
-        if reason:
+        if reason or vote.vote == "skip":
+            # A skip is "not for me", nothing to explain.
             return
         # Proposals call the model (seconds). Run them off the update
         # handler so an Undo tapped meanwhile is processed in time.

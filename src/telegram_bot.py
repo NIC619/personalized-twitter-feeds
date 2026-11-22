@@ -478,8 +478,8 @@ class TelegramCurator(
         if not self.application or not self.meh_callback:
             return
         text = (
-            "That's everything for this run. Items you don't vote on count as a weak "
-            "skip after a few days; tap below to mark them now instead."
+            "That's everything for this run. Tap below to mark every item you did not "
+            "vote on or open as 😐 (seen, not for me)."
         )
         keyboard = InlineKeyboardMarkup([[InlineKeyboardButton(
             "😐 Rest are meh",

@@ -48,17 +48,6 @@ class Settings(BaseSettings):
         description="Number of random below-threshold items to send per run for recall measurement",
     )
 
-    # Silence as a weak negative: an item sent, never voted on and never
-    # opened, on a day you engaged with the digest, gets a 'skip' vote.
-    skip_after_days: int = Field(
-        default=3,
-        description="Days after delivery before unvoted, unopened items become skip signals (0 disables)",
-    )
-    skip_window_days: int = Field(
-        default=10,
-        description="How far back skip detection looks each run",
-    )
-
     # Replies pull the tweets they answer into the batch as items of their
     # own (scored and voted independently), up to this many levels up.
     reply_parent_depth: int = Field(

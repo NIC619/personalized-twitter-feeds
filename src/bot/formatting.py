@@ -221,7 +221,7 @@ class FormattingMixin:
         quoted_id: Optional[str] = None,
         parent_id: Optional[str] = None,
     ) -> InlineKeyboardMarkup:
-        """Vote row (🔥 👍 👎) plus author controls when a username is known,
+        """Vote row (🔥 👍 👎 😐) plus author controls when a username is known,
         plus "vote the quoted tweet" / "vote the parent tweet" rows when
         ``quoted_id`` / ``parent_id`` are given."""
         return vote_buttons(

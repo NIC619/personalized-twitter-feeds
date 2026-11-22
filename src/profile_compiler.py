@@ -26,7 +26,7 @@ MIN_VOTES_FOR_DOMAIN = 8
 SCORING_PROFILE_BUDGET = 7000
 
 
-PROFILE_PROMPT = """You maintain a preference profile for one reader. Below is their voting record in the domain "{domain}": items they upvoted (🔥 = strongly), items they downvoted, items that were delivered but they neither voted on nor opened (weak evidence of "not worth my time"), their own stated reasons, and free-text notes. Write the profile section for this domain in Markdown.
+PROFILE_PROMPT = """You maintain a preference profile for one reader. Below is their voting record in the domain "{domain}": items they upvoted (🔥 = strongly), items they downvoted, items they marked 😐 "seen, not for me" (weaker than a downvote), their own stated reasons, and free-text notes. Write the profile section for this domain in Markdown.
 
 Requirements:
 - Write in second person ("You want…", "You skip…"), concrete and specific. Name sub-topics, angles, formats, authors and tells. Prefer "deep dives that quantify X" over "technical content".
@@ -118,7 +118,7 @@ def format_record(group: dict) -> str:
         lines.append(f"- 👎{author}: {_one_line(e['text'])}{reason}")
     if skips:
         lines.append("")
-        lines.append(f"### Delivered but skipped, neither voted nor opened ({len(group['skip'])} total, showing {len(skips)})")
+        lines.append(f"### Skipped as 'seen, not for me' ({len(group['skip'])} total, showing {len(skips)})")
         for e in skips:
             author = f" (@{e['author']})" if e.get("author") else ""
             lines.append(f"- 😐{author}: {_one_line(e['text'])}")
